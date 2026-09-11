@@ -1,4 +1,4 @@
-RK KANCELARIA 0.2.0-dev3 — TRUE PORTABLE
+RK KANCELARIA 0.2.0-dev7 — WORKFLOW & TRUE PORTABLE
 
 CEL
 Gotowy build działa na Windows x64 bez zainstalowanego Pythona, pip i bibliotek.

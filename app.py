@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RK KANCELARIA 0.2.0-dev6 — DATA SAFETY & ACTIVITY DETAILS.
+"""RK KANCELARIA 0.2.0-dev7 — WORKFLOW & DEADLINES.
 
 Rozwój stabilnej 0.15.2: centralne ścieżki i fundament trybu Installed/Portable.
 Funkcje kancelaryjne, dokumenty, backup/recovery i Desktop pozostają zgodne z 0.15.2.
@@ -34,7 +34,7 @@ import uuid
 import ctypes
 from ctypes import wintypes
 import xml.etree.ElementTree as ET
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from http import HTTPStatus
@@ -48,8 +48,8 @@ from rk_paths import resolve_runtime_paths, installed_data_dir
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.2.0-dev6"
-SCHEMA_VERSION = 210
+VERSION = "0.2.0-dev7"
+SCHEMA_VERSION = 220
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
 APP_MODE = RUNTIME_PATHS.mode
@@ -1104,13 +1104,26 @@ def init_db() -> None:
         })
         ensure_columns("parties", {"created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''", "created_at": "TEXT DEFAULT ''"})
         ensure_columns("events", {"created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''"})
-        ensure_columns("tasks", {"created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''", "assigned_user_id": "INTEGER"})
+        ensure_columns("tasks", {
+            "created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''", "assigned_user_id": "INTEGER",
+            "deadline_base_date": "TEXT DEFAULT ''", "deadline_days": "INTEGER", "deadline_rule": "TEXT DEFAULT ''",
+            "deadline_source": "TEXT DEFAULT ''", "deadline_manual": "INTEGER NOT NULL DEFAULT 0"
+        })
         ensure_columns("documents", {"received_date": "TEXT DEFAULT ''", "created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''", "file_hash": "TEXT DEFAULT ''", "extracted_text": "TEXT DEFAULT ''", "indexed_at": "TEXT DEFAULT ''", "doc_status": "TEXT DEFAULT 'Aktywny'", "ocr_used": "INTEGER NOT NULL DEFAULT 0", "ocr_status": "TEXT DEFAULT ''", "ocr_language": "TEXT DEFAULT ''"})
         ensure_columns("cases", {"closed_edit_unlocked": "INTEGER NOT NULL DEFAULT 0"})
         ensure_columns("parties", {"entity_id": "INTEGER"})
         ensure_columns("case_relations", {"note": "TEXT DEFAULT ''", "created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''"})
         ensure_columns("case_notes", {"author": "TEXT DEFAULT ''", "created_at": "TEXT DEFAULT ''"})
         ensure_columns("users", {"function": "TEXT NOT NULL DEFAULT ''"})
+
+        con.execute("""CREATE TABLE IF NOT EXISTS saved_views (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            target TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id,name)
+        )""")
 
         # HOTFIX 0.12.13: wersja 0.13 używała w audit_log nazw actor/details,
         # podczas gdy stabilna gałąź 0.12 używa author/description. Ponieważ DATA_DIR
@@ -1373,6 +1386,75 @@ def fmt_date(s: str) -> str:
         return datetime.strptime(s, "%Y-%m-%d").strftime("%d.%m.%Y")
     except Exception:
         return esc(s)
+
+
+
+def _easter_sunday(year: int) -> date:
+    """Meeus/Jones/Butcher algorithm for Gregorian Easter."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def polish_statutory_holidays(year: int) -> set[date]:
+    easter = _easter_sunday(year)
+    return {
+        date(year,1,1), date(year,1,6),
+        easter, easter + timedelta(days=1),
+        date(year,5,1), date(year,5,3),
+        easter + timedelta(days=49),  # Zielone Świątki
+        easter + timedelta(days=60),  # Boże Ciało
+        date(year,8,15), date(year,11,1), date(year,11,11),
+        date(year,12,25), date(year,12,26),
+    }
+
+
+def _is_non_working_endpoint(d: date) -> bool:
+    return d.weekday() >= 5 or d in polish_statutory_holidays(d.year)
+
+
+def calculate_deadline(base_date: str, days: int, rule: str = 'calendar') -> tuple[str, str]:
+    """Pomocniczy kalkulator terminów. Dzień początkowy nie jest liczony.
+
+    calendar: dodaje dni kalendarzowe, a koniec przypadający w sobotę/niedzielę/święto
+    przesuwa na najbliższy następny dzień roboczy.
+    business: liczy wyłącznie dni robocze (pon-pt bez ustawowych świąt).
+    """
+    try:
+        start = datetime.strptime(base_date, '%Y-%m-%d').date()
+    except Exception:
+        raise ValueError('Nieprawidłowa data początkowa.')
+    if days < 0 or days > 3650:
+        raise ValueError('Liczba dni musi mieścić się w zakresie 0–3650.')
+    rule = (rule or 'calendar').strip().lower()
+    if rule not in {'calendar','business'}:
+        rule = 'calendar'
+    if rule == 'business':
+        d = start
+        remaining = days
+        while remaining:
+            d += timedelta(days=1)
+            if d.weekday() < 5 and d not in polish_statutory_holidays(d.year):
+                remaining -= 1
+        label = 'dni robocze'
+    else:
+        d = start + timedelta(days=days)
+        label = 'dni kalendarzowe'
+        while _is_non_working_endpoint(d):
+            d += timedelta(days=1)
+    return d.isoformat(), label
 
 
 def safe_filename(name: str) -> str:
@@ -2085,10 +2167,12 @@ def layout(title: str, body: str, active: str = "") -> str:
     nav_sections = [
         ("PRACA", [
             ("/", "Pulpit", "dashboard"),
+            ("/today", "Dzisiaj", "today"),
             ("/cases", "Sprawy", "cases"),
             ("/cases?mine=1", "Moje sprawy", "my_cases"),
             ("/cases/closed", "Sprawy zakończone", "closed_cases"),
             ("/tasks", "Zadania", "tasks"),
+            ("/views", "Moje widoki", "views"),
             ("/drafts", "Projekty pism", "drafts"),
         ]),
         ("BAZA", [
@@ -2131,9 +2215,9 @@ def layout(title: str, body: str, active: str = "") -> str:
 <link rel="stylesheet" href="/assets/rk_app.css?v={VERSION}">
 </head><body data-auto-shutdown="{'1' if AUTO_SHUTDOWN else '0'}"><div class="app"><aside class="sidebar"><div class="brand"><img src="/assets/rk_kancelaria_logo.png" alt="RK"><div class="brand-title">RK KANCELARIA<small>Baza spraw · v{VERSION}</small></div></div>{nav_html}
 {user_box}
-<div class='shortcut-help'><span class='kbd'>Ctrl+K</span> szukaj · <span class='kbd'>Ctrl+N</span> nowa sprawa · <span class='kbd'>Ctrl+D</span> dokument</div>
+<div class='shortcut-help'><span class='kbd'>Ctrl+K</span> szukaj · <span class='kbd'>Ctrl+J</span> dodaj czynność · <span class='kbd'>Ctrl+N</span> nowa sprawa · <span class='kbd'>Ctrl+D</span> dokument</div>
 <div class="program-author">AUTOR PROGRAMU<b>{APP_AUTHOR}</b></div>
-</aside><main class="main">{startup_notice}{body}</main></div><div id="autosaveStatus" class="autosave-status"></div>
+</aside><main class="main">{startup_notice}{body}</main></div><a class="global-add" href="/quick-add" title="Dodaj czynność" aria-label="Dodaj czynność">＋</a><div id="autosaveStatus" class="autosave-status"></div>
 <script src="/assets/rk_app.js?v={VERSION}" defer></script></body></html>"""
 
 def badge(status: str) -> str:
@@ -2588,8 +2672,11 @@ class Handler(BaseHTTPRequestHandler):
         return bytes(data)
 
     def mutation_case_id(self,path,fields):
-        m=re.fullmatch(r"/case/(\d+)/(?:update|delete|party|event|task|document|relation|external-signature|note)",path)
+        m=re.fullmatch(r"/case/(\d+)/(?:update|delete|party|event|task|document|relation|external-signature|note|next-action)",path)
         if m: return int(m.group(1))
+        if path in {'/task/create','/deadline/create','/quick/event','/quick/note','/quick/document'}:
+            try: return int(fields.get('case_id','0') or 0) or None
+            except (TypeError,ValueError): return None
         mapping=[('party','parties','case_id'),('event','events','case_id'),('task','tasks','case_id'),('document','documents','case_id'),('external-signature','case_external_signatures','case_id'),('note','case_notes','case_id'),('case-entity','case_entities','case_id'),('checklist/item','case_checklist_items','case_id')]
         for prefix,table,col in mapping:
             mm=re.fullmatch(rf"/{re.escape(prefix)}/(\d+)/(?:update|delete|toggle)",path)
@@ -2625,6 +2712,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/admin/user/new': return self.user_new_page()
             if re.fullmatch(r"/admin/user/\d+/edit", path): return self.user_edit_page(int(path.split('/')[3]))
             if path == "/": return self.dashboard()
+            if path == "/today": return self.today_page(qs)
+            if path == "/quick-add": return self.quick_add_page(qs)
+            if path == "/deadline": return self.deadline_page(qs)
             if path == "/cases": return self.cases(qs, closed_only=False)
             if path == "/cases/closed": return self.cases(qs, closed_only=True)
             if path == "/case/new": return self.case_new()
@@ -2651,6 +2741,7 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"/relation/\d+/edit", path): return self.relation_edit(int(path.split("/")[2]))
             if re.fullmatch(r"/external-signature/\d+/edit", path): return self.external_signature_edit(int(path.split("/")[2]))
             if path == "/tasks": return self.tasks_page(qs)
+            if path == "/views": return self.saved_views_page()
             if path == "/drafts": return self.drafts_page(qs)
             if path == "/draft/new": return self.draft_new_page(qs)
             if re.fullmatch(r"/draft/\d+", path): return self.draft_view(int(path.split("/")[2]))
@@ -2738,7 +2829,14 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"/draft/\d+/to-document", path): return self.draft_to_document(int(path.split("/")[2]), fields)
             if path == "/case/create": return self.case_create(fields)
             if path == "/task/create": return self.task_add_global(fields)
+            if path == "/view/save": return self.saved_view_save(fields)
+            if re.fullmatch(r"/view/\d+/delete", path): return self.saved_view_delete(int(path.split('/')[2]), fields)
+            if path == "/deadline/create": return self.deadline_create(fields)
+            if path == "/quick/event": return self.quick_event_add(fields)
+            if path == "/quick/note": return self.quick_note_add(fields)
+            if path == "/quick/document": return self.quick_document_add(fields, files)
             if re.fullmatch(r"/case/\d+/update", path): return self.case_update(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/case/\d+/next-action", path): return self.case_next_action(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/case/\d+/delete", path): return self.case_delete(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/case/\d+/pin", path): return self.case_pin_toggle(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/case/\d+/duplicate", path): return self.case_duplicate(int(path.split("/")[2]), fields)
@@ -2942,6 +3040,155 @@ class Handler(BaseHTTPRequestHandler):
             con.execute("DELETE FROM users WHERE id=?",(uid,))
         return self.users_page(f"Konto „{u['username']}” zostało usunięte. Wszystkie dane i historyczne informacje o autorach zostały zachowane.")
 
+    def today_page(self, qs):
+        today = date.today().isoformat()
+        week_end = (date.today() + timedelta(days=7)).isoformat()
+        u=current_request_user(); uid=u['id'] if u else 0
+        with db() as con:
+            tasks=con.execute("""SELECT t.*,c.title case_title,c.signature,c.internal_signature,
+                                 u.author_name assigned_name,u.function assigned_function
+                                 FROM tasks t JOIN cases c ON c.id=t.case_id
+                                 LEFT JOIN users u ON u.id=t.assigned_user_id
+                                 WHERE t.status='open' AND c.status<>'closed'
+                                 AND t.due_date<>'' AND t.due_date<=?
+                                 ORDER BY t.due_date,CASE t.priority WHEN 'high' THEN 0 ELSE 1 END,t.id""",(today,)).fetchall()
+            next_cases=con.execute("""SELECT * FROM cases WHERE status<>'closed' AND next_date<>'' AND next_date BETWEEN ? AND ?
+                                      ORDER BY next_date,title LIMIT 40""",(today,week_end)).fetchall()
+            waiting=con.execute("""SELECT * FROM cases WHERE status<>'closed' AND waiting_for<>'' ORDER BY updated_at DESC LIMIT 20""").fetchall()
+            sign_docs=con.execute("""SELECT d.*,c.title case_title,c.signature,c.internal_signature FROM documents d
+                                     JOIN cases c ON c.id=d.case_id WHERE c.status<>'closed' AND d.doc_status='Do podpisu'
+                                     ORDER BY d.created_at DESC LIMIT 20""").fetchall()
+            sign_drafts=con.execute("""SELECT w.*,c.title case_title,c.signature,c.internal_signature FROM writing_projects w
+                                       JOIN cases c ON c.id=w.case_id WHERE c.status<>'closed' AND w.status='Do podpisu'
+                                       ORDER BY w.updated_at DESC LIMIT 20""").fetchall()
+            ids=[r['case_id'] for r in tasks]+[r['id'] for r in next_cases]+[r['id'] for r in waiting]+[r['case_id'] for r in sign_docs]+[r['case_id'] for r in sign_drafts]
+            sig_map=load_external_signature_map(con,ids)
+        task_rows=[]
+        for r in tasks:
+            label=primary_signature_fast(r['case_id'],r['signature'],sig_map)
+            when="dzisiaj" if r['due_date']==today else "PO TERMINIE"
+            cls='today' if r['due_date']==today else 'danger'
+            assigned=''
+            if r['assigned_name']:
+                assigned=f"<div class='small muted'>Wykonawca: {esc(r['assigned_name'])}{' — '+esc(r['assigned_function']) if r['assigned_function'] else ''}</div>"
+            meta=''
+            if row_get(r,'deadline_base_date',''):
+                meta=f"<div class='small deadline-meta'>wyliczono od {fmt_date(r['deadline_base_date'])} · {esc(str(row_get(r,'deadline_days','')))} dni · {esc(row_get(r,'deadline_rule',''))}</div>"
+            task_rows.append(f"<tr><td><span class='due-chip {cls}'>{when}</span><b>{fmt_date(r['due_date'])}</b></td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(r['case_title'])}</div></td><td><b>{esc(r['title'])}</b>{assigned}{meta}</td><td><a class='btn small' href='/task/{r['id']}/edit?return_to=%2Ftoday'>Edytuj</a></td></tr>")
+        case_rows=[]
+        for r in next_cases:
+            label=primary_signature_fast(r['id'],r['signature'],sig_map)
+            case_rows.append(f"<tr><td>{fmt_date(r['next_date'])}</td><td><a class='case-link' href='/case/{r['id']}'>{esc(label)}</a><div class='small muted'>{esc(r['title'])}</div></td><td>{esc(r['next_step']) or '—'}</td></tr>")
+        waiting_html=''.join(f"<div class='work-item'><a class='case-link' href='/case/{r['id']}'>{esc(primary_signature_fast(r['id'],r['signature'],sig_map))}</a><b>{esc(r['waiting_for'])}</b><div class='small muted'>{esc(r['title'])}</div></div>" for r in waiting) or '<div class="empty">Brak spraw oznaczonych „czekamy na”.</div>'
+        sign_parts=[]
+        for r in sign_docs:
+            label=primary_signature_fast(r['case_id'],r['signature'],sig_map)
+            sign_parts.append(f"<div class='work-item'><span class='pill'>Dokument</span><a class='case-link' href='/document/{r['id']}/open'>{esc(r['title'])}</a><div class='small muted'>{esc(label)} · {esc(r['case_title'])}</div></div>")
+        for r in sign_drafts:
+            label=primary_signature_fast(r['case_id'],r['signature'],sig_map)
+            sign_parts.append(f"<div class='work-item'><span class='pill'>Projekt pisma</span><a class='case-link' href='/draft/{r['id']}'>{esc(r['title'])}</a><div class='small muted'>{esc(label)} · {esc(r['case_title'])}</div></div>")
+        body=f"""<div class='topbar'><div><h1>Dzisiaj</h1><div class='sub'>Jedna kolejka pracy: zaległe i dzisiejsze zadania, najbliższe ruchy oraz rzeczy do podpisu.</div></div><div><a class='btn primary' href='/quick-add'>+ Dodaj czynność</a> <a class='btn' href='/tasks?mine=1'>Moje zadania</a></div></div>
+        <div class='grid'>
+          <div class='card span12'><div class='section-head'><div><h2>Zadania wymagające działania</h2><div class='small muted'>Po terminie i z terminem na dzisiaj.</div></div><a class='btn small' href='/tasks?filter=overdue'>Wszystkie zaległe</a></div><div class='table-scroll'><table><tr><th>Termin</th><th>Sprawa</th><th>Czynność</th><th></th></tr>{''.join(task_rows) or '<tr><td colspan=4>Na dziś nie ma zaległych ani dzisiejszych zadań.</td></tr>'}</table></div></div>
+          <div class='card span7'><div class='section-head'><h2>Następne ruchy — 7 dni</h2><a class='btn small' href='/cases?focus=7d'>Sprawy</a></div><table><tr><th>Data</th><th>Sprawa</th><th>Następny krok</th></tr>{''.join(case_rows) or '<tr><td colspan=3>Brak wskazanych ruchów w najbliższych 7 dniach.</td></tr>'}</table></div>
+          <div class='card span5'><h2>Do podpisu</h2>{''.join(sign_parts) or '<div class="empty">Brak dokumentów i projektów do podpisu.</div>'}</div>
+          <div class='card span12'><div class='section-head'><div><h2>Czekamy na</h2><div class='small muted'>Sprawy, w których następny ruch zależy od sądu, klienta, organu lub przeciwnika.</div></div><a class='btn small' href='/cases?focus=waiting'>Pokaż sprawy</a></div><div class='work-grid'>{waiting_html}</div></div>
+        </div>"""
+        self.send_html(layout('Dzisiaj',body,'today'))
+
+    def _quick_case_and_user_options(self):
+        with db() as con:
+            cases=con.execute("SELECT id,signature,internal_signature,title FROM cases WHERE status<>'closed' OR closed_edit_unlocked=1 ORDER BY signature='',signature,title").fetchall()
+            users=con.execute("SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name").fetchall()
+            sig_map=load_external_signature_map(con,[r['id'] for r in cases])
+        case_opts=[]
+        for c in cases:
+            sig=primary_signature_fast(c['id'],c['signature'],sig_map)
+            prefix='' if sig=='Bez sygnatury' else sig+' — '
+            case_opts.append(f"<option value='{c['id']}'>{esc(prefix+c['title'])} · {esc(internal_signature_text(c['internal_signature']))}</option>")
+        user_opts='<option value="">— nie przypisano —</option>'+''.join(f"<option value='{x['id']}'>{esc(user_display_name(x))}</option>" for x in users)
+        return ''.join(case_opts),user_opts
+
+    def quick_add_page(self,qs):
+        case_opts,user_opts=self._quick_case_and_user_options()
+        event_opts=''.join(f"<option>{esc(x)}</option>" for x in EVENT_TYPES)
+        doc_opts=''.join(f"<option>{esc(x)}</option>" for x in DOC_TYPES)
+        doc_status_opts=''.join(f"<option>{esc(x)}</option>" for x in DOC_STATUSES)
+        done=(qs.get('done') or [''])[0]
+        notice=f"<div class='notice'>Dodano: <b>{esc(done)}</b>.</div>" if done else ''
+        if not case_opts:
+            return self.send_html(layout('Dodaj czynność',"<div class='card'><h1>Dodaj czynność</h1><p>Najpierw utwórz aktywną sprawę.</p><a class='btn primary' href='/case/new'>+ Nowa sprawa</a></div>"))
+        body=f"""<div class='topbar'><div><h1>+ Dodaj czynność</h1><div class='sub'>Szybkie dodawanie z dowolnego miejsca w programie.</div></div><div><a class='btn' href='/case/new'>+ Sprawa</a> <a class='btn' href='/draft/new'>+ Projekt pisma</a></div></div>{notice}
+        <div class='quick-add-grid'>
+          <div class='card quick-add-card'><h2>Zadanie</h2><form method='post' action='/task/create' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=zadanie'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div class='full'><label>Czynność *</label><input name='title' required></div><div><label>Termin</label><input type='date' name='due_date'></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div><div class='full'><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div><div class='full'><label>Czekamy na / zależność</label><input name='depends_on'></div><div class='full'><button class='btn primary'>Dodaj zadanie</button></div></form></div>
+          <div class='card quick-add-card' id='deadline'><h2>Termin procesowy</h2><div class='small muted' style='margin-bottom:10px'>Pomocnicze wyliczenie — dzień początkowy nie jest liczony; końcowa sobota/niedziela/święto jest przesuwana. Zawsze zweryfikuj podstawę prawną.</div><form method='post' action='/deadline/create' class='form-grid'><input type='hidden' name='return_to' value='/today'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div class='full'><label>Czynność *</label><input name='title' required placeholder='np. Wnieść odpowiedź na zażalenie'></div><div><label>Data początkowa *</label><input type='date' name='base_date' required></div><div><label>Liczba dni *</label><input type='number' min='0' max='3650' name='days' required value='7'></div><div><label>Sposób liczenia</label><select name='rule'><option value='calendar'>Dni kalendarzowe / procesowe</option><option value='business'>Dni robocze</option></select></div><div><label>Priorytet</label><select name='priority'><option value='high'>Wysoki</option><option value='normal'>Normalny</option></select></div><div class='full'><label>Podstawa / źródło terminu</label><input name='source' placeholder='np. doręczenie 11.09.2026, art. ...'></div><div class='full'><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div><div class='full'><button class='btn primary'>Wylicz i dodaj termin</button></div></form></div>
+          <div class='card quick-add-card'><h2>Zdarzenie na osi czasu</h2><form method='post' action='/quick/event' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=zdarzenie'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div><label>Data</label><input type='date' name='event_date' value='{date.today().isoformat()}'></div><div><label>Typ</label><select name='event_type'>{event_opts}</select></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj zdarzenie</button></div></form></div>
+          <div class='card quick-add-card'><h2>Notatka</h2><form method='post' action='/quick/note' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=notatka'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div class='full'><label>Treść *</label><textarea name='note' required></textarea></div><div class='full'><button class='btn primary'>Dodaj notatkę</button></div></form></div>
+          <div class='card quick-add-card'><h2>Dokument / pismo</h2><form method='post' enctype='multipart/form-data' action='/quick/document' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=dokument'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_opts}</select></div><div><label>Status</label><select name='doc_status'>{doc_status_opts}</select></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Plik</label><input type='file' name='file'></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></div>
+        </div>"""
+        self.send_html(layout('Dodaj czynność',body))
+
+    def deadline_page(self,qs):
+        self.redirect('/quick-add#deadline')
+
+    def deadline_create(self,f):
+        try: cid=int(f.get('case_id','0') or 0)
+        except ValueError: cid=0
+        title=(f.get('title') or '').strip()
+        if not cid or not title: return self.redirect('/quick-add#deadline')
+        try: days=int(f.get('days','0') or 0)
+        except ValueError: days=-1
+        try:
+            due_date,rule_label=calculate_deadline(f.get('base_date',''),days,f.get('rule','calendar'))
+        except ValueError as exc:
+            return self.send_html(layout('Błąd terminu',f"<div class='card'><h1>Nie udało się wyliczyć terminu</h1><p>{esc(exc)}</p><a class='btn' href='/quick-add#deadline'>Wróć</a></div>"),400)
+        try: assigned=int(f.get('assigned_user_id','') or 0) or None
+        except ValueError: assigned=None
+        a=self.current_author(f); source=(f.get('source') or '').strip(); priority=f.get('priority','high')
+        with db() as con:
+            if not con.execute('SELECT 1 FROM cases WHERE id=?',(cid,)).fetchone(): return self.send_error(404)
+            if case_read_only(con,cid): return self.send_error(403,'Sprawa zakończona jest tylko do odczytu.')
+            cur=con.execute("""INSERT INTO tasks(case_id,title,due_date,status,priority,assigned_user_id,depends_on,notes,created_by,updated_by,
+                              deadline_base_date,deadline_days,deadline_rule,deadline_source,deadline_manual)
+                              VALUES(?,?,?,'open',?,?,?,?,?,?,?,?,?,?,0)""",
+                            (cid,title,due_date,priority,assigned,'',source,a,a,f.get('base_date',''),days,rule_label,source))
+            details=(f"Czynność: {_change_value(title)}\nData początkowa: {_change_value(f.get('base_date',''))}\n"
+                     f"Reguła: {_change_value(str(days)+' '+rule_label)}\nWyliczony termin: {_change_value(due_date)}")
+            if source: details += f"\nPodstawa / źródło: {_change_value(source)}"
+            audit(con,cid,'task',cur.lastrowid,'Dodano termin procesowy',details,a)
+        target=(f.get('return_to','') or '').strip()
+        self.redirect(target if target.startswith('/') else '/today')
+
+    def quick_event_add(self,f):
+        try: cid=int(f.get('case_id','0') or 0)
+        except ValueError: cid=0
+        if not cid: return self.redirect('/quick-add')
+        return self.event_add(cid,f)
+
+    def quick_note_add(self,f):
+        try: cid=int(f.get('case_id','0') or 0)
+        except ValueError: cid=0
+        if not cid: return self.redirect('/quick-add')
+        return self.note_add(cid,f)
+
+    def quick_document_add(self,f,files):
+        try: cid=int(f.get('case_id','0') or 0)
+        except ValueError: cid=0
+        if not cid: return self.redirect('/quick-add')
+        return self.document_add(cid,f,files)
+
+    def case_next_action(self,cid,f):
+        a=self.current_author(f)
+        new={'next_step':(f.get('next_step') or '').strip(),'next_date':(f.get('next_date') or '').strip(),'waiting_for':(f.get('waiting_for') or '').strip()}
+        with db() as con:
+            old=con.execute('SELECT * FROM cases WHERE id=?',(cid,)).fetchone()
+            if not old: return self.send_error(404)
+            if case_read_only(con,cid): return self.send_error(403,'Sprawa zakończona jest tylko do odczytu.')
+            details=describe_changes(old,new,{'next_step':'Następny krok','next_date':'Data następnego ruchu','waiting_for':'Czekamy na'})
+            con.execute("UPDATE cases SET next_step=?,next_date=?,waiting_for=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(new['next_step'],new['next_date'],new['waiting_for'],a,cid))
+            if details: audit(con,cid,'case',cid,'Zmieniono następny ruch',details,a)
+        self.redirect(f'/case/{cid}')
+
     def dashboard(self):
         today_obj = date.today()
         today = today_obj.isoformat()
@@ -3022,7 +3269,7 @@ class Handler(BaseHTTPRequestHandler):
           </div>
           <div class="dashboard-hero-tools">
             <form class="searchbar dashboard-search" action="/search"><input name="q" data-global-search placeholder="Szukaj klienta, sygnatury, tagu…"><button class="btn primary">Szukaj</button></form>
-            <div class="quick-actions"><a class="btn primary" href="/case/new">+ Nowa sprawa</a><a class="btn" href="/tasks">Zadania</a><a class="btn" href="/documents">Dokumenty</a><a class="btn" href="/draft/new">+ Projekt pisma</a></div>
+            <div class="quick-actions"><a class="btn primary" href="/quick-add">+ Dodaj czynność</a><a class="btn" href="/today">Dzisiaj</a><a class="btn" href="/case/new">+ Nowa sprawa</a><a class="btn" href="/tasks">Zadania</a><a class="btn" href="/documents">Dokumenty</a><a class="btn" href="/draft/new">+ Projekt pisma</a></div>
           </div>
         </section>
         <div class="grid dashboard-metrics">
@@ -3048,6 +3295,8 @@ class Handler(BaseHTTPRequestHandler):
         status=(qs.get('status') or [''])[0]
         tag=(qs.get('tag') or [''])[0].strip()
         mine=(qs.get('mine') or [''])[0]=='1'
+        focus=(qs.get('focus') or [''])[0].strip().lower()
+        if focus not in {'','waiting','no-next','7d'}: focus=''
         view=(qs.get('view') or ['compact'])[0].strip().lower()
         if view not in ('compact','detailed'): view='compact'
         u=current_request_user(); uid=u['id'] if u else 0
@@ -3072,6 +3321,11 @@ class Handler(BaseHTTPRequestHandler):
             sql += " AND c.status=?"; params.append(status)
         if tag:
             sql += " AND EXISTS (SELECT 1 FROM case_tags ct JOIN tags tg ON tg.id=ct.tag_id WHERE ct.case_id=c.id AND tg.name=? COLLATE NOCASE)"; params.append(tag)
+        if focus=='waiting': sql += " AND c.waiting_for<>''"
+        elif focus=='no-next': sql += " AND (c.next_step='' OR c.next_date='')"
+        elif focus=='7d':
+            today=date.today().isoformat(); week_end=(date.today()+timedelta(days=7)).isoformat()
+            sql += " AND c.next_date<>'' AND c.next_date BETWEEN ? AND ?"; params.extend([today,week_end])
         sql += " ORDER BY pinned DESC, CASE c.status WHEN 'todo' THEN 0 WHEN 'active' THEN 1 WHEN 'waiting' THEN 2 WHEN 'suspended' THEN 3 ELSE 4 END, c.next_date='' ASC, c.next_date, c.title"
         with db() as con:
             rows=con.execute(sql,params).fetchall()
@@ -3094,6 +3348,7 @@ class Handler(BaseHTTPRequestHandler):
         if status and not closed_only: common.append('status='+quote(status))
         if tag: common.append('tag='+quote(tag))
         if mine: common.append('mine=1')
+        if focus: common.append('focus='+quote(focus))
         def view_url(which): return base_path+'?'+'&'.join(common+['view='+which])
         clear_url=base_path+'?view='+view+('&mine=1' if mine else '')
         tag_clear=clear_url
@@ -3140,9 +3395,17 @@ class Handler(BaseHTTPRequestHandler):
         mine_hidden="<input type='hidden' name='mine' value='1'>" if mine else ''
         extra_action=("<a class='btn' href='/cases'>← Aktywne sprawy</a>" if closed_only else ("<a class='btn' href='/cases'>Wszystkie sprawy</a>" if mine else "<a class='btn' href='/cases?mine=1'>Moje sprawy</a> <a class='btn' href='/cases/closed'>Sprawy zakończone</a>"))
         new_button='' if closed_only else '<a class="btn primary" href="/case/new">+ Nowa sprawa</a>'
-        body=f"""<div class='topbar'><div><h1>{page_title}</h1><div class='sub'>{page_sub}</div></div><div>{extra_action} {new_button}</div></div>{tag_note}
-        <div class='card'><form class='form-grid' method='get'>{mine_hidden}<input type='hidden' name='view' value='{view}'><div><label>Szukaj</label><input name='q' value='{esc(q)}' placeholder='Sygnatura, klient, prowadzący, oczekiwanie, tag…'></div>{status_filter}<div class='full'><button class='btn'>Filtruj</button> <a class='btn' href='{clear_url}'>Wyczyść</a> <a class='btn' href='/tags'>Tagi</a></div></form></div><br>
-        <div class='cases-toolbar'><div class='small muted'>⭐ oznacza sprawę przypiętą do Twojego konta.</div><div class='view-switch'><a class='view-tab {'active' if view=='compact' else ''}' href='{view_url('compact')}'>Kompaktowy</a><a class='view-tab {'active' if view=='detailed' else ''}' href='{view_url('detailed')}'>Szczegółowy</a></div></div>{list_html}"""
+        save_view=self._save_view_form(self.path)
+        focus_bar=''
+        if not closed_only:
+            suffix='&mine=1' if mine else ''
+            def focus_link(key,label):
+                active='primary' if focus==key else ''
+                return f"<a class='btn small {active}' href='/cases?view={view}{suffix}{('&focus='+key) if key else ''}'>{label}</a>"
+            focus_bar="<div class='quick-filter-bar'><span class='small muted'>Szybkie widoki:</span> "+''.join([focus_link('','Wszystkie'),focus_link('7d','Następne 7 dni'),focus_link('waiting','Czekamy na'),focus_link('no-next','Brak następnego ruchu')])+"</div>"
+        body=f"""<div class='topbar'><div><h1>{page_title}</h1><div class='sub'>{page_sub}</div></div><div>{extra_action} {new_button}</div></div>{tag_note}{focus_bar}
+        <div class='card'><form class='form-grid' method='get'>{mine_hidden}<input type='hidden' name='view' value='{view}'>{f"<input type='hidden' name='focus' value='{esc(focus)}'>" if focus else ''}<div><label>Szukaj</label><input name='q' value='{esc(q)}' placeholder='Sygnatura, klient, prowadzący, oczekiwanie, tag…'></div>{status_filter}<div class='full'><button class='btn'>Filtruj</button> <a class='btn' href='{clear_url}'>Wyczyść</a> <a class='btn' href='/tags'>Tagi</a></div></form></div><br>
+        <div class='cases-toolbar'><div class='small muted'>⭐ oznacza sprawę przypiętą do Twojego konta.</div><div class='view-switch'><a class='view-tab {'active' if view=='compact' else ''}' href='{view_url('compact')}'>Kompaktowy</a><a class='view-tab {'active' if view=='detailed' else ''}' href='{view_url('detailed')}'>Szczegółowy</a></div></div>{save_view}{list_html}"""
         self.send_html(layout(page_title,body,active_key))
 
     def case_new(self):
@@ -3308,9 +3571,13 @@ class Handler(BaseHTTPRequestHandler):
             note_html=f"<div class='small'>{esc(x['notes'])}</div>" if x['notes'] else ''
             au=user_map.get(x['assigned_user_id']) if x['assigned_user_id'] else None
             assigned_html=f"<div class='small lead-chip'>Wykonawca: {esc(user_display_name(au))}</div>" if au else ''
+            deadline_html=''
+            if row_get(x,'deadline_base_date',''):
+                manual=' · ręcznie skorygowany' if int(row_get(x,'deadline_manual',0) or 0) else ''
+                deadline_html=f"<div class='small deadline-meta'>Termin pomocniczo wyliczony: {fmt_date(x['deadline_base_date'])} + {esc(str(row_get(x,'deadline_days','')))} {esc(row_get(x,'deadline_rule',''))}{manual}</div>"
             task_parts.append(
                 f"<div class='task {done}'><form method='post' action='/task/{x['id']}/toggle'><input type='hidden' name='case_id' value='{cid}'><button class='btn small'>{toggle}</button></form>"
-                f"<div style='flex:1'><div class='task-title {pri}'>{esc(x['title'])}</div><div class='small muted'>{fmt_date(x['due_date'])}{dep}</div>{assigned_html}{note_html}{who(x)}"
+                f"<div style='flex:1'><div class='task-title {pri}'>{esc(x['title'])}</div><div class='small muted'>{fmt_date(x['due_date'])}{dep}</div>{assigned_html}{deadline_html}{note_html}{who(x)}"
                 f"<div style='margin-top:6px'><a class='btn small' href='/task/{x['id']}/edit'>Edytuj</a></div></div>"
                 f"<form method='post' action='/task/{x['id']}/delete' onsubmit=\"return confirm('Przenieść zadanie do Kosza?')\"><input type='hidden' name='case_id' value='{cid}'><button class='btn small danger'>×</button></form></div>"
             )
@@ -3401,6 +3668,7 @@ class Handler(BaseHTTPRequestHandler):
           <div class='case-summary-item'><div class='k'>Najbliższa data</div><div class='v'>{fmt_date(c['next_date'])}</div></div>
           <div class='case-summary-item'><div class='k'>Następna czynność</div><div class='v' title='{esc(c['next_step'])}'>{esc(c['next_step']) or '—'}</div></div>
         </div>
+        {'' if readonly else f"<div class='card next-action-card'><div class='section-head'><div><div class='section-kicker'>NASTĘPNY RUCH</div><h2>Co dalej w tej sprawie?</h2></div><a class='btn small' href='/deadline'>Kalkulator terminu</a></div><form method='post' action='/case/{cid}/next-action' class='form-grid'><div class='full'><label>Następna czynność</label><input name='next_step' value='{esc(c['next_step'])}' placeholder='np. złożyć odpowiedź na zażalenie'></div><div><label>Data / termin</label><input type='date' name='next_date' value='{esc(c['next_date'])}'></div><div><label>Czekamy na</label><input name='waiting_for' value='{esc(c['waiting_for'])}' placeholder='np. sąd / klient / organ'></div><div class='full'><button class='btn primary'>Zapisz następny ruch</button></div></form></div>"}
         <div class='card' style='margin-bottom:16px'><b>Przejdź do spraw powiązanych:</b> <span style='margin-left:8px'>{quick_html}</span></div>
         <div class='grid'>
           <div class='card span8'><h2>Informacje</h2><table><tr><th>Sygnatura sądowa</th><td>{esc(c['signature']) or '—'}</td></tr><tr><th>Sygnatura wewnętrzna</th><td>{esc(c['internal_signature']) or '—'}</td></tr><tr><th>Klient / zlecający</th><td><b>{esc(c['client']) or '—'}</b></td></tr><tr><th>Prowadzący</th><td>{esc(lead_text)}</td></tr><tr><th>Czekamy na</th><td>{esc(c['waiting_for']) or '—'}</td></tr><tr><th>Tagi</th><td>{tags_html}</td></tr><tr><th>Przedmiot</th><td>{esc(c['subject']) or '—'}</td></tr><tr><th>Sąd</th><td>{esc(c['court']) or '—'} {('· '+esc(c['department'])) if c['department'] else ''}</td></tr><tr><th>Kategoria</th><td>{esc(c['category']) or '—'}</td></tr><tr><th>Następny krok</th><td><b>{esc(c['next_step']) or '—'}</b></td></tr><tr><th>Najbliższa data</th><td>{fmt_date(c['next_date'])}</td></tr></table>{main_note}{case_auth_html}</div>
@@ -3675,7 +3943,11 @@ class Handler(BaseHTTPRequestHandler):
         stat='<option value="open" {o}>Otwarte</option><option value="done" {d}>Wykonane</option>'.format(o='selected' if t['status']=='open' else '',d='selected' if t['status']=='done' else '')
         user_opts='<option value="">— nie przypisano —</option>'+''.join(f"<option value='{u['id']}' {'selected' if t['assigned_user_id']==u['id'] else ''}>{esc(user_display_name(u))}</option>" for u in users)
         back_href=return_to if return_to.startswith('/') else f"/case/{t['case_id']}"
-        body=f'''<div class="topbar"><div><h1>Edytuj zadanie</h1><div class="sub">{esc(t['signature'] or t['case_title'])}</div></div></div><div class="card"><form method="post" action="/task/{tid}/update" class="form-grid" data-autosave="1"><input type="hidden" name="case_id" value="{t['case_id']}"><input type="hidden" name="return_to" value="{esc(return_to)}"><div class="full"><label>Zadanie</label><input name="title" required value="{esc(t['title'])}"></div><div><label>Termin</label><input type="date" name="due_date" value="{esc(t['due_date'])}"></div><div><label>Priorytet</label><select name="priority">{prio}</select></div><div><label>Status</label><select name="status">{stat}</select></div><div><label>Wykonawca</label><select name="assigned_user_id">{user_opts}</select></div><div class="full"><label>Zależność / czekamy na</label><input name="depends_on" value="{esc(t['depends_on'])}"></div><div class="full"><label>Notatki</label><textarea name="notes">{esc(t['notes'])}</textarea></div><div class="full"><button class="btn primary">Zapisz zmiany</button> <a class="btn" href="{esc(back_href)}">Anuluj</a></div></form></div>'''
+        deadline_info=''
+        if row_get(t,'deadline_base_date',''):
+            manual=' · <b>termin skorygowany ręcznie</b>' if int(row_get(t,'deadline_manual',0) or 0) else ''
+            deadline_info=f"<div class='notice deadline-note'><b>Termin wyliczony pomocniczo:</b> od {fmt_date(t['deadline_base_date'])} + {esc(str(row_get(t,'deadline_days','')))} {esc(row_get(t,'deadline_rule',''))}. {esc(row_get(t,'deadline_source',''))}{manual}</div>"
+        body=f'''<div class="topbar"><div><h1>Edytuj zadanie</h1><div class="sub">{esc(t['signature'] or t['case_title'])}</div></div></div>{deadline_info}<div class="card"><form method="post" action="/task/{tid}/update" class="form-grid" data-autosave="1"><input type="hidden" name="case_id" value="{t['case_id']}"><input type="hidden" name="return_to" value="{esc(return_to)}"><div class="full"><label>Zadanie</label><input name="title" required value="{esc(t['title'])}"></div><div><label>Termin</label><input type="date" name="due_date" value="{esc(t['due_date'])}"><div class="small muted">Możesz ręcznie skorygować termin. Historia zachowa zmianę.</div></div><div><label>Priorytet</label><select name="priority">{prio}</select></div><div><label>Status</label><select name="status">{stat}</select></div><div><label>Wykonawca</label><select name="assigned_user_id">{user_opts}</select></div><div class="full"><label>Zależność / czekamy na</label><input name="depends_on" value="{esc(t['depends_on'])}"></div><div class="full"><label>Notatki</label><textarea name="notes">{esc(t['notes'])}</textarea></div><div class="full"><button class="btn primary">Zapisz zmiany</button> <a class="btn" href="{esc(back_href)}">Anuluj</a></div></form></div>'''
         self.send_html(layout('Edycja zadania',body,'tasks'))
 
     def task_update(self,tid,f):
@@ -3698,7 +3970,11 @@ class Handler(BaseHTTPRequestHandler):
                 new_u=con.execute("SELECT author_name,function FROM users WHERE id=?",(assigned,)).fetchone() if assigned else None
                 line=f"• Wykonawca: {_change_value(user_display_name(old_u) if old_u else '—')} → {_change_value(user_display_name(new_u) if new_u else '—')}"
                 details=(details+'\n'+line).strip()
-            con.execute("UPDATE tasks SET title=?,due_date=?,status=?,priority=?,assigned_user_id=?,depends_on=?,notes=?,updated_by=? WHERE id=?",(new['title'],new['due_date'],new['status'],new['priority'],assigned,new['depends_on'],new['notes'],a,tid))
+            deadline_manual=int(row_get(old,'deadline_manual',0) or 0)
+            if row_get(old,'deadline_base_date','') and old['due_date'] != new['due_date']:
+                deadline_manual=1
+                details=(details+'\n'+f"• Tryb terminu: {_change_value('wyliczony automatycznie')} → {_change_value('skorygowany ręcznie')}").strip()
+            con.execute("UPDATE tasks SET title=?,due_date=?,status=?,priority=?,assigned_user_id=?,depends_on=?,notes=?,updated_by=?,deadline_manual=? WHERE id=?",(new['title'],new['due_date'],new['status'],new['priority'],assigned,new['depends_on'],new['notes'],a,deadline_manual,tid))
             if details: audit(con,cid,'task',tid,'Edytowano zadanie',details,a)
         target=(f.get('return_to','') or '').strip()
         self.redirect(target if target.startswith('/') else f'/case/{cid}')
@@ -3773,7 +4049,8 @@ class Handler(BaseHTTPRequestHandler):
         with db() as con:
             cur=con.execute("INSERT INTO events(case_id,event_date,event_type,title,description,created_by,updated_by) VALUES(?,?,?,?,?,?,?)",(cid,f.get('event_date',''),f.get('event_type','Czynność'),title,f.get('description','').strip(),a,a))
             audit(con,cid,'event',cur.lastrowid,'Dodano zdarzenie',f"Tytuł: {_change_value(title)}\nData: {_change_value(f.get('event_date',''))}\nTyp: {_change_value(f.get('event_type','Czynność'))}",a)
-        self.redirect(f'/case/{cid}')
+        target=(f.get('return_to','') or '').strip()
+        self.redirect(target if target.startswith('/') else f'/case/{cid}')
 
     def task_add(self,cid,f):
         a=self.current_author(f); title=f.get('title','').strip()
@@ -3800,7 +4077,8 @@ class Handler(BaseHTTPRequestHandler):
         try: cid=int(f.get('case_id','0') or 0)
         except ValueError: cid=0
         if not cid: return self.redirect('/tasks')
-        f=dict(f); f['return_to']='/tasks'
+        f=dict(f)
+        if not (f.get('return_to','') or '').strip(): f['return_to']='/tasks'
         return self.task_add(cid,f)
 
     def document_add(self,cid,f,files):
@@ -4000,15 +4278,58 @@ class Handler(BaseHTTPRequestHandler):
         if not ok: return self.send_html(layout('Nie można otworzyć folderu',f"<div class='card'><h1>Nie udało się otworzyć folderu</h1><p>{esc(msg)}</p></div>",'documents'),500)
         self.redirect(f'/document/{did}/open')
 
+    def saved_views_page(self):
+        u=current_request_user(); uid=u['id'] if u else 0
+        with db() as con:
+            rows=con.execute("SELECT * FROM saved_views WHERE user_id=? ORDER BY created_at DESC,id DESC",(uid,)).fetchall()
+        cards=[]
+        for r in rows:
+            cards.append(f"<div class='saved-view-card'><a class='case-link' href='{esc(r['target'])}'>{esc(r['name'])}</a><div class='small muted'>{esc(r['target'])}</div><form method='post' action='/view/{r['id']}/delete' onsubmit=\"return confirm('Usunąć zapisany widok?');\"><button class='btn small danger'>Usuń</button></form></div>")
+        body=f"""<div class='topbar'><div><h1>Moje widoki</h1><div class='sub'>Zapisane filtry spraw i zadań. Każdy użytkownik ma własną listę.</div></div><div><a class='btn' href='/cases'>Sprawy</a> <a class='btn' href='/tasks'>Zadania</a></div></div><div class='saved-view-grid'>{''.join(cards) or '<div class="card empty">Nie masz jeszcze zapisanych widoków. Otwórz Sprawy albo Zadania, ustaw filtr i kliknij „Zapisz widok”.</div>'}</div>"""
+        self.send_html(layout('Moje widoki',body,'views'))
+
+    def saved_view_save(self,f):
+        u=current_request_user(); uid=u['id'] if u else 0
+        name=(f.get('name') or '').strip()[:80]
+        target=(f.get('target') or '').strip()
+        parsed=urlparse(target)
+        allowed={'/cases','/cases/closed','/tasks','/documents','/drafts','/history','/today'}
+        if not name or parsed.path not in allowed or not target.startswith('/'):
+            return self.redirect('/views')
+        with db() as con:
+            con.execute("INSERT INTO saved_views(user_id,name,target) VALUES(?,?,?) ON CONFLICT(user_id,name) DO UPDATE SET target=excluded.target,created_at=CURRENT_TIMESTAMP",(uid,name,target))
+        back=(f.get('return_to') or '').strip()
+        self.redirect(back if back.startswith('/') else '/views')
+
+    def saved_view_delete(self,vid,f):
+        u=current_request_user(); uid=u['id'] if u else 0
+        with db() as con:
+            con.execute("DELETE FROM saved_views WHERE id=? AND user_id=?",(vid,uid))
+        self.redirect('/views')
+
+    def _save_view_form(self, target: str) -> str:
+        parsed=urlparse(target)
+        if parsed.path not in {'/cases','/cases/closed','/tasks','/documents','/drafts','/history','/today'}:
+            return ''
+        return f"<form method='post' action='/view/save' class='save-view-form'><input type='hidden' name='target' value='{esc(target)}'><input type='hidden' name='return_to' value='{esc(target)}'><input name='name' required maxlength='80' placeholder='Nazwa widoku'><button class='btn small'>☆ Zapisz widok</button></form>"
+
     def tasks_page(self,qs):
         show=(qs.get('show') or ['open'])[0]; mine=(qs.get('mine') or [''])[0]=='1'
+        flt=(qs.get('filter') or [''])[0].strip().lower()
+        if flt not in {'','overdue','today','7d','high','undated'}: flt=''
         u=current_request_user(); uid=u['id'] if u else 0
-        current_return=f"/tasks?show={quote(show)}"+('&mine=1' if mine else '')
+        current_return=f"/tasks?show={quote(show)}"+('&mine=1' if mine else '')+(('&filter='+quote(flt)) if flt else '')
+        today=date.today().isoformat(); week_end=(date.today()+timedelta(days=7)).isoformat()
         with db() as con:
             sql="""SELECT t.*,c.title case_title,c.signature,c.internal_signature,u.author_name assigned_name,u.function assigned_function
                    FROM tasks t JOIN cases c ON c.id=t.case_id LEFT JOIN users u ON u.id=t.assigned_user_id WHERE 1=1"""; params=[]
             if show!='all': sql += " AND t.status='open'"
             if mine: sql += " AND t.assigned_user_id=?"; params.append(uid)
+            if flt=='overdue': sql += " AND t.status='open' AND t.due_date<>'' AND t.due_date<?"; params.append(today)
+            elif flt=='today': sql += " AND t.status='open' AND t.due_date=?"; params.append(today)
+            elif flt=='7d': sql += " AND t.status='open' AND t.due_date>? AND t.due_date<=?"; params.extend([today,week_end])
+            elif flt=='high': sql += " AND t.status='open' AND t.priority='high'"
+            elif flt=='undated': sql += " AND t.status='open' AND t.due_date=''"
             sql += " ORDER BY t.status,CASE WHEN t.due_date='' THEN 1 ELSE 0 END,t.due_date,CASE t.priority WHEN 'high' THEN 0 ELSE 1 END"
             rows=con.execute(sql,params).fetchall()
             task_sig_map=load_external_signature_map(con,[r['case_id'] for r in rows])
@@ -4026,11 +4347,20 @@ class Handler(BaseHTTPRequestHandler):
             if r['updated_by'] and r['updated_by']!=r['created_by']: auth.append('zmiana: '+esc(r['updated_by']))
             auth_html=f"<div class='author'>{' · '.join(auth)}</div>" if auth else ''
             prio='Wysoki' if r['priority']=='high' else 'Normalny'
+            deadline_meta=''
+            if row_get(r,'deadline_base_date',''):
+                manual=' · ręcznie skorygowany' if int(row_get(r,'deadline_manual',0) or 0) else ''
+                deadline_meta=f"<div class='small deadline-meta'>wyliczono: {fmt_date(r['deadline_base_date'])} + {esc(str(row_get(r,'deadline_days','')))} {esc(row_get(r,'deadline_rule',''))}{manual}</div>"
             edit_return=quote(current_return,safe='')
-            parts.append(f"<tr><td><form method='post' action='/task/{r['id']}/toggle'><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small'>{toggle}</button></form></td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td class='{cls}'><b>{esc(r['title'])}</b>{dep}{auth_html}</td><td>{fmt_date(r['due_date'])}</td><td>{esc(assigned)}</td><td>{prio}</td><td class='nowrap'><a class='btn small' href='/task/{r['id']}/edit?return_to={edit_return}'>Edytuj</a> <form style='display:inline' method='post' action='/task/{r['id']}/delete' onsubmit=\"return confirm('Przenieść zadanie do Kosza?');\"><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small danger'>Do kosza</button></form></td></tr>")
+            parts.append(f"<tr><td><form method='post' action='/task/{r['id']}/toggle'><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small'>{toggle}</button></form></td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td class='{cls}'><b>{esc(r['title'])}</b>{dep}{deadline_meta}{auth_html}</td><td>{fmt_date(r['due_date'])}</td><td>{esc(assigned)}</td><td>{prio}</td><td class='nowrap'><a class='btn small' href='/task/{r['id']}/edit?return_to={edit_return}'>Edytuj</a> <form style='display:inline' method='post' action='/task/{r['id']}/delete' onsubmit=\"return confirm('Przenieść zadanie do Kosza?');\"><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small danger'>Do kosza</button></form></td></tr>")
         trs=''.join(parts) or '<tr><td colspan=7>Brak zadań.</td></tr>'
         qp='&mine=1' if mine else ''; a1='primary' if show=='open' else ''; a2='primary' if show=='all' else ''
         mine_button="<a class='btn primary' href='/tasks?show=open&mine=1'>Moje zadania</a> <a class='btn' href='/tasks?show=open'>Wszystkie zadania</a>" if mine else "<a class='btn' href='/tasks?show=open&mine=1'>Moje zadania</a>"
+        def filter_link(key,label):
+            active='primary' if flt==key else ''
+            q=f"/tasks?show=open"+('&mine=1' if mine else '')+(('&filter='+key) if key else '')
+            return f"<a class='btn small {active}' href='{q}'>{label}</a>"
+        filter_bar="<div class='quick-filter-bar'><span class='small muted'>Szybkie filtry:</span> "+''.join([filter_link('','Wszystkie otwarte'),filter_link('overdue','Po terminie'),filter_link('today','Dzisiaj'),filter_link('7d','7 dni'),filter_link('high','Wysoki priorytet'),filter_link('undated','Bez terminu')])+"</div>"
         case_opts=[]
         for c in cases:
             sig=primary_signature_fast(c['id'],c['signature'],case_sig_map)
@@ -4045,29 +4375,33 @@ class Handler(BaseHTTPRequestHandler):
         <div class='full'><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div>
         <div class='full'><label>Zależność / czekamy na</label><input name='depends_on'></div><div class='full'><label>Notatki</label><textarea name='notes'></textarea></div>
         <div class='full'><button class='btn primary'>Dodaj zadanie</button></div></form></div><br>""" if cases else "<div class='notice'>Najpierw dodaj aktywną sprawę, aby utworzyć zadanie.</div>")
-        body=f"""<div class='topbar'><div><h1>{'Moje zadania' if mine else 'Zadania'}</h1><div class='sub'>Czynności we wszystkich sprawach z możliwością przypisania wykonawcy.</div></div><div><a class='btn primary' href='#new-task'>+ Nowe zadanie</a> {mine_button} <a class='btn {a1}' href='/tasks?show=open{qp}'>Otwarte</a> <a class='btn {a2}' href='/tasks?show=all{qp}'>Wszystkie</a></div></div>{create_form}<div class='card'><table><tr><th></th><th>Sprawa</th><th>Zadanie</th><th>Termin</th><th>Wykonawca</th><th>Priorytet</th><th>Akcje</th></tr>{trs}</table></div>"""
+        save_view=self._save_view_form(self.path)
+        body=f"""<div class='topbar'><div><h1>{'Moje zadania' if mine else 'Zadania'}</h1><div class='sub'>Czynności we wszystkich sprawach z możliwością przypisania wykonawcy.</div></div><div><a class='btn primary' href='#new-task'>+ Nowe zadanie</a> <a class='btn' href='/deadline'>+ Termin procesowy</a> {mine_button} <a class='btn {a1}' href='/tasks?show=open{qp}'>Otwarte</a> <a class='btn {a2}' href='/tasks?show=all{qp}'>Wszystkie</a></div></div>{filter_bar}{save_view}{create_form}<div class='card'><table><tr><th></th><th>Sprawa</th><th>Zadanie</th><th>Termin</th><th>Wykonawca</th><th>Priorytet</th><th>Akcje</th></tr>{trs}</table></div>"""
         self.send_html(layout('Zadania',body,'tasks'))
 
     def documents_page(self,qs):
-        q=(qs.get('q') or [''])[0].strip(); dtype=(qs.get('type') or [''])[0].strip(); order=(qs.get('order') or ['desc'])[0].strip().lower()
+        q=(qs.get('q') or [''])[0].strip(); dtype=(qs.get('type') or [''])[0].strip(); dstatus=(qs.get('status') or [''])[0].strip(); order=(qs.get('order') or ['desc'])[0].strip().lower()
         if order not in ('desc','asc'): order='desc'
+        if dstatus and dstatus not in DOC_STATUSES: dstatus=''
         sql="SELECT d.*,c.title case_title,c.signature,c.internal_signature,c.client FROM documents d JOIN cases c ON c.id=d.case_id WHERE 1=1"; params=[]
         if q:
             like=f"%{q}%"; sql += " AND (d.title LIKE ? OR d.description LIKE ? OR d.original_name LIKE ? OR c.signature LIKE ? OR c.internal_signature LIKE ? OR c.client LIKE ? OR c.title LIKE ? OR d.created_by LIKE ? OR d.updated_by LIKE ? OR EXISTS (SELECT 1 FROM case_external_signatures es WHERE es.case_id=c.id AND (es.label LIKE ? OR es.signature LIKE ?)))"; params += [like]*11
         if dtype: sql += " AND d.doc_type=?"; params.append(dtype)
+        if dstatus: sql += " AND d.doc_status=?"; params.append(dstatus)
         direction='ASC' if order=='asc' else 'DESC'
         sql += f" ORDER BY c.title COLLATE NOCASE, CASE WHEN d.doc_date='' THEN 1 ELSE 0 END, d.doc_date {direction}, d.id {direction}"
         with db() as con:
             rows=con.execute(sql,params).fetchall()
             doc_sig_map=load_external_signature_map(con,[r['case_id'] for r in rows])
         opts=''.join(f"<option value='{esc(x)}' {'selected' if dtype==x else ''}>{esc(x)}</option>" for x in DOC_TYPES)
+        status_filter_opts=''.join(f"<option value='{esc(x)}' {'selected' if dstatus==x else ''}>{esc(x)}</option>" for x in DOC_STATUSES)
         doc_form_opts=''.join(f"<option>{esc(x)}</option>" for x in DOC_TYPES)
         doc_status_form_opts=''.join(f"<option>{esc(x)}</option>" for x in DOC_STATUSES)
         grouped={}
         for r in rows: grouped.setdefault(r['case_id'],[]).append(r)
         def newest_key(item):
             cid,docs=item; dates=[d['doc_date'] for d in docs if d['doc_date']]; return (max(dates) if dates else '',docs[0]['case_title'].casefold())
-        groups=sorted(grouped.items(),key=newest_key,reverse=True); auto_open=bool(q or dtype); folders=[]
+        groups=sorted(grouped.items(),key=newest_key,reverse=True); auto_open=bool(q or dtype or dstatus); folders=[]
         for cid,docs in groups:
             first=docs[0]; primary=primary_signature_fast(cid,first['signature'],doc_sig_map); internal=internal_signature_text(first['internal_signature'])
             dates=[d['doc_date'] for d in docs if d['doc_date']]; latest=fmt_date(max(dates)) if dates else 'brak daty'; client=f"Klient: {esc(first['client'])}" if first['client'] else ''
@@ -4099,9 +4433,10 @@ class Handler(BaseHTTPRequestHandler):
             quick_form=f"""<details><summary>+ Szybko dodaj dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid' style='margin-top:10px'><input type='hidden' name='return_to' value='/documents'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_form_opts}</select></div><div><label>Status</label><select name='doc_status'>{doc_status_form_opts}</select></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Plik</label><input type='file' name='file'><label style='font-weight:500'><input style='width:auto' type='checkbox' name='allow_duplicate' value='1'> Zezwól na identyczny plik</label></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"""
             folders.append(f"""<details class='doc-case-folder'{open_attr} id='docs-{cid}'><summary><span class='doc-chevron'>›</span><div class='doc-folder-main'><div class='doc-folder-title'>{esc(primary)} · {esc(internal)} — {esc(first['case_title'])}</div><div class='doc-folder-sub'>{client or 'Kliknij, aby rozwinąć dokumenty sprawy'}</div></div><span class='doc-count'>{len(docs)} dok.</span><span class='doc-latest'>najnowszy: {latest}</span></summary><div class='doc-folder-body'><div class='doc-folder-actions'><a class='btn small' href='/case/{cid}'>Karta sprawy</a></div><div class='doc-type-toolbar'>{type_buttons}</div>{quick_form}{''.join(year_html)}</div></details>""")
         folders_html=''.join(folders) or '<div class="empty">Brak dokumentów.</div>'
-        order_desc='primary' if order=='desc' else ''; order_asc='primary' if order=='asc' else ''; hidden_q=f"&q={quote(q)}" if q else ''; hidden_type=f"&type={quote(dtype)}" if dtype else ''
+        order_desc='primary' if order=='desc' else ''; order_asc='primary' if order=='asc' else ''; hidden_q=f"&q={quote(q)}" if q else ''; hidden_type=f"&type={quote(dtype)}" if dtype else ''; hidden_status=f"&status={quote(dstatus)}" if dstatus else ''
         script="""<script>function filterDocs(folderId,type,btn){const f=document.getElementById(folderId);if(!f)return;f.querySelectorAll('.doc-type-filter').forEach(x=>x.classList.remove('active'));btn.classList.add('active');f.querySelectorAll('.doc-filter-row').forEach(r=>{r.style.display=(!type||r.dataset.docType===type)?'':'none'});f.querySelectorAll('.year-folder').forEach(y=>{const visible=[...y.querySelectorAll('.doc-filter-row')].some(r=>r.style.display!=='none');y.style.display=visible?'':'none';});}</script>"""
-        body=f"""<div class='topbar'><div><h1>Dokumenty</h1><div class='sub'>{len(groups)} teczek spraw · {len(rows)} dokumentów. Teczka → rok → dokument.</div></div><a class='btn primary' href='/cases'>Wybierz sprawę</a></div><div class='card'><form class='form-grid' method='get'><input type='hidden' name='order' value='{order}'><div><label>Szukaj</label><input name='q' value='{esc(q)}' placeholder='Tytuł, plik, sygnatura, autor…'></div><div><label>Rodzaj</label><select name='type'><option value=''>Wszystkie</option>{opts}</select></div><div class='full'><button class='btn'>Filtruj</button> <a class='btn' href='/documents'>Wyczyść</a></div></form></div><br><div class='doc-toolbar'><div class='small muted'>W każdej teczce możesz dodatkowo filtrować typ dokumentu bez przeładowania strony.</div><div class='doc-toolbar-actions'><a class='btn small {order_desc}' href='/documents?order=desc{hidden_q}{hidden_type}'>Najnowsze najpierw</a><a class='btn small {order_asc}' href='/documents?order=asc{hidden_q}{hidden_type}'>Najstarsze najpierw</a><button class='btn small' type='button' onclick="document.querySelectorAll('.doc-case-folder').forEach(x=>x.open=true)">Rozwiń wszystkie</button><button class='btn small' type='button' onclick="document.querySelectorAll('.doc-case-folder').forEach(x=>x.open=false)">Zwiń wszystkie</button></div></div><div class='doc-folders'>{folders_html}</div>{script}"""
+        save_view=self._save_view_form(self.path)
+        body=f"""<div class='topbar'><div><h1>Dokumenty</h1><div class='sub'>{len(groups)} teczek spraw · {len(rows)} dokumentów. Teczka → rok → dokument.</div></div><div><a class='btn primary' href='/quick-add'>+ Dokument</a> <a class='btn' href='/cases'>Wybierz sprawę</a></div></div><div class='card'><form class='form-grid' method='get'><input type='hidden' name='order' value='{order}'><div><label>Szukaj</label><input name='q' value='{esc(q)}' placeholder='Tytuł, plik, sygnatura, autor…'></div><div><label>Rodzaj</label><select name='type'><option value=''>Wszystkie</option>{opts}</select></div><div><label>Status</label><select name='status'><option value=''>Wszystkie statusy</option>{status_filter_opts}</select></div><div class='full'><button class='btn'>Filtruj</button> <a class='btn' href='/documents'>Wyczyść</a> <a class='btn' href='/documents?status=Do%20podpisu'>Do podpisu</a></div></form></div>{save_view}<br><div class='doc-toolbar'><div class='small muted'>W każdej teczce możesz dodatkowo filtrować typ dokumentu bez przeładowania strony.</div><div class='doc-toolbar-actions'><a class='btn small {order_desc}' href='/documents?order=desc{hidden_q}{hidden_type}{hidden_status}'>Najnowsze najpierw</a><a class='btn small {order_asc}' href='/documents?order=asc{hidden_q}{hidden_type}{hidden_status}'>Najstarsze najpierw</a><button class='btn small' type='button' onclick="document.querySelectorAll('.doc-case-folder').forEach(x=>x.open=true)">Rozwiń wszystkie</button><button class='btn small' type='button' onclick="document.querySelectorAll('.doc-case-folder').forEach(x=>x.open=false)">Zwiń wszystkie</button></div></div><div class='doc-folders'>{folders_html}</div>{script}"""
         self.send_html(layout('Dokumenty',body,'documents'))
 
     def note_add(self,cid,f):
@@ -4110,7 +4445,8 @@ class Handler(BaseHTTPRequestHandler):
             with db() as con:
                 cur=con.execute("INSERT INTO case_notes(case_id,note,author) VALUES(?,?,?)",(cid,note,a))
                 audit(con,cid,'note',cur.lastrowid,'Dodano notatkę',note[:120],a)
-        self.redirect(f'/case/{cid}')
+        target=(f.get('return_to','') or '').strip()
+        self.redirect(target if target.startswith('/') else f'/case/{cid}')
 
     def note_delete(self,nid,f):
         try: cid=int(f.get('case_id','0') or 0)

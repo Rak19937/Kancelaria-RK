@@ -111,6 +111,9 @@
       const inp = document.querySelector('[data-global-search], #globalSearchInput');
       if (inp) { inp.focus(); inp.select(); }
       else location.href = '/search?focus=1';
+    } else if (key === 'j') {
+      e.preventDefault();
+      location.href = '/quick-add';
     } else if (key === 'n') {
       e.preventDefault();
       location.href = '/case/new';
