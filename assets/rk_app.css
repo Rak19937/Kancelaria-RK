@@ -66,3 +66,9 @@ table{width:100%;border-collapse:collapse} th,td{text-align:left;padding:11px 9p
 .next-action-card{margin-bottom:16px;border-left:4px solid var(--brand)}.next-action-card h2{margin-bottom:3px}
 .deadline-meta{margin-top:4px;color:#725617;background:#fff8dd;border:1px solid #ead7a2;border-radius:7px;padding:4px 6px;width:max-content;max-width:100%}.deadline-note{border-left:4px solid #c89b2f}
 @media(max-width:900px){.quick-add-grid{grid-template-columns:1fr}.global-add{right:14px;bottom:14px}.autosave-status{right:74px}.save-view-form{justify-content:flex-start;flex-wrap:wrap}.save-view-form input{max-width:none;flex:1 1 220px}}
+
+/* DEV8 — Timeline 2.0 / dokumenty / szablony */
+.timeline-filters{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}.timeline-filters .btn.active{font-weight:800;box-shadow:inset 0 0 0 2px rgba(214,180,106,.35)}
+.timeline-item[hidden]{display:none!important}.timeline-item.timeline-document{border-left:3px solid #476f88}.timeline-item.timeline-task{border-left:3px solid #947b35}.timeline-item.timeline-draft{border-left:3px solid #637b55}.timeline-item.timeline-note{border-left:3px solid #78698d}
+.linked-chip{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:999px;padding:2px 7px;font-size:11px;background:#fff}.template-preview{white-space:pre-wrap;max-height:220px;overflow:auto;background:#f7f9f8;border:1px solid var(--line);padding:10px;border-radius:8px}
+@media(max-width:720px){.timeline-filters{overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px}.timeline-filters .btn{white-space:nowrap}}

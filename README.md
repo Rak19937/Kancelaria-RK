@@ -1,7 +1,11 @@
-# RK KANCELARIA 0.15.2 STABLE DESKTOP
+# RK KANCELARIA 0.2.0-dev8
 
-Wersja scalona: dokumenty, recovery, wydajność i natywne okno Qt WebEngine.
+Desktop / Portable / LAN / PWA foundation dla obsługi spraw kancelarii.
 
-**Ważne dla Windows:** środowisko Desktop znajduje się w `.venv` obok programu. Dane kancelarii pozostają w `%LOCALAPPDATA%\RK_KANCELARIA\Dane`, więc ponowna instalacja `.venv` nie usuwa spraw ani dokumentów.
+Najważniejsze w DEV8: Dokumenty 2.0, Oś czasu 2.0, szablony i wersjonowanie projektów pism,
+Recovery + pełne snapshoty, oraz bezpieczny Cloud Bridge z kontrolą konfliktów.
 
-Uruchomienie: `START_0.15.2.txt`.
+- `README_TRUE_PORTABLE.txt` — Portable
+- `README_SYNCHRONIZACJA.md` — Installed ↔ Portable
+- `CLOUD_DEV8.md` — Cloud/PWA/PostgreSQL bridge
+- `CHANGELOG_0.2.0-dev8_OFFICE_SUITE_CLOUD.txt` — pełna lista zmian

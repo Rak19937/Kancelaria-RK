@@ -33,3 +33,11 @@ Jeżeli Qt WebEngine ma problem ze sterownikiem grafiki, uruchom TRYB_BEZPIECZNY
 
 SYNCHRONIZACJA
 SYNCHRONIZUJ.bat uruchamia okno synchronizacji Installed <-> Portable za pomocą tego samego EXE.
+
+
+DEV8 — OFFICE SUITE & CLOUD FOUNDATION
+- Dokumenty 2.0: statusy, daty wpływu/doręczenia, nadawca, autor, tagi, zadanie/termin, podgląd i naprawa pliku.
+- Oś czasu 2.0: dokumenty, zadania, notatki, projekty i zdarzenia w jednym widoku.
+- Projekty pism: szablony z polami sprawy, historia wersji i przywracanie.
+- Recovery: 30 kopii, pełny integrity_check, pełny snapshot baza+dokumenty+projekty.
+- PWA + Cloud Bridge: bezpieczne, wersjonowane snapshoty z blokadą konfliktu; opcjonalny backend PostgreSQL.

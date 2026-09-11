@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RK KANCELARIA 0.2.0-dev7 — WORKFLOW & DEADLINES.
+"""RK KANCELARIA 0.2.0-dev8 — OFFICE SUITE & CLOUD FOUNDATION.
 
 Rozwój stabilnej 0.15.2: centralne ścieżki i fundament trybu Installed/Portable.
 Funkcje kancelaryjne, dokumenty, backup/recovery i Desktop pozostają zgodne z 0.15.2.
@@ -48,8 +48,8 @@ from rk_paths import resolve_runtime_paths, installed_data_dir
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.2.0-dev7"
-SCHEMA_VERSION = 220
+VERSION = "0.2.0-dev8"
+SCHEMA_VERSION = 230
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
 APP_MODE = RUNTIME_PATHS.mode
@@ -560,7 +560,7 @@ STATUS_BADGES = {
 }
 DOC_TYPES = ["Pismo procesowe", "Wniosek", "Apelacja", "Zażalenie", "Odpowiedź", "Postanowienie", "Wyrok", "Uzasadnienie", "Opinia biegłego", "Dowód", "Korespondencja", "Inne"]
 PLEADING_DOC_TYPES = {"Pismo procesowe", "Wniosek", "Apelacja", "Zażalenie", "Odpowiedź"}
-DOC_STATUSES = ["Aktywny", "Draft", "Do podpisu", "Złożone", "Doręczone", "Oczekiwanie na odpowiedź", "Archiwalne"]
+DOC_STATUSES = ["Aktywny", "Roboczy", "Draft", "Do podpisu", "Podpisany", "Wysłany", "Złożone", "Złożony", "Doręczone", "Doręczony", "Oczekiwanie na odpowiedź", "Archiwalne", "Archiwalny"]
 EVENT_TYPES = ["Czynność", "Rozprawa", "Posiedzenie", "Mediacja", "Orzeczenie", "Wpływ pisma", "Wysłanie pisma", "Doręczenie", "Telefon", "Notatka"]
 
 RELATION_TYPES = {
@@ -716,7 +716,7 @@ def recover_database_if_needed() -> str:
         raise RuntimeError(msg)
     return ''
 
-def create_shutdown_backup(retention: int = 10) -> tuple[str,str]:
+def create_shutdown_backup(retention: int = 30) -> tuple[str,str]:
     try:
         if not DB_PATH.exists(): return '—',''
         ok,why=sqlite_integrity(DB_PATH)
@@ -781,7 +781,7 @@ def apply_pending_restore_if_any() -> str:
     os.replace(PENDING_RESTORE_DB,DB_PATH)
 
     kind=meta.get('kind','backup_restore')
-    if kind=='installed_import':
+    if kind in {'installed_import','cloud_snapshot','data_snapshot'}:
         try:
             if PENDING_IMPORT_DOCS.exists():
                 if FILES_DIR.exists(): shutil.rmtree(FILES_DIR,ignore_errors=True)
@@ -796,7 +796,23 @@ def apply_pending_restore_if_any() -> str:
         finally:
             shutil.rmtree(PENDING_IMPORT_DOCS,ignore_errors=True)
             shutil.rmtree(PENDING_IMPORT_DRAFTS,ignore_errors=True)
-        msg=f"Zaimportowano dane z Installed: {meta.get('source','stara instalacja')}"
+        if kind=='cloud_snapshot':
+            try:
+                rawcon=sqlite3.connect(DB_PATH)
+                rawcon.execute("CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+                for key,value in {
+                    'cloud_last_version':str(meta.get('cloud_version') or 0),
+                    'cloud_last_sync':datetime.now().isoformat(timespec='seconds')
+                }.items():
+                    rawcon.execute("INSERT INTO app_settings(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",(key,value))
+                rawcon.commit(); rawcon.close()
+            except Exception as exc:
+                log_event(f'Nie udało się zapisać stanu Cloud po restore: {exc}','ERROR')
+            msg=f"Pobrano stan Cloud v{meta.get('cloud_version','?')}: {meta.get('source','serwer Cloud')}"
+        elif kind=='data_snapshot':
+            msg=f"Przywrócono pełny snapshot: {meta.get('source','wybrany plik')}"
+        else:
+            msg=f"Zaimportowano dane z Installed: {meta.get('source','stara instalacja')}"
     else:
         msg=f"Przywrócono backup: {meta.get('source','wybrana kopia')}"
     PENDING_RESTORE_MARKER.unlink(missing_ok=True)
@@ -1109,7 +1125,14 @@ def init_db() -> None:
             "deadline_base_date": "TEXT DEFAULT ''", "deadline_days": "INTEGER", "deadline_rule": "TEXT DEFAULT ''",
             "deadline_source": "TEXT DEFAULT ''", "deadline_manual": "INTEGER NOT NULL DEFAULT 0"
         })
-        ensure_columns("documents", {"received_date": "TEXT DEFAULT ''", "created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''", "file_hash": "TEXT DEFAULT ''", "extracted_text": "TEXT DEFAULT ''", "indexed_at": "TEXT DEFAULT ''", "doc_status": "TEXT DEFAULT 'Aktywny'", "ocr_used": "INTEGER NOT NULL DEFAULT 0", "ocr_status": "TEXT DEFAULT ''", "ocr_language": "TEXT DEFAULT ''"})
+        ensure_columns("documents", {
+            "received_date": "TEXT DEFAULT ''", "delivered_date": "TEXT DEFAULT ''",
+            "sender": "TEXT DEFAULT ''", "document_author": "TEXT DEFAULT ''", "tags": "TEXT DEFAULT ''",
+            "linked_task_id": "INTEGER", "created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''",
+            "file_hash": "TEXT DEFAULT ''", "extracted_text": "TEXT DEFAULT ''", "indexed_at": "TEXT DEFAULT ''",
+            "doc_status": "TEXT DEFAULT 'Aktywny'", "ocr_used": "INTEGER NOT NULL DEFAULT 0",
+            "ocr_status": "TEXT DEFAULT ''", "ocr_language": "TEXT DEFAULT ''"
+        })
         ensure_columns("cases", {"closed_edit_unlocked": "INTEGER NOT NULL DEFAULT 0"})
         ensure_columns("parties", {"entity_id": "INTEGER"})
         ensure_columns("case_relations", {"note": "TEXT DEFAULT ''", "created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''"})
@@ -1124,6 +1147,46 @@ def init_db() -> None:
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(user_id,name)
         )""")
+
+        con.execute("""CREATE TABLE IF NOT EXISTS draft_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            doc_type TEXT NOT NULL DEFAULT 'Pismo procesowe',
+            content TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT '',
+            created_by TEXT DEFAULT '',
+            updated_by TEXT DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS draft_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL REFERENCES writing_projects(id) ON DELETE CASCADE,
+            version_no INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            doc_type TEXT DEFAULT '',
+            status TEXT DEFAULT '',
+            due_date TEXT DEFAULT '',
+            content TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            stored_name TEXT DEFAULT '',
+            original_name TEXT DEFAULT '',
+            change_note TEXT DEFAULT '',
+            created_by TEXT DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(project_id,version_no)
+        )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS system_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            check_type TEXT NOT NULL,
+            result TEXT NOT NULL,
+            details TEXT DEFAULT '',
+            created_by TEXT DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_draft_versions_project ON draft_versions(project_id,version_no DESC)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_documents_linked_task ON documents(linked_task_id)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_documents_delivered ON documents(delivered_date)")
 
         # HOTFIX 0.12.13: wersja 0.13 używała w audit_log nazw actor/details,
         # podczas gdy stabilna gałąź 0.12 używa author/description. Ponieważ DATA_DIR
@@ -1589,6 +1652,186 @@ def audit_description_html(value: str) -> str:
     return esc(value or '').replace('\n', '<br>')
 
 
+def full_sqlite_integrity(path: Path) -> tuple[bool, str]:
+    """Pełniejsza kontrola niż quick_check; używana ręcznie z ekranu Recovery."""
+    if not path.exists():
+        return False, 'brak pliku'
+    if not _looks_like_sqlite(path):
+        return False, 'nieprawidłowy nagłówek SQLite'
+    try:
+        con=sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=30)
+        try:
+            rows=con.execute('PRAGMA integrity_check').fetchall()
+            messages=[str(r[0]) for r in rows]
+            ok=(len(messages)==1 and messages[0].lower()=='ok')
+            return ok, ('ok' if ok else '; '.join(messages[:25]))
+        finally:
+            con.close()
+    except Exception as exc:
+        return False, str(exc)
+
+
+def draft_template_context(con: sqlite3.Connection, case_id: int | None, author: str='') -> dict[str,str]:
+    ctx={
+        'DATA': date.today().strftime('%d.%m.%Y'),
+        'PEŁNOMOCNIK': author or APP_AUTHOR,
+        'SĄD':'', 'SYGNATURA':'', 'SYGNATURA_WEWNĘTRZNA':'', 'KLIENT':'',
+        'TYTUŁ_SPRAWY':'', 'PRZEDMIOT':'', 'STRONY':'', 'UCZESTNICY':''
+    }
+    if not case_id:
+        return ctx
+    c=con.execute('SELECT * FROM cases WHERE id=?',(case_id,)).fetchone()
+    if not c:
+        return ctx
+    parties=con.execute('SELECT name,role FROM parties WHERE case_id=? ORDER BY id',(case_id,)).fetchall()
+    party_text='; '.join((f"{x['name']} ({x['role']})" if x['role'] else x['name']) for x in parties)
+    ctx.update({
+        'SĄD': (c['court'] or '') + ((' · '+c['department']) if c['department'] else ''),
+        'SYGNATURA': primary_signature_text(case_id,c['signature'],c['internal_signature']),
+        'SYGNATURA_WEWNĘTRZNA': c['internal_signature'] or '',
+        'KLIENT': c['client'] or '',
+        'TYTUŁ_SPRAWY': c['title'] or '',
+        'PRZEDMIOT': c['subject'] or '',
+        'STRONY': party_text,
+        'UCZESTNICY': party_text,
+    })
+    return ctx
+
+
+def fill_draft_template(content: str, context: dict[str,str]) -> str:
+    text=content or ''
+    for key,value in context.items():
+        text=text.replace('{{'+key+'}}', value or '')
+    return text
+
+
+def save_draft_version(con: sqlite3.Connection, project_id: int, author: str, change_note: str='') -> int | None:
+    d=con.execute('SELECT * FROM writing_projects WHERE id=?',(project_id,)).fetchone()
+    if not d:
+        return None
+    n=int(con.execute('SELECT COALESCE(MAX(version_no),0)+1 FROM draft_versions WHERE project_id=?',(project_id,)).fetchone()[0])
+    version_stored=''
+    if d['stored_name']:
+        src=DRAFTS_DIR/d['stored_name']
+        if src.is_file():
+            vdir=DRAFTS_DIR/f'wersje_{project_id}'; vdir.mkdir(parents=True,exist_ok=True)
+            vname=f"v{n:03d}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{safe_filename(d['original_name'] or src.name)}"
+            dst=vdir/vname
+            try:
+                shutil.copy2(src,dst); version_stored=f'wersje_{project_id}/{vname}'
+            except Exception:
+                version_stored=''
+    cur=con.execute("INSERT INTO draft_versions(project_id,version_no,title,doc_type,status,due_date,content,notes,stored_name,original_name,change_note,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (project_id,n,d['title'],d['doc_type'],d['status'],d['due_date'],d['content'],d['notes'],version_stored,d['original_name'],change_note,author))
+    return cur.lastrowid
+
+
+def create_data_snapshot_zip() -> tuple[bytes,str]:
+    """Pełny przenośny snapshot: baza + dokumenty + projekty. Nie zawiera sekretów DPAPI."""
+    stamp=datetime.now().strftime('%Y%m%d_%H%M%S')
+    tmp=DATA_DIR/f'.snapshot_{uuid.uuid4().hex}.sqlite3'
+    try:
+        _sqlite_backup(DB_PATH,tmp)
+        # Pełny snapshot nie przenosi lokalnych sesji ani sekretów urządzenia.
+        try:
+            sc=sqlite3.connect(tmp)
+            sc.execute("DELETE FROM user_sessions")
+            sc.execute("DELETE FROM app_settings WHERE key IN ('backup_key_dpapi','backup_key_verifier','cloud_token')")
+            sc.commit(); sc.close()
+        except Exception as exc:
+            log_event(f'Nie udało się oczyścić lokalnych sekretów w snapshot: {exc}','WARNING')
+        ok,why=sqlite_integrity(tmp)
+        if not ok:
+            raise RuntimeError(f'Kopia bazy nie przeszła quick_check: {why}')
+        out=io.BytesIO()
+        with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+            z.write(tmp,'sprawnik.sqlite3')
+            meta={
+                'format':'RK-KANCELARIA-DATA-SNAPSHOT','version':1,'app_version':VERSION,
+                'schema_version':SCHEMA_VERSION,'created_at':datetime.now().isoformat(timespec='seconds')
+            }
+            z.writestr('snapshot.json',json.dumps(meta,ensure_ascii=False,indent=2))
+            for root,prefix in ((FILES_DIR,'dokumenty'),(DRAFTS_DIR,'projekty_pism')):
+                if root.exists():
+                    for fp in root.rglob('*'):
+                        if fp.is_file():
+                            try: z.write(fp,f"{prefix}/{fp.relative_to(root).as_posix()}")
+                            except OSError: pass
+        return out.getvalue(),f'RK_KANCELARIA_snapshot_{stamp}.zip'
+    finally:
+        try: tmp.unlink(missing_ok=True)
+        except OSError: pass
+
+
+def cloud_config(con: sqlite3.Connection) -> dict[str,str]:
+    return {
+        'url':(os.getenv('RK_CLOUD_URL','').strip() or settings_get(con,'cloud_url','')),
+        'office_id':(os.getenv('RK_CLOUD_OFFICE_ID','').strip() or settings_get(con,'cloud_office_id','default')),
+        'token':(os.getenv('RK_CLOUD_TOKEN','').strip() or settings_get(con,'cloud_token','')),
+        'last_sync':settings_get(con,'cloud_last_sync',''),
+        'last_version':settings_get(con,'cloud_last_version','0'),
+    }
+
+
+
+def schedule_data_snapshot_restore(raw: bytes, source: str='snapshot', cloud_version: int=0) -> tuple[bool,str]:
+    """Zweryfikuj pełny snapshot i przygotuj bezpieczne przełączenie po restarcie."""
+    try:
+        z=zipfile.ZipFile(io.BytesIO(raw),'r')
+        names=set(z.namelist())
+        if 'snapshot.json' not in names or 'sprawnik.sqlite3' not in names:
+            return False,'Snapshot nie zawiera snapshot.json i sprawnik.sqlite3.'
+        meta=json.loads(z.read('snapshot.json').decode('utf-8'))
+        if meta.get('format')!='RK-KANCELARIA-DATA-SNAPSHOT':
+            return False,'Nieprawidłowy format snapshotu RK KANCELARIA.'
+        try: source_schema=int(meta.get('schema_version') or 0)
+        except Exception: source_schema=0
+        if source_schema>SCHEMA_VERSION:
+            return False,f'Snapshot korzysta z nowszego schematu ({source_schema}) niż ta aplikacja ({SCHEMA_VERSION}). Najpierw zaktualizuj RK KANCELARIA.'
+        PENDING_RESTORE_DIR.mkdir(parents=True,exist_ok=True)
+        tmp=PENDING_RESTORE_DB.with_suffix('.sqlite3.tmp')
+        atomic_write_bytes(tmp,z.read('sprawnik.sqlite3'))
+        ok,why=sqlite_integrity(tmp)
+        if not ok:
+            tmp.unlink(missing_ok=True); return False,f'Baza ze snapshotu nie przeszła quick_check: {why}'
+        os.replace(tmp,PENDING_RESTORE_DB)
+        shutil.rmtree(PENDING_IMPORT_DOCS,ignore_errors=True); shutil.rmtree(PENDING_IMPORT_DRAFTS,ignore_errors=True)
+        PENDING_IMPORT_DOCS.mkdir(parents=True,exist_ok=True); PENDING_IMPORT_DRAFTS.mkdir(parents=True,exist_ok=True)
+        total_unpacked=0
+        max_unpacked=2*1024*1024*1024
+        for info in z.infolist():
+            name=info.filename.replace('\\','/')
+            if info.is_dir(): continue
+            if name.startswith('dokumenty/'):
+                rel=name[len('dokumenty/'):]
+                root=PENDING_IMPORT_DOCS
+            elif name.startswith('projekty_pism/'):
+                rel=name[len('projekty_pism/'):]
+                root=PENDING_IMPORT_DRAFTS
+            else:
+                continue
+            parts=[x for x in Path(rel).parts if x not in {'','.','..'}]
+            if not parts or any('/' in x or '\\' in x for x in parts): continue
+            total_unpacked += int(info.file_size or 0)
+            if total_unpacked>max_unpacked:
+                raise ValueError('Snapshot po rozpakowaniu przekracza limit bezpieczeństwa 2 GB.')
+            dest=root.joinpath(*parts)
+            dest.parent.mkdir(parents=True,exist_ok=True)
+            atomic_write_bytes(dest,z.read(info))
+        marker={
+            'kind':'cloud_snapshot' if cloud_version else 'data_snapshot',
+            'source':source,'scheduled_at':datetime.now().isoformat(timespec='seconds'),
+            'cloud_version':int(cloud_version or 0), 'schema_version':source_schema,
+        }
+        PENDING_RESTORE_MARKER.write_text(json.dumps(marker,ensure_ascii=False),encoding='utf-8')
+        return True,'Snapshot został zweryfikowany. Przełączenie bazy, dokumentów i projektów nastąpi po ponownym uruchomieniu RK KANCELARIA.'
+    except Exception as exc:
+        log_event(f'Planowanie snapshot restore: {exc}','ERROR')
+        try: PENDING_RESTORE_DB.unlink(missing_ok=True)
+        except Exception: pass
+        shutil.rmtree(PENDING_IMPORT_DOCS,ignore_errors=True); shutil.rmtree(PENDING_IMPORT_DRAFTS,ignore_errors=True)
+        return False,str(exc)
+
 def immutable_audit(con: sqlite3.Connection, case_id: int | None, entity_type: str, entity_id: int | None,
                     action: str, description: str, author: str) -> None:
     """Append-only technical log. Application code has no delete/update path for this table."""
@@ -1997,6 +2240,7 @@ def export_case_package(case_id: int) -> tuple[bytes,str]:
         tables['case_entities']=[dict(x) for x in con.execute('SELECT ce.*,e.entity_type,e.display_name,e.first_name,e.last_name,e.company_name,e.pesel,e.nip,e.krs,e.email,e.phone,e.address,e.notes entity_notes FROM case_entities ce JOIN entities e ON e.id=ce.entity_id WHERE ce.case_id=? ORDER BY ce.id',(case_id,))]
         tables['checklist']=[dict(x) for x in con.execute('SELECT * FROM case_checklist_items WHERE case_id=? ORDER BY sort_order,id',(case_id,))]
         tables['writing_projects']=[dict(x) for x in con.execute('SELECT * FROM writing_projects WHERE case_id=? ORDER BY id',(case_id,))]
+        tables['draft_versions']=[dict(x) for x in con.execute('SELECT dv.* FROM draft_versions dv JOIN writing_projects w ON w.id=dv.project_id WHERE w.case_id=? ORDER BY dv.project_id,dv.version_no',(case_id,))]
         # Powiązania są eksportowane jako odwołania do sygnatur/nazw drugiej sprawy.
         # Przy imporcie odtwarzamy je tylko wtedy, gdy druga sprawa już istnieje w docelowej bazie.
         rels=[]
@@ -2014,7 +2258,7 @@ def export_case_package(case_id: int) -> tuple[bytes,str]:
                 rels.append({'direction':'in','relation_type':x['relation_type'],'note':x['note'],
                              'other_signature':x['source_signature'],'other_internal_signature':x['source_internal'],'other_title':x['source_title']})
         tables['relations']=rels
-        manifest={'format':'RK-KANCELARIA-CASE','version':2,'exported_at':datetime.now().isoformat(timespec='seconds'),'case':dict(c),'tables':tables}
+        manifest={'format':'RK-KANCELARIA-CASE','version':3,'exported_at':datetime.now().isoformat(timespec='seconds'),'case':dict(c),'tables':tables}
     out=io.BytesIO()
     with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
         z.writestr('case.json',json.dumps(manifest,ensure_ascii=False,indent=2))
@@ -2026,6 +2270,10 @@ def export_case_package(case_id: int) -> tuple[bytes,str]:
             if w.get('stored_name'):
                 fp=DRAFTS_DIR/w['stored_name']
                 if fp.is_file(): z.write(fp,f"drafts/{w['id']}/{safe_filename(w.get('original_name') or w['stored_name'])}")
+        for v in tables.get('draft_versions',[]):
+            if v.get('stored_name'):
+                fp=DRAFTS_DIR/v['stored_name']
+                if fp.is_file(): z.write(fp,f"draft_versions/{v['project_id']}/{v['id']}/{safe_filename(v.get('original_name') or fp.name)}")
     sig=(c['internal_signature'] or c['signature'] or str(case_id)).replace('/','_').replace('\\','_')
     return out.getvalue(),f"RK_sprawa_{safe_filename(sig)}.rkcase.zip"
 
@@ -2109,7 +2357,7 @@ def purge_old_trash() -> None:
 
 
 def ensure_daily_backup() -> tuple[str,str]:
-    """Jedna automatyczna kopia SQLite dziennie, zachowujemy 20 najnowszych.
+    """Jedna automatyczna kopia SQLite dziennie, zachowujemy 30 najnowszych.
 
     Jeśli skonfigurowano klucz szyfrowania, kopia jest zapisywana jako .rkenc.
     """
@@ -2129,7 +2377,7 @@ def ensure_daily_backup() -> tuple[str,str]:
             else:
                 p=DAILY_BACKUPS_DIR/f'rk_kancelaria_{today}_{stamp}.sqlite3'; os.replace(tmp,p)
         all_files=sorted(list(DAILY_BACKUPS_DIR.glob('rk_kancelaria_*.sqlite3'))+list(DAILY_BACKUPS_DIR.glob('rk_kancelaria_*.sqlite3.rkenc')),key=lambda x:x.stat().st_mtime,reverse=True)
-        for old in all_files[20:]:
+        for old in all_files[30:]:
             try: old.unlink()
             except OSError: pass
         ts=datetime.fromtimestamp(p.stat().st_mtime).strftime('%d.%m.%Y %H:%M')
@@ -2174,6 +2422,7 @@ def layout(title: str, body: str, active: str = "") -> str:
             ("/tasks", "Zadania", "tasks"),
             ("/views", "Moje widoki", "views"),
             ("/drafts", "Projekty pism", "drafts"),
+            ("/draft/templates", "Szablony pism", "draft_templates"),
         ]),
         ("BAZA", [
             ("/documents", "Dokumenty", "documents"),
@@ -2191,6 +2440,8 @@ def layout(title: str, body: str, active: str = "") -> str:
     if user and user['role'] == 'admin':
         nav_sections[-1][1].append(("/audit", "Dziennik audytowy", "audit"))
         nav_sections[-1][1].append(("/security", "Bezpieczeństwo", "security"))
+        nav_sections[-1][1].append(("/recovery", "Recovery", "recovery"))
+        nav_sections[-1][1].append(("/cloud", "Cloud / PWA", "cloud"))
         nav_sections[-1][1].append(("/admin/users", "Użytkownicy", "users"))
     nav_html = "".join(
         f'<div class="nav-section"><div class="nav-section-title">{esc(section)}</div>' +
@@ -2212,6 +2463,7 @@ def layout(title: str, body: str, active: str = "") -> str:
 <html lang="pl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} – {APP_NAME}</title>
 <link rel="icon" type="image/x-icon" href="/assets/rk_kancelaria.ico">
+<link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#082b36"><meta name="apple-mobile-web-app-capable" content="yes">
 <link rel="stylesheet" href="/assets/rk_app.css?v={VERSION}">
 </head><body data-auto-shutdown="{'1' if AUTO_SHUTDOWN else '0'}"><div class="app"><aside class="sidebar"><div class="brand"><img src="/assets/rk_kancelaria_logo.png" alt="RK"><div class="brand-title">RK KANCELARIA<small>Baza spraw · v{VERSION}</small></div></div>{nav_html}
 {user_box}
@@ -2551,7 +2803,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(data)))
-        self.send_header('Cache-Control', 'public, max-age=86400')
+        if safe == 'service-worker.js':
+            self.send_header('Cache-Control','no-cache, no-store, must-revalidate')
+            self.send_header('Service-Worker-Allowed','/')
+        else:
+            self.send_header('Cache-Control', 'public, max-age=86400')
         self.end_headers(); self.wfile.write(data)
 
     def read_post(self):
@@ -2698,6 +2954,8 @@ class Handler(BaseHTTPRequestHandler):
         path, qs = u.path, parse_qs(u.query)
         if path.startswith('/assets/'):
             return self.send_asset(path.split('/')[-1])
+        if path == '/manifest.webmanifest': return self.send_asset('manifest.webmanifest')
+        if path == '/service-worker.js': return self.send_asset('service-worker.js')
         if path == "/system/heartbeat":
             client_heartbeat((qs.get("tab") or [""])[0]); return self.send_no_content()
         if path == "/system/ws":
@@ -2725,6 +2983,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/checklists": return self.checklists_page()
             if path == "/audit": return self.immutable_audit_page(qs)
             if path == "/security": return self.security_page()
+            if path == "/recovery": return self.recovery_page()
+            if path == "/cloud": return self.cloud_page()
             if path == "/case/import": return self.case_import_page()
             if re.fullmatch(r"/case/\d+/export/package", path): return self.case_export_package(int(path.split("/")[2]))
             if path == "/trash": return self.trash_page(qs)
@@ -2744,6 +3004,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/views": return self.saved_views_page()
             if path == "/drafts": return self.drafts_page(qs)
             if path == "/draft/new": return self.draft_new_page(qs)
+            if path == "/draft/templates": return self.draft_templates_page()
             if re.fullmatch(r"/draft/\d+", path): return self.draft_view(int(path.split("/")[2]))
             if re.fullmatch(r"/draft/\d+/edit", path): return self.draft_edit_page(int(path.split("/")[2]))
             if re.fullmatch(r"/draft/\d+/download", path): return self.draft_download(int(path.split("/")[2]))
@@ -2751,6 +3012,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/tags": return self.tags_page(qs)
             if path == "/search": return self.search_page(qs)
             if path == "/backup": return self.backup()
+            if path == "/backup/snapshot": return self.full_snapshot_download()
             if re.fullmatch(r"/document/\d+/open", path): return self.document_view(int(path.split("/")[2]), qs)
             if re.fullmatch(r"/document/\d+/download", path): return self.document_file(int(path.split("/")[2]), download=True)
             if re.fullmatch(r"/document/\d+/file", path): return self.document_file(int(path.split("/")[2]), download=False)
@@ -2817,6 +3079,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/security/ocr/install": return self.ocr_install_start(fields)
             if path == "/security/key": return self.security_key_update(fields)
             if path == "/backup/encrypted": return self.encrypted_backup(fields)
+            if path == "/backup/manual": return self.manual_backup_now(fields)
+            if path == "/recovery/check": return self.recovery_check(fields)
+            if path == "/recovery/snapshot-import": return self.full_snapshot_import(fields, files)
+            if path == "/cloud/config": return self.cloud_config_update(fields)
+            if path == "/cloud/check": return self.cloud_check(fields)
+            if path == "/cloud/push": return self.cloud_push(fields)
+            if path == "/cloud/pull": return self.cloud_pull(fields)
             if path == "/backups/restore": return self.backup_restore_schedule(fields)
             if path == "/data/import-installed": return self.data_import_installed(fields)
             if re.fullmatch(r"/document/\d+/relocate", path): return self.document_relocate(int(path.split("/")[2]), fields, files)
@@ -2824,6 +3093,10 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"/document/\d+/open-folder", path): return self.document_open_folder(int(path.split("/")[2]), fields)
             if path == "/case/import": return self.case_import(fields, files)
             if path == "/draft/create": return self.draft_create(fields, files)
+            if path == "/draft/template/create": return self.draft_template_create(fields)
+            if re.fullmatch(r"/draft/template/\d+/delete", path): return self.draft_template_delete(int(path.split("/")[3]), fields)
+            if path == "/draft/from-template": return self.draft_from_template(fields)
+            if re.fullmatch(r"/draft/\d+/version/\d+/restore", path): return self.draft_version_restore(int(path.split("/")[2]), int(path.split("/")[4]), fields)
             if re.fullmatch(r"/draft/\d+/update", path): return self.draft_update(int(path.split("/")[2]), fields, files)
             if re.fullmatch(r"/draft/\d+/archive", path): return self.draft_archive(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/draft/\d+/to-document", path): return self.draft_to_document(int(path.split("/")[2]), fields)
@@ -3124,7 +3397,7 @@ class Handler(BaseHTTPRequestHandler):
           <div class='card quick-add-card' id='deadline'><h2>Termin procesowy</h2><div class='small muted' style='margin-bottom:10px'>Pomocnicze wyliczenie — dzień początkowy nie jest liczony; końcowa sobota/niedziela/święto jest przesuwana. Zawsze zweryfikuj podstawę prawną.</div><form method='post' action='/deadline/create' class='form-grid'><input type='hidden' name='return_to' value='/today'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div class='full'><label>Czynność *</label><input name='title' required placeholder='np. Wnieść odpowiedź na zażalenie'></div><div><label>Data początkowa *</label><input type='date' name='base_date' required></div><div><label>Liczba dni *</label><input type='number' min='0' max='3650' name='days' required value='7'></div><div><label>Sposób liczenia</label><select name='rule'><option value='calendar'>Dni kalendarzowe / procesowe</option><option value='business'>Dni robocze</option></select></div><div><label>Priorytet</label><select name='priority'><option value='high'>Wysoki</option><option value='normal'>Normalny</option></select></div><div class='full'><label>Podstawa / źródło terminu</label><input name='source' placeholder='np. doręczenie 11.09.2026, art. ...'></div><div class='full'><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div><div class='full'><button class='btn primary'>Wylicz i dodaj termin</button></div></form></div>
           <div class='card quick-add-card'><h2>Zdarzenie na osi czasu</h2><form method='post' action='/quick/event' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=zdarzenie'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div><label>Data</label><input type='date' name='event_date' value='{date.today().isoformat()}'></div><div><label>Typ</label><select name='event_type'>{event_opts}</select></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj zdarzenie</button></div></form></div>
           <div class='card quick-add-card'><h2>Notatka</h2><form method='post' action='/quick/note' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=notatka'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div class='full'><label>Treść *</label><textarea name='note' required></textarea></div><div class='full'><button class='btn primary'>Dodaj notatkę</button></div></form></div>
-          <div class='card quick-add-card'><h2>Dokument / pismo</h2><form method='post' enctype='multipart/form-data' action='/quick/document' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=dokument'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_opts}</select></div><div><label>Status</label><select name='doc_status'>{doc_status_opts}</select></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Plik</label><input type='file' name='file'></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></div>
+          <div class='card quick-add-card'><h2>Dokument / pismo</h2><form method='post' enctype='multipart/form-data' action='/quick/document' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=dokument'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_opts}</select></div><div><label>Status</label><select name='doc_status'>{doc_status_opts}</select></div><div><label>Nadawca</label><input name='sender'></div><div><label>Autor dokumentu</label><input name='document_author'></div><div><label>Tagi</label><input name='tags' placeholder='np. pilne, dowód'></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Plik</label><input type='file' name='file'></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></div>
         </div>"""
         self.send_html(layout('Dodaj czynność',body))
 
@@ -3489,6 +3762,7 @@ class Handler(BaseHTTPRequestHandler):
             tasks=con.execute("SELECT * FROM tasks WHERE case_id=? ORDER BY status,CASE WHEN due_date='' THEN 1 ELSE 0 END,due_date,id",(cid,)).fetchall()
             docs=con.execute("SELECT * FROM documents WHERE case_id=? ORDER BY CASE WHEN doc_date='' THEN 1 ELSE 0 END,doc_date DESC,id DESC",(cid,)).fetchall()
             notes=con.execute("SELECT * FROM case_notes WHERE case_id=? ORDER BY created_at DESC,id DESC",(cid,)).fetchall()
+            drafts=con.execute("SELECT * FROM writing_projects WHERE case_id=? ORDER BY updated_at DESC,id DESC",(cid,)).fetchall()
             relations=con.execute("""SELECT r.*,s.signature source_signature,s.internal_signature source_internal,s.title source_title,t.signature target_signature,t.internal_signature target_internal,t.title target_title FROM case_relations r JOIN cases s ON s.id=r.source_case_id JOIN cases t ON t.id=r.target_case_id WHERE r.source_case_id=? OR r.target_case_id=? ORDER BY r.id""",(cid,cid)).fetchall()
             all_cases=con.execute("SELECT id,signature,internal_signature,title FROM cases WHERE id<>? ORDER BY signature='',signature,title",(cid,)).fetchall()
             case_tags=con.execute("SELECT t.name FROM case_tags ct JOIN tags t ON t.id=ct.tag_id WHERE ct.case_id=? ORDER BY t.name",(cid,)).fetchall()
@@ -3507,6 +3781,7 @@ class Handler(BaseHTTPRequestHandler):
             case_sig_map=load_external_signature_map(con,sig_ids)
         user_map={x['id']:x for x in users}
         task_user_opts='<option value="">— nie przypisano —</option>'+''.join(f"<option value='{x['id']}'>{esc(user_display_name(x))}</option>" for x in users if x['is_active'])
+        doc_task_opts='<option value="">— bez powiązanego zadania / terminu —</option>'+''.join(f"<option value='{x['id']}'>{esc(x['title'])}{(' · '+fmt_date(x['due_date'])) if x['due_date'] else ''}</option>" for x in tasks)
         entity_opts='<option value="">— wybierz podmiot —</option>'+''.join(f"<option value='{x['id']}'>{esc(x['display_name'])}{' · PESEL '+esc(x['pesel']) if x['pesel'] else ''}{' · NIP '+esc(x['nip']) if x['nip'] else ''}</option>" for x in all_entities)
         structured_parts=[]
         for x in structured_entities:
@@ -3551,16 +3826,43 @@ class Handler(BaseHTTPRequestHandler):
             )
         parties_html=''.join(party_parts) or '<tr><td colspan=4>Brak stron.</td></tr>'
 
-        event_parts=[]
+        # Oś czasu 2.0: jeden chronologiczny strumień zdarzeń, dokumentów, zadań, notatek i projektów.
+        timeline_items=[]
         for x in events:
-            event_parts.append(
-                f"<div class='event'><div class='event-date'>{fmt_date(x['event_date'])} · {esc(x['event_type'])}</div>"
-                f"<div class='event-title'>{esc(x['title'])}</div><div class='event-desc'>{esc(x['description'])}</div>{who(x)}"
-                f"<div style='margin-top:6px'><a class='btn small' href='/event/{x['id']}/edit'>Edytuj</a> "
-                f"<form method='post' action='/event/{x['id']}/delete' style='display:inline' onsubmit=\"return confirm('Przenieść to zdarzenie do Kosza?')\">"
-                f"<input type='hidden' name='case_id' value='{cid}'><button class='btn small danger'>Do kosza</button></form></div></div>"
-            )
-        events_html=''.join(event_parts) or '<div class="empty">Brak wpisów na osi czasu.</div>'
+            controls=(f"<div style='margin-top:6px'><a class='btn small' href='/event/{x['id']}/edit'>Edytuj</a> "
+                      f"<form method='post' action='/event/{x['id']}/delete' style='display:inline' onsubmit=\"return confirm('Przenieść to zdarzenie do Kosza?')\"><input type='hidden' name='case_id' value='{cid}'><button class='btn small danger'>Do kosza</button></form></div>")
+            html=(f"<div class='event timeline-item' data-kind='event'><div class='event-date'>{fmt_date(x['event_date'])} · {esc(x['event_type'])}</div>"
+                  f"<div class='event-title'>{esc(x['title'])}</div><div class='event-desc'>{esc(x['description'])}</div>{who(x)}{controls}</div>")
+            timeline_items.append(((x['event_date'] or str(row_get(x,'created_at',''))[:10]),str(row_get(x,'created_at','')),x['id'],'event',html))
+        for x in docs:
+            ddate=row_get(x,'delivered_date','') or x['received_date'] or x['doc_date'] or str(row_get(x,'created_at',''))[:10]
+            phase='Doręczono' if row_get(x,'delivered_date','') else ('Wpłynął dokument' if x['received_date'] else 'Dokument')
+            meta=[]
+            if row_get(x,'sender',''): meta.append('nadawca: '+esc(row_get(x,'sender','')))
+            if row_get(x,'tags',''): meta.append('tagi: '+esc(row_get(x,'tags','')))
+            html=(f"<div class='event timeline-item timeline-document' data-kind='document'><div class='event-date'>{fmt_date(ddate)} · {phase} · {esc(x['doc_type'])}</div>"
+                  f"<div class='event-title'><a href='/document/{x['id']}/open'>{esc(x['title'])}</a></div><div class='event-desc'>{esc(x['description'])}</div>"
+                  f"<div class='small muted'>{' · '.join(meta)}{' · ' if meta else ''}status: {esc(x['doc_status'])}</div>{who(x)}</div>")
+            timeline_items.append((ddate,str(row_get(x,'created_at','')),x['id'],'document',html))
+        for x in tasks:
+            tdate=x['due_date'] or str(row_get(x,'created_at',''))[:10]
+            state='Wykonane' if x['status']=='done' else 'Zadanie / termin'
+            html=(f"<div class='event timeline-item timeline-task' data-kind='task'><div class='event-date'>{fmt_date(tdate)} · {state}</div>"
+                  f"<div class='event-title'><a href='/task/{x['id']}/edit'>{esc(x['title'])}</a></div><div class='event-desc'>{esc(x['notes'])}</div>{who(x)}</div>")
+            timeline_items.append((tdate,str(row_get(x,'created_at','')),x['id'],'task',html))
+        for x in notes:
+            ndate=str(x['created_at'] or '')[:10]
+            html=(f"<div class='event timeline-item timeline-note' data-kind='note'><div class='event-date'>{fmt_date(ndate)} · Notatka</div>"
+                  f"<div class='event-desc' style='white-space:pre-wrap'>{esc(x['note'])}</div><div class='author'>{esc(x['author'])}</div></div>")
+            timeline_items.append((ndate,str(x['created_at'] or ''),x['id'],'note',html))
+        for x in drafts:
+            pdate=str(x['updated_at'] or x['created_at'] or '')[:10]
+            html=(f"<div class='event timeline-item timeline-draft' data-kind='draft'><div class='event-date'>{fmt_date(pdate)} · Projekt pisma · {esc(x['status'])}</div>"
+                  f"<div class='event-title'><a href='/draft/{x['id']}'>{esc(x['title'])}</a></div><div class='event-desc'>{esc(x['doc_type'])}</div>{who(x)}</div>")
+            timeline_items.append((pdate,str(x['updated_at'] or x['created_at'] or ''),x['id'],'draft',html))
+        timeline_items.sort(key=lambda z:(z[0] or '',z[1] or '',z[2]),reverse=True)
+        events_html=''.join(x[4] for x in timeline_items) or '<div class="empty">Brak wpisów na osi czasu.</div>'
+        timeline_filters="""<div class='timeline-filters'><button type='button' class='btn small primary' data-timeline-filter='all'>Wszystko</button><button type='button' class='btn small' data-timeline-filter='event'>Zdarzenia</button><button type='button' class='btn small' data-timeline-filter='document'>Dokumenty</button><button type='button' class='btn small' data-timeline-filter='task'>Zadania</button><button type='button' class='btn small' data-timeline-filter='draft'>Projekty</button><button type='button' class='btn small' data-timeline-filter='note'>Notatki</button></div>"""
 
         task_parts=[]
         for x in tasks:
@@ -3589,9 +3891,19 @@ class Handler(BaseHTTPRequestHandler):
             if x['stored_name']:
                 file_actions=f"<a class='btn small' href='/document/{x['id']}/open'>Otwórz</a> <a class='btn small' href='/document/{x['id']}/download'>Pobierz</a>"
             filename=esc(x['original_name']) if x['original_name'] else 'bez pliku'
+            linked=''
+            if row_get(x,'linked_task_id',None):
+                lt=next((t for t in tasks if t['id']==row_get(x,'linked_task_id')),None)
+                if lt:
+                    linked=f"<div class='small linked-chip'>↳ zadanie/termin: <a href='/task/{lt['id']}/edit'>{esc(lt['title'])}</a></div>"
+            metadata=[]
+            if row_get(x,'sender',''): metadata.append('nadawca: '+esc(row_get(x,'sender','')))
+            if row_get(x,'document_author',''): metadata.append('autor dokumentu: '+esc(row_get(x,'document_author','')))
+            if row_get(x,'tags',''): metadata.append('tagi: '+esc(row_get(x,'tags','')))
+            meta_html=("<div class='small muted'>"+' · '.join(metadata)+"</div>") if metadata else ''
             doc_parts.append(
-                f"<tr><td><b>dokument:</b> {fmt_date(x['doc_date'])}<div class='small muted'><b>wpływ:</b> {fmt_date(x['received_date'])}</div></td>"
-                f"<td><span class='pill'>{esc(x['doc_type'])}</span><div><span class='doc-status {'sign' if x['doc_status']=='Do podpisu' else ''}'>{esc(x['doc_status'])}</span></div></td><td><b>{esc(x['title'])}</b><div class='small muted'>{esc(x['description'])}</div><div class='small muted'>{filename}</div>{who(x)}</td>"
+                f"<tr><td><b>dokument:</b> {fmt_date(x['doc_date'])}<div class='small muted'><b>wpływ:</b> {fmt_date(x['received_date'])}</div><div class='small muted'><b>doręczenie:</b> {fmt_date(row_get(x,'delivered_date',''))}</div></td>"
+                f"<td><span class='pill'>{esc(x['doc_type'])}</span><div><span class='doc-status {'sign' if x['doc_status']=='Do podpisu' else ''}'>{esc(x['doc_status'])}</span></div></td><td><b>{esc(x['title'])}</b><div class='small muted'>{esc(x['description'])}</div>{meta_html}{linked}<div class='small muted'>{filename}</div>{who(x)}</td>"
                 f"<td>{file_actions}</td><td class='nowrap'><a class='btn small' href='/document/{x['id']}/edit'>Edytuj</a> "
                 f"<form method='post' action='/document/{x['id']}/delete' style='display:inline' onsubmit=\"return confirm('Przenieść dokument do Kosza? Plik zostanie zachowany do czasu trwałego usunięcia z Kosza.')\"><input type='hidden' name='case_id' value='{cid}'><button class='btn small danger'>Do kosza</button></form></td></tr>"
             )
@@ -3676,10 +3988,10 @@ class Handler(BaseHTTPRequestHandler):
           <div class='card span4'><h2>Strony / uczestnicy — wpisy tekstowe</h2><table>{parties_html}</table>{'' if readonly else f"<details><summary>+ Dodaj wpis tekstowy</summary><form method='post' action='/case/{cid}/party' class='form-grid' style='margin-top:12px'><div><label>Imię i nazwisko</label><input name='name' required></div><div><label>Rola</label><input name='role'></div><div class='full'><label>Notatka</label><input name='notes'></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details>"}</div>
           <div class='card span12'><h2>Sygnatury innych organów</h2><div class='small muted' style='margin-bottom:10px'>Dodaj dowolną liczbę oznaczeń spoza sygnatury sądowej.</div><table><tr><th>Nazwa / organ</th><th>Sygnatura / numer</th><th></th></tr>{external_signatures_html}</table><details><summary>+ Dodaj dodatkową sygnaturę</summary><form method='post' action='/case/{cid}/external-signature' class='form-grid' style='margin-top:12px'><div><label>Nazwa pola *</label><input name='label' required placeholder='np. Sygnatura prokuratury'></div><div><label>Sygnatura / numer *</label><input name='signature' required></div><div class='full'><button class='btn primary'>Dodaj sygnaturę</button></div></form></details></div>
           <div class='card span12'><h2>Powiązane sprawy</h2><table><tr><th>Relacja</th><th>Sprawa</th><th>Notatka / autor</th><th></th></tr>{relations_html}</table><details><summary>+ Połącz z inną sprawą</summary>{relation_form}</details></div>
-          <div class='card span7'><h2>Oś czasu</h2><div class='timeline'>{events_html}</div><details><summary>+ Dodaj zdarzenie</summary><form method='post' action='/case/{cid}/event' class='form-grid' style='margin-top:12px'><div><label>Data</label><input type='date' name='event_date' value='{date.today().isoformat()}'></div><div><label>Typ</label><select name='event_type'>{event_opts}</select></div><div class='full'><label>Tytuł</label><input name='title' required></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details></div>
+          <div class='card span7'><div class='section-head'><div><h2>Oś czasu 2.0</h2><div class='small muted'>Zdarzenia, dokumenty, zadania, notatki i projekty w jednym strumieniu.</div></div></div>{timeline_filters}<div class='timeline'>{events_html}</div><details><summary>+ Dodaj zdarzenie</summary><form method='post' action='/case/{cid}/event' class='form-grid' style='margin-top:12px'><div><label>Data</label><input type='date' name='event_date' value='{date.today().isoformat()}'></div><div><label>Typ</label><select name='event_type'>{event_opts}</select></div><div class='full'><label>Tytuł</label><input name='title' required></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details></div>
           <div class='card span5'><h2>Zadania</h2>{tasks_html}<details><summary>+ Dodaj zadanie</summary><form method='post' action='/case/{cid}/task' class='form-grid' style='margin-top:12px'><div class='full'><label>Zadanie</label><input name='title' required></div><div><label>Termin</label><input type='date' name='due_date'></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div><div class='full'><label>Wykonawca</label><select name='assigned_user_id'>{task_user_opts}</select></div><div class='full'><label>Zależność / czekamy na</label><input name='depends_on'></div><div class='full'><label>Notatki</label><textarea name='notes'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details></div>
           <div class='card span12'><div class='section-head'><div><h2>Kontrola kompletności</h2><div class='small muted'>Checklista sprawy — można zastosować szablon odpowiedni do kategorii albo dodawać własne elementy.</div></div><a class='btn small' href='/checklists'>Szablony</a></div>{checklist_html}{'' if readonly else f"<div class='form-grid' style='margin-top:12px'><form method='post' action='/case/{cid}/checklist/apply'><label>Zastosuj szablon</label><select name='template_id' required>{checklist_opts}</select><button class='btn'>Zastosuj</button></form><form method='post' action='/case/{cid}/checklist/add'><label>Dodaj własny element</label><input name='label' required placeholder='np. Potwierdzenie opłaty'><button class='btn'>Dodaj</button></form></div>"}</div>
-          <div class='card span12' id='documents'><div class='section-head'><h2>Dokumenty</h2><a class='btn small' href='/documents?q={quote(c['internal_signature'] or c['signature'] or c['title'])}'>Otwórz teczkę dokumentów</a></div><table><tr><th>Daty</th><th>Rodzaj</th><th>Dokument / autor</th><th>Plik</th><th></th></tr>{docs_html}</table>{'' if readonly else f"<details open><summary>+ Podepnij dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid' style='margin-top:12px'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_opts}</select></div><div><label>Status dokumentu</label><select name='doc_status'>{doc_status_opts}</select></div><div class='full'><label>Tytuł *</label><input id='newDocTitle' name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Plik (opcjonalnie)</label><input type='file' name='file'><label style='font-weight:500'><input style='width:auto' type='checkbox' name='allow_duplicate' value='1'> Zezwól na identyczny plik, jeśli świadomie chcę duplikat</label></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"}</div>
+          <div class='card span12' id='documents'><div class='section-head'><div><h2>Dokumenty 2.0</h2><div class='small muted'>Metadane, status, doręczenie, tagi i powiązanie z terminem/zadaniem.</div></div><a class='btn small' href='/documents?q={quote(c['internal_signature'] or c['signature'] or c['title'])}'>Otwórz teczkę dokumentów</a></div><table><tr><th>Daty</th><th>Rodzaj</th><th>Dokument / autor</th><th>Plik</th><th></th></tr>{docs_html}</table>{'' if readonly else f"<details open><summary>+ Podepnij dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid' style='margin-top:12px'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_opts}</select></div><div><label>Status dokumentu</label><select name='doc_status'>{doc_status_opts}</select></div><div><label>Nadawca</label><input name='sender'></div><div><label>Autor dokumentu</label><input name='document_author'></div><div><label>Tagi</label><input name='tags' placeholder='np. dowód, odpowiedź, pilne'></div><div class='full'><label>Powiązane zadanie / termin</label><select name='linked_task_id'>{doc_task_opts}</select></div><div class='full'><label>Tytuł *</label><input id='newDocTitle' name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Plik (opcjonalnie)</label><input type='file' name='file'><label style='font-weight:500'><input style='width:auto' type='checkbox' name='allow_duplicate' value='1'> Zezwól na identyczny plik, jeśli świadomie chcę duplikat</label></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"}</div>
           <div class='card span12'><h2>Notatki chronologiczne</h2>{notes_html}<details><summary>+ Dodaj notatkę</summary><form method='post' action='/case/{cid}/note' style='margin-top:12px'><label>Treść notatki</label><textarea name='note' required></textarea><button class='btn primary'>Dodaj notatkę</button></form></details></div>
           <div class='card span12'><div class='section-head'><div><h2>Historia zmian tej sprawy</h2><div class='small muted'>Kto, kiedy i co zmienił. Powtarzające się autosave są scalane.</div></div><a class='btn small' href='/history?case_id={cid}'>Pełna historia</a></div>{history_html}</div>
         </div>"""
@@ -3984,12 +4296,17 @@ class Handler(BaseHTTPRequestHandler):
             d=con.execute("SELECT d.*,c.signature,c.title case_title FROM documents d JOIN cases c ON c.id=d.case_id WHERE d.id=?",(did,)).fetchone()
             if d and case_read_only(con,d['case_id']):
                 return self.send_html(layout('Sprawa tylko do odczytu',f"<div class='readonly-banner'>Sprawa jest zakończona i zablokowana. <a class='btn' href='/case/{d['case_id']}'>Wróć</a></div>",'documents'),403)
+            tasks=con.execute("SELECT id,title,due_date,status FROM tasks WHERE case_id=? ORDER BY status,CASE WHEN due_date='' THEN 1 ELSE 0 END,due_date,id",(d['case_id'],)).fetchall() if d else []
         if not d: return self.send_error(404)
         opts=''.join(f"<option value='{esc(x)}' {'selected' if d['doc_type']==x else ''}>{esc(x)}</option>" for x in DOC_TYPES)
         status_opts=''.join(f"<option value='{esc(x)}' {'selected' if d['doc_status']==x else ''}>{esc(x)}</option>" for x in DOC_STATUSES)
+        task_opts=['<option value="">— bez powiązanego zadania / terminu —</option>']
+        for t in tasks:
+            label=t['title']+((' · '+fmt_date(t['due_date'])) if t['due_date'] else '')
+            task_opts.append(f"<option value='{t['id']}' {'selected' if row_get(d,'linked_task_id',None)==t['id'] else ''}>{esc(label)}</option>")
         current=f"Aktualny plik: <b>{esc(d['original_name'])}</b>" if d['stored_name'] else "Brak podpiętego pliku."
         idx=f"Zindeksowano: {esc(d['indexed_at'])}" if d['indexed_at'] else 'Treść nie była jeszcze indeksowana.'
-        body=f'''<div class="topbar"><div><h1>Edytuj dokument</h1><div class="sub">{esc(d['signature'] or d['case_title'])}</div></div></div><div class="card"><form method="post" enctype="multipart/form-data" action="/document/{did}/update" class="form-grid" data-autosave="1"><input type="hidden" name="case_id" value="{d['case_id']}"><div><label>Data dokumentu</label><input type="date" name="doc_date" value="{esc(d['doc_date'])}"></div><div><label>Data wpływu</label><input type="date" name="received_date" value="{esc(d['received_date'])}"></div><div><label>Rodzaj</label><select name="doc_type">{opts}</select></div><div><label>Status dokumentu</label><select name="doc_status">{status_opts}</select></div><div class="full"><label>Tytuł</label><input name="title" required value="{esc(d['title'])}"></div><div class="full"><label>Opis</label><textarea name="description">{esc(d['description'])}</textarea></div><div class="full"><label>Podmień / dodaj plik</label><input type="file" name="file"><div class="small muted">{current} Wybranie nowego pliku zastąpi dotychczasowy. {idx}</div><label style="font-weight:500"><input style="width:auto" type="checkbox" name="allow_duplicate" value="1"> Zezwól na identyczny plik, jeśli świadomie chcę duplikat</label></div><div class="full"><button class="btn primary">Zapisz zmiany</button> <a class="btn" href="/case/{d['case_id']}">Anuluj</a></div></form></div>'''
+        body=f'''<div class="topbar"><div><h1>Edytuj dokument</h1><div class="sub">{esc(d['signature'] or d['case_title'])}</div></div></div><div class="card"><form method="post" enctype="multipart/form-data" action="/document/{did}/update" class="form-grid" data-autosave="1"><input type="hidden" name="case_id" value="{d['case_id']}"><div><label>Data dokumentu</label><input type="date" name="doc_date" value="{esc(d['doc_date'])}"></div><div><label>Data wpływu</label><input type="date" name="received_date" value="{esc(d['received_date'])}"></div><div><label>Data doręczenia</label><input type="date" name="delivered_date" value="{esc(row_get(d,'delivered_date',''))}"></div><div><label>Rodzaj</label><select name="doc_type">{opts}</select></div><div><label>Status dokumentu</label><select name="doc_status">{status_opts}</select></div><div><label>Nadawca</label><input name="sender" value="{esc(row_get(d,'sender',''))}"></div><div><label>Autor dokumentu</label><input name="document_author" value="{esc(row_get(d,'document_author',''))}"></div><div><label>Tagi</label><input name="tags" value="{esc(row_get(d,'tags',''))}" placeholder="np. dowód, odpowiedź, pilne"></div><div class="full"><label>Powiązane zadanie / termin</label><select name="linked_task_id">{''.join(task_opts)}</select></div><div class="full"><label>Tytuł</label><input name="title" required value="{esc(d['title'])}"></div><div class="full"><label>Opis</label><textarea name="description">{esc(d['description'])}</textarea></div><div class="full"><label>Podmień / dodaj plik</label><input type="file" name="file"><div class="small muted">{current} Wybranie nowego pliku zastąpi dotychczasowy. {idx}</div><label style="font-weight:500"><input style="width:auto" type="checkbox" name="allow_duplicate" value="1"> Zezwól na identyczny plik, jeśli świadomie chcę duplikat</label></div><div class="full"><button class="btn primary">Zapisz zmiany</button> <a class="btn" href="/case/{d['case_id']}">Anuluj</a></div></form></div>'''
         self.send_html(layout("Edycja dokumentu",body,"documents"))
 
     def document_update(self,did,f,files):
@@ -4010,16 +4327,27 @@ class Handler(BaseHTTPRequestHandler):
                 newstored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"; atomic_write_bytes(folder/newstored,newdata)
                 oldstored=stored; stored=newstored
             else: oldstored=''
+            try: linked=int(f.get('linked_task_id') or 0) or None
+            except Exception: linked=None
+            if linked and not con.execute('SELECT 1 FROM tasks WHERE id=? AND case_id=?',(linked,d['case_id'])).fetchone(): linked=None
             new_values={
-                'doc_date':f.get('doc_date',''),'received_date':f.get('received_date',''),'doc_type':f.get('doc_type','Inne'),
-                'doc_status':f.get('doc_status','Aktywny'),'title':f.get('title','').strip(),'description':f.get('description','').strip()
+                'doc_date':f.get('doc_date',''),'received_date':f.get('received_date',''),'delivered_date':f.get('delivered_date',''),
+                'doc_type':f.get('doc_type','Inne'),'doc_status':f.get('doc_status','Aktywny'),'title':f.get('title','').strip(),
+                'description':f.get('description','').strip(),'sender':f.get('sender','').strip(),
+                'document_author':f.get('document_author','').strip(),'tags':f.get('tags','').strip(),'linked_task_id':linked
             }
             details=describe_changes(d,new_values,{
-                'doc_date':'Data dokumentu','received_date':'Data wpływu','doc_type':'Rodzaj','doc_status':'Status dokumentu','title':'Tytuł','description':'Opis'
+                'doc_date':'Data dokumentu','received_date':'Data wpływu','delivered_date':'Data doręczenia','doc_type':'Rodzaj',
+                'doc_status':'Status dokumentu','title':'Tytuł','description':'Opis','sender':'Nadawca','document_author':'Autor dokumentu','tags':'Tagi'
             },compact_fields={'description'})
+            if row_get(d,'linked_task_id',None) != linked:
+                old_t=con.execute('SELECT title FROM tasks WHERE id=?',(row_get(d,'linked_task_id',None),)).fetchone() if row_get(d,'linked_task_id',None) else None
+                new_t=con.execute('SELECT title FROM tasks WHERE id=?',(linked,)).fetchone() if linked else None
+                details=(details+'\n'+f"• Powiązane zadanie / termin: {_change_value(old_t['title'] if old_t else '—')} → {_change_value(new_t['title'] if new_t else '—')}").strip()
             if newdata is not None:
                 details=(details+'\n'+f"• Plik: {_change_value(d['original_name'])} → {_change_value(original)}").strip()
-            con.execute("UPDATE documents SET doc_date=?,received_date=?,doc_type=?,doc_status=?,title=?,description=?,stored_name=?,original_name=?,updated_by=? WHERE id=?",(new_values['doc_date'],new_values['received_date'],new_values['doc_type'],new_values['doc_status'],new_values['title'],new_values['description'],stored,original,a,did)); cid=d['case_id']
+            con.execute("UPDATE documents SET doc_date=?,received_date=?,delivered_date=?,doc_type=?,doc_status=?,title=?,description=?,sender=?,document_author=?,tags=?,linked_task_id=?,stored_name=?,original_name=?,updated_by=? WHERE id=?",
+                        (new_values['doc_date'],new_values['received_date'],new_values['delivered_date'],new_values['doc_type'],new_values['doc_status'],new_values['title'],new_values['description'],new_values['sender'],new_values['document_author'],new_values['tags'],linked,stored,original,a,did)); cid=d['case_id']
             if newdata is not None:
                 con.execute("UPDATE documents SET file_hash=?,extracted_text='',indexed_at='',ocr_status='kolejka' WHERE id=?",(sha256_bytes(newdata),did))
                 if oldstored:
@@ -4032,8 +4360,7 @@ class Handler(BaseHTTPRequestHandler):
             if details:
                 action='Edytowano pismo' if new_values['doc_type'] in PLEADING_DOC_TYPES else 'Edytowano dokument'
                 audit(con,cid,'document',did,action,details,a)
-        if newdata is not None:
-            enqueue_document_index(did)
+        if newdata is not None: enqueue_document_index(did)
         target=(f.get('return_to','') or '').strip()
         self.redirect(target if target.startswith('/') else f"/case/{cid}")
 
@@ -4095,12 +4422,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_html(layout('Wykryto duplikat',body,'documents'),409)
             folder=FILES_DIR/f"sprawa_{cid}"; folder.mkdir(parents=True,exist_ok=True); stored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"; atomic_write_bytes(folder/stored,data)
         with db() as con:
-            dtype=f.get('doc_type','Inne'); dstatus=f.get('doc_status','Aktywny'); ddate=f.get('doc_date',''); rdate=f.get('received_date','')
-            cur=con.execute("INSERT INTO documents(case_id,doc_date,received_date,doc_type,doc_status,title,description,stored_name,original_name,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(cid,ddate,rdate,dtype,dstatus,title,f.get('description','').strip(),stored,original,a,a))
+            dtype=f.get('doc_type','Inne'); dstatus=f.get('doc_status','Aktywny'); ddate=f.get('doc_date',''); rdate=f.get('received_date',''); delivered=f.get('delivered_date','')
+            try: linked=int(f.get('linked_task_id') or 0) or None
+            except Exception: linked=None
+            if linked and not con.execute('SELECT 1 FROM tasks WHERE id=? AND case_id=?',(linked,cid)).fetchone(): linked=None
+            cur=con.execute("INSERT INTO documents(case_id,doc_date,received_date,delivered_date,doc_type,doc_status,title,description,sender,document_author,tags,linked_task_id,stored_name,original_name,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (cid,ddate,rdate,delivered,dtype,dstatus,title,f.get('description','').strip(),f.get('sender','').strip(),f.get('document_author','').strip(),f.get('tags','').strip(),linked,stored,original,a,a))
             doc_id=cur.lastrowid
             if data is not None: con.execute("UPDATE documents SET file_hash=?,ocr_status='kolejka' WHERE id=?",(sha256_bytes(data),doc_id))
             details=(f"Tytuł: {_change_value(title)}\nRodzaj: {_change_value(dtype)}\nStatus: {_change_value(dstatus)}"
-                     f"\nData dokumentu: {_change_value(ddate)}\nData wpływu: {_change_value(rdate)}")
+                     f"\nData dokumentu: {_change_value(ddate)}\nData wpływu: {_change_value(rdate)}\nData doręczenia: {_change_value(delivered)}"
+                     f"\nNadawca: {_change_value(f.get('sender','').strip())}\nAutor dokumentu: {_change_value(f.get('document_author','').strip())}\nTagi: {_change_value(f.get('tags','').strip())}")
+            if linked:
+                t=con.execute('SELECT title FROM tasks WHERE id=?',(linked,)).fetchone(); details += f"\nPowiązane zadanie/termin: {_change_value(t['title'] if t else linked)}"
             if original: details += f"\nPlik: {_change_value(original)}"
             action='Dodano pismo' if dtype in PLEADING_DOC_TYPES else 'Dodano dokument'
             audit(con,cid,'document',doc_id,action,details,a)
@@ -4181,7 +4515,7 @@ class Handler(BaseHTTPRequestHandler):
         state,p,why=document_state(d)
         if state!='ok' or not p: return self.document_missing_page(d,why)
         ext=Path(d['original_name'] or p.name).suffix.lower(); case_label=primary_signature_text(d['case_id'],d['signature'],d['internal_signature'])
-        meta=f"{esc(d['doc_type'])} · data dokumentu: {fmt_date(d['doc_date'])} · wpływ: {fmt_date(d['received_date'])}"
+        meta=f"{esc(d['doc_type'])} · status: {esc(d['doc_status'])} · data: {fmt_date(d['doc_date'])} · wpływ: {fmt_date(d['received_date'])} · doręczenie: {fmt_date(row_get(d,'delivered_date',''))}"; extra_meta=' · '.join(x for x in [f"nadawca: {esc(row_get(d,'sender',''))}" if row_get(d,'sender','') else '',f"autor: {esc(row_get(d,'document_author',''))}" if row_get(d,'document_author','') else '',f"tagi: {esc(row_get(d,'tags',''))}" if row_get(d,'tags','') else ''] if x); meta += ((' · '+extra_meta) if extra_meta else '')
         desktop_actions=''
         if DESKTOP_MODE and LOCAL_MODE:
             desktop_actions=f"<form method='post' action='/document/{did}/open-default' style='display:inline'><button class='btn'>Otwórz w programie domyślnym</button></form> <form method='post' action='/document/{did}/open-folder' style='display:inline'><button class='btn'>Otwórz folder dokumentu</button></form>"
@@ -4385,7 +4719,7 @@ class Handler(BaseHTTPRequestHandler):
         if dstatus and dstatus not in DOC_STATUSES: dstatus=''
         sql="SELECT d.*,c.title case_title,c.signature,c.internal_signature,c.client FROM documents d JOIN cases c ON c.id=d.case_id WHERE 1=1"; params=[]
         if q:
-            like=f"%{q}%"; sql += " AND (d.title LIKE ? OR d.description LIKE ? OR d.original_name LIKE ? OR c.signature LIKE ? OR c.internal_signature LIKE ? OR c.client LIKE ? OR c.title LIKE ? OR d.created_by LIKE ? OR d.updated_by LIKE ? OR EXISTS (SELECT 1 FROM case_external_signatures es WHERE es.case_id=c.id AND (es.label LIKE ? OR es.signature LIKE ?)))"; params += [like]*11
+            like=f"%{q}%"; sql += " AND (d.title LIKE ? OR d.description LIKE ? OR d.original_name LIKE ? OR d.sender LIKE ? OR d.document_author LIKE ? OR d.tags LIKE ? OR c.signature LIKE ? OR c.internal_signature LIKE ? OR c.client LIKE ? OR c.title LIKE ? OR d.created_by LIKE ? OR d.updated_by LIKE ? OR EXISTS (SELECT 1 FROM case_external_signatures es WHERE es.case_id=c.id AND (es.label LIKE ? OR es.signature LIKE ?)))"; params += [like]*14
         if dtype: sql += " AND d.doc_type=?"; params.append(dtype)
         if dstatus: sql += " AND d.doc_status=?"; params.append(dstatus)
         direction='ASC' if order=='asc' else 'DESC'
@@ -4427,10 +4761,15 @@ class Handler(BaseHTTPRequestHandler):
                     if r['stored_name']: file_actions=f"<a class='btn small' href='/document/{r['id']}/open'>Otwórz</a> <a class='btn small' href='/document/{r['id']}/download'>Pobierz</a>"
                     filename=esc(r['original_name']) if r['original_name'] else 'bez pliku'
                     ocr_info=("<div class='small muted'>OCR: "+esc(r['ocr_language'] or 'tak')+"</div>") if r['ocr_used'] else ("<div class='small muted'>OCR: silnik niedostępny</div>" if r['ocr_status']=='ocr_brak_silnika' else '')
-                    rows_html.append(f"<tr class='doc-filter-row' data-doc-type='{esc(r['doc_type'])}'><td class='nowrap'><b>{fmt_date(r['doc_date'])}</b><div class='small muted'>wpływ: {fmt_date(r['received_date'])}</div></td><td><span class='pill'>{esc(r['doc_type'])}</span><div><span class='doc-status {'sign' if r['doc_status']=='Do podpisu' else ''}'>{esc(r['doc_status'])}</span></div></td><td><b>{esc(r['title'])}</b><div class='small muted'>{esc(r['description'])}</div><div class='small muted'>{filename}</div>{ocr_info}{auth_html}</td><td class='nowrap'>{file_actions} <a class='btn small' href='/document/{r['id']}/edit'>Edytuj</a> <form method='post' action='/document/{r['id']}/delete' style='display:inline' onsubmit=\"return confirm('Przenieść dokument do Kosza?');\"><input type='hidden' name='case_id' value='{cid}'><button class='btn small danger'>Do kosza</button></form></td></tr>")
+                    sender_info=(f"<div class='small muted'>nadawca: {esc(row_get(r,'sender',''))}</div>" if row_get(r,'sender','') else '')
+                    doc_author_info=(f"<div class='small muted'>autor dokumentu: {esc(row_get(r,'document_author',''))}</div>" if row_get(r,'document_author','') else '')
+                    tags_info=(f"<div class='small'>tagi: {esc(row_get(r,'tags',''))}</div>" if row_get(r,'tags','') else '')
+                    linked_id=int(row_get(r,'linked_task_id',0) or 0)
+                    linked_info=(f"<div class='small'><a class='linked-chip' href='/task/{linked_id}/edit'>Powiązane zadanie #{linked_id}</a></div>" if linked_id else '')
+                    rows_html.append(f"""<tr class='doc-filter-row' data-doc-type='{esc(r['doc_type'])}'><td class='nowrap'><b>{fmt_date(r['doc_date'])}</b><div class='small muted'>wpływ: {fmt_date(r['received_date'])}</div><div class='small muted'>doręczenie: {fmt_date(row_get(r,'delivered_date',''))}</div></td><td><span class='pill'>{esc(r['doc_type'])}</span><div><span class='doc-status {'sign' if r['doc_status']=='Do podpisu' else ''}'>{esc(r['doc_status'])}</span></div></td><td><b>{esc(r['title'])}</b><div class='small muted'>{esc(r['description'])}</div>{sender_info}{doc_author_info}{tags_info}{linked_info}<div class='small muted'>{filename}</div>{ocr_info}{auth_html}</td><td class='nowrap'>{file_actions} <a class='btn small' href='/document/{r['id']}/edit'>Edytuj</a> <form method='post' action='/document/{r['id']}/delete' style='display:inline' onsubmit="return confirm('Przenieść dokument do Kosza?');"><input type='hidden' name='case_id' value='{cid}'><button class='btn small danger'>Do kosza</button></form></td></tr>""")
                 year_html.append(f"<details class='year-folder' {'open' if auto_open or year==year_keys[0] else ''}><summary>{esc(year)} — {len(years[year])} dokumentów</summary><div style='padding:0 8px 8px'><table><tr><th>Data / wpływ</th><th>Rodzaj</th><th>Dokument</th><th>Akcje</th></tr>{''.join(rows_html)}</table></div></details>")
             open_attr=' open' if auto_open else ''
-            quick_form=f"""<details><summary>+ Szybko dodaj dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid' style='margin-top:10px'><input type='hidden' name='return_to' value='/documents'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_form_opts}</select></div><div><label>Status</label><select name='doc_status'>{doc_status_form_opts}</select></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Plik</label><input type='file' name='file'><label style='font-weight:500'><input style='width:auto' type='checkbox' name='allow_duplicate' value='1'> Zezwól na identyczny plik</label></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"""
+            quick_form=f"""<details><summary>+ Szybko dodaj dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid' style='margin-top:10px'><input type='hidden' name='return_to' value='/documents'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_form_opts}</select></div><div><label>Status</label><select name='doc_status'>{doc_status_form_opts}</select></div><div><label>Nadawca</label><input name='sender'></div><div><label>Autor dokumentu</label><input name='document_author'></div><div><label>Tagi</label><input name='tags' placeholder='np. dowód, pilne'></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Plik</label><input type='file' name='file'><label style='font-weight:500'><input style='width:auto' type='checkbox' name='allow_duplicate' value='1'> Zezwól na identyczny plik</label></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"""
             folders.append(f"""<details class='doc-case-folder'{open_attr} id='docs-{cid}'><summary><span class='doc-chevron'>›</span><div class='doc-folder-main'><div class='doc-folder-title'>{esc(primary)} · {esc(internal)} — {esc(first['case_title'])}</div><div class='doc-folder-sub'>{client or 'Kliknij, aby rozwinąć dokumenty sprawy'}</div></div><span class='doc-count'>{len(docs)} dok.</span><span class='doc-latest'>najnowszy: {latest}</span></summary><div class='doc-folder-body'><div class='doc-folder-actions'><a class='btn small' href='/case/{cid}'>Karta sprawy</a></div><div class='doc-type-toolbar'>{type_buttons}</div>{quick_form}{''.join(year_html)}</div></details>""")
         folders_html=''.join(folders) or '<div class="empty">Brak dokumentów.</div>'
         order_desc='primary' if order=='desc' else ''; order_asc='primary' if order=='asc' else ''; hidden_q=f"&q={quote(q)}" if q else ''; hidden_type=f"&type={quote(dtype)}" if dtype else ''; hidden_status=f"&status={quote(dstatus)}" if dstatus else ''
@@ -4537,7 +4876,7 @@ class Handler(BaseHTTPRequestHandler):
         elif APP_MODE=='portable':
             import_card="<div class='card'><h2>Import ze starej wersji</h2><div class='small muted'>Nie znaleziono osobnej bazy Installed w standardowym katalogu %LOCALAPPDATA%\\RK_KANCELARIA\\Dane.</div></div><br>"
 
-        body=f"""<div class='topbar'><div><h1>Kopie bezpieczeństwa</h1><div class='sub'>Kopie dzienne + kopie przy zamykaniu. Przywracanie i import są wykonywane bezpiecznie po restarcie.</div></div><div><a class='btn' href='/security'>Szyfrowanie</a> <a class='btn primary' href='/backup'>Pobierz bieżącą bazę</a></div></div>{msg}{pending}<div class='notice'><b>Ostatnia automatyczna kopia dzienna:</b> {esc(when)}<br><span class='small'>{esc(path)}</span><br>{db_state}</div>{import_card}<div class='card'><table><tr><th>Rodzaj</th><th>Data</th><th>Plik</th><th>Rozmiar</th><th></th></tr>{''.join(rows) or '<tr><td colspan=5>Brak kopii.</td></tr>'}</table></div>"""
+        body=f"""<div class='topbar'><div><h1>Kopie bezpieczeństwa</h1><div class='sub'>Kopie dzienne + kopie przy zamykaniu. Przywracanie i import są wykonywane bezpiecznie po restarcie.</div></div><div><a class='btn' href='/recovery'>Recovery</a> <a class='btn' href='/security'>Szyfrowanie</a> <a class='btn primary' href='/backup/snapshot'>Pełny snapshot</a></div></div>{msg}{pending}<div class='notice'><b>Ostatnia automatyczna kopia dzienna:</b> {esc(when)}<br><span class='small'>{esc(path)}</span><br>{db_state}</div>{import_card}<div class='card'><table><tr><th>Rodzaj</th><th>Data</th><th>Plik</th><th>Rozmiar</th><th></th></tr>{''.join(rows) or '<tr><td colspan=5>Brak kopii.</td></tr>'}</table></div>"""
         self.send_html(layout('Kopie bezpieczeństwa',body,'backups'))
 
     def data_import_installed(self,f):
@@ -4551,12 +4890,144 @@ class Handler(BaseHTTPRequestHandler):
         if not self.require_admin(): return
         p=_allowed_backup_by_token(f.get('backup',''))
         if not p: return self.backups_page('Nie znaleziono wskazanej kopii lub ścieżka jest niedozwolona.')
-        create_shutdown_backup(retention=10); ok,msg=schedule_backup_restore(p)
+        create_shutdown_backup(retention=30); ok,msg=schedule_backup_restore(p)
         if ok:
             try:
                 with db() as con: immutable_audit(con,None,'backup',None,'Zaplanowano przywrócenie backupu',p.name,self.current_author(f))
             except Exception: pass
         return self.backups_page(msg)
+
+    def recovery_page(self,message=''):
+        if not self.require_admin(): return
+        quick_ok,quick_reason=sqlite_integrity(DB_PATH)
+        with db() as con:
+            last=con.execute("SELECT * FROM system_checks WHERE check_type='integrity' ORDER BY id DESC LIMIT 1").fetchone()
+        backups=sum(1 for folder in (DAILY_BACKUPS_DIR,CLOSE_BACKUPS_DIR,BACKUPS_DIR) for _ in folder.glob('*.sqlite3*'))
+        last_html=(f"<b>Ostatnia pełna kontrola:</b> {esc(last['created_at'])} · {esc(last['result'])}<br><span class='small'>{esc(last['details'])}</span>" if last else "Pełna kontrola integralności nie była jeszcze uruchamiana.")
+        msg=f"<div class='notice'>{esc(message)}</div>" if message else ''
+        state=(f"<span class='backup-ok'>✓ quick_check: {esc(quick_reason)}</span>" if quick_ok else f"<span class='conflict-warning'>⚠ quick_check: {esc(quick_reason)}</span>")
+        body=f"""<div class='topbar'><div><h1>Recovery i integralność</h1><div class='sub'>Kontrola bazy, ręczne kopie i pełny przenośny snapshot danych.</div></div><a class='btn' href='/backups'>← Kopie bezpieczeństwa</a></div>{msg}
+        <div class='grid'><div class='card span6'><h2>Stan bazy</h2><p>{state}</p><p>{last_html}</p><form method='post' action='/recovery/check'><button class='btn primary'>Uruchom pełny integrity_check</button></form><p class='small muted'>Pełny test jest dokładniejszy niż codzienny quick_check i może potrwać dłużej przy dużej bazie.</p></div>
+        <div class='card span6'><h2>Kopia ratunkowa</h2><p><b>Znalezione kopie:</b> {backups}</p><form method='post' action='/backup/manual' style='margin-bottom:8px'><button class='btn'>Wykonaj backup teraz</button></form><a class='btn primary' href='/backup/snapshot'>Pobierz pełny snapshot</a><p class='small muted'>Snapshot zawiera bazę SQLite, dokumenty i projekty pism. Nie zawiera lokalnych sesji, klucza DPAPI ani tokenu Cloud.</p><hr><form method='post' enctype='multipart/form-data' action='/recovery/snapshot-import' onsubmit="return confirm('Przygotować przywrócenie pełnego snapshotu? Bieżący stan zostanie zabezpieczony, a przełączenie nastąpi po restarcie.');"><label>Przywróć pełny snapshot</label><input type='file' name='snapshot' accept='.zip' required><button class='btn'>Zweryfikuj i przygotuj restore</button></form></div></div>
+        <br><div class='card'><h2>Tryb ratunkowy</h2><p>Przy starcie RK KANCELARIA sprawdza bazę i zachowuje kopie przed operacjami przywracania/importu. Uszkodzonego pliku nie nadpisujemy „w ciemno”. Przywrócenie backupu jest planowane i wykonywane dopiero po restarcie programu.</p><p><b>Katalog Recovery:</b><br><code>{esc(str(RECOVERY_DIR))}</code></p></div>"""
+        self.send_html(layout('Recovery',body,'recovery'))
+
+    def recovery_check(self,f):
+        if not self.require_admin(): return
+        ok,details=full_sqlite_integrity(DB_PATH); result='OK' if ok else 'BŁĄD'
+        with db() as con:
+            con.execute("INSERT INTO system_checks(check_type,result,details,created_by) VALUES('integrity',?,?,?)",(result,details,self.current_author(f)))
+            immutable_audit(con,None,'system_check',None,'Pełna kontrola integralności SQLite',f'{result}: {details}',self.current_author(f))
+        return self.recovery_page(f'Pełna kontrola zakończona: {result} — {details}')
+
+    def manual_backup_now(self,f):
+        if not self.require_admin(): return
+        when,path=create_shutdown_backup(retention=30)
+        try:
+            with db() as con: immutable_audit(con,None,'backup',None,'Wykonano ręczny backup',str(path),self.current_author(f))
+        except Exception: pass
+        return self.recovery_page(f'Backup wykonany: {when} · {path}')
+
+    def full_snapshot_download(self):
+        if not self.require_admin(): return
+        data,name=create_data_snapshot_zip()
+        try:
+            with db() as con: immutable_audit(con,None,'snapshot',None,'Pobrano pełny snapshot danych',f'{name} · {len(data)} B',self.current_author())
+        except Exception: pass
+        self.send_response(200); self.send_header('Content-Type','application/zip'); self.send_header('Content-Disposition',f"attachment; filename*=UTF-8''{quote(name)}"); self.send_header('Content-Length',str(len(data))); self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(data)
+
+    def full_snapshot_import(self,f,files):
+        if not self.require_admin(): return
+        uploaded=files.get('snapshot')
+        if not uploaded or not uploaded[1]: return self.recovery_page('Wybierz plik snapshot ZIP.')
+        create_shutdown_backup(retention=30)
+        ok,msg=schedule_data_snapshot_restore(uploaded[1],uploaded[0] or 'snapshot',0)
+        if ok:
+            try:
+                with db() as con: immutable_audit(con,None,'snapshot',None,'Zaplanowano przywrócenie pełnego snapshotu',uploaded[0] or 'snapshot',self.current_author(f))
+            except Exception: pass
+        return self.recovery_page(msg)
+
+    def cloud_page(self,message=''):
+        if not self.require_admin(): return
+        with db() as con: cfg=cloud_config(con)
+        remote='Nie sprawdzano serwera.'; remote_class='small muted'
+        if cfg['url'] and cfg['token']:
+            try:
+                from rk_cloud import get_meta
+                m=get_meta(cfg['url'],cfg['office_id'],cfg['token'])
+                remote=(f"Serwer: v{m.version} · {m.size/1024/1024:.1f} MB · {m.updated_at or '—'}" if m.exists else 'Serwer nie ma jeszcze snapshotu tej kancelarii.')
+                remote_class='backup-ok'
+            except Exception as exc:
+                remote=f'Nie udało się odczytać serwera: {exc}'; remote_class='conflict-warning'
+        token_hint=('••••••••'+cfg['token'][-4:] if cfg['token'] else 'nie ustawiono')
+        msg=f"<div class='notice'>{esc(message)}</div>" if message else ''
+        pending=''
+        if PENDING_RESTORE_MARKER.exists():
+            try: pm=json.loads(PENDING_RESTORE_MARKER.read_text(encoding='utf-8'))
+            except Exception: pm={}
+            if pm.get('kind')=='cloud_snapshot': pending="<div class='notice'><b>Pobranie z Cloud jest przygotowane.</b> Zamknij i ponownie uruchom RK KANCELARIA, aby bezpiecznie przełączyć bazę i pliki.</div>"
+        body=f"""<div class='topbar'><div><h1>Cloud i urządzenia</h1><div class='sub'>Wersjonowana synchronizacja pełnego stanu + fundament pracy Windows / telefon / tablet.</div></div><a class='btn' href='/recovery'>Recovery</a></div>{msg}{pending}
+        <div class='grid'><div class='card span6'><h2>Konfiguracja Cloud Bridge</h2><form method='post' action='/cloud/config'><label>Adres HTTPS serwera</label><input name='url' value='{esc(cfg['url'])}' placeholder='https://cloud.twojakancelaria.pl'><label>ID kancelarii</label><input name='office_id' value='{esc(cfg['office_id'])}' required><label>Token dostępu</label><input type='password' name='token' placeholder='{esc(token_hint)}'><div class='small muted'>Pozostaw token pusty, aby zachować obecny. W produkcji używaj HTTPS/VPN; nie wystawiaj lokalnego HTTP do Internetu.</div><button class='btn primary'>Zapisz konfigurację</button></form></div>
+        <div class='card span6'><h2>Stan synchronizacji</h2><p><b>Lokalnie zapamiętana wersja:</b> v{esc(cfg['last_version'])}<br><b>Ostatnia synchronizacja:</b> {esc(cfg['last_sync'] or '—')}</p><p class='{remote_class}'>{esc(remote)}</p><div class='case-control-bar'><form method='post' action='/cloud/check'><button class='btn'>Sprawdź połączenie</button></form><form method='post' action='/cloud/push' onsubmit="return confirm('Wysłać pełny aktualny snapshot do Cloud? Wersja serwera musi zgadzać się z wersją ostatnio widzianą przez ten komputer.');"><button class='btn primary'>Wyślij do Cloud</button></form></div><br><form method='post' action='/cloud/pull' onsubmit="return confirm('Pobrać stan z Cloud? Bieżący lokalny stan zostanie najpierw zabezpieczony, a podmiana nastąpi dopiero po ponownym uruchomieniu.');"><button class='btn'>Pobierz z Cloud</button></form></div></div>
+        <br><div class='card'><h2>Telefon / tablet / PWA</h2><p>DEV8 jest przygotowany jako PWA: po wystawieniu tej samej aplikacji przez bezpieczny HTTPS możesz dodać RK KANCELARIA do ekranu głównego telefonu/tabletu. Service Worker buforuje wyłącznie statyczny interfejs — dane spraw i dokumenty nie są utrwalane offline w pamięci przeglądarki.</p><p class='small muted'>Cloud Bridge używa PostgreSQL jako magazynu wersjonowanych snapshotów z kontrolą konfliktu. Nie udaje scalania rekord-po-rekordzie: jeśli dwa urządzenia zmienią dane niezależnie, program blokuje ciche nadpisanie i wymaga świadomego rozstrzygnięcia.</p></div>"""
+        self.send_html(layout('Cloud',body,'cloud'))
+
+    def cloud_config_update(self,f):
+        if not self.require_admin(): return
+        url=(f.get('url','') or '').strip().rstrip('/')
+        office=(f.get('office_id','') or 'default').strip()[:180]
+        token=(f.get('token','') or '').strip()
+        if url and not re.match(r'^https?://',url,re.I): return self.cloud_page('Adres Cloud musi zaczynać się od http:// lub https://.')
+        with db() as con:
+            settings_set(con,'cloud_url',url); settings_set(con,'cloud_office_id',office)
+            if token: settings_set(con,'cloud_token',token)
+            immutable_audit(con,None,'cloud',None,'Zmieniono konfigurację Cloud',f'URL: {url or "—"}\nKancelaria: {office}',self.current_author(f))
+        return self.cloud_page('Konfiguracja Cloud została zapisana.')
+
+    def cloud_check(self,f):
+        if not self.require_admin(): return
+        with db() as con: cfg=cloud_config(con)
+        try:
+            from rk_cloud import health,get_meta
+            h=health(cfg['url'],cfg['token']); m=get_meta(cfg['url'],cfg['office_id'],cfg['token'])
+            text=f"Połączenie działa. {h.get('service','RK Cloud')} · zdalna wersja v{m.version if m.exists else 0}."
+        except Exception as exc: text=f'Błąd połączenia: {exc}'
+        return self.cloud_page(text)
+
+    def cloud_push(self,f):
+        if not self.require_admin(): return
+        with db() as con: cfg=cloud_config(con)
+        try:
+            from rk_cloud import get_meta,push_snapshot
+            remote=get_meta(cfg['url'],cfg['office_id'],cfg['token'])
+            remembered=int(cfg['last_version'] or 0)
+            if remote.version!=remembered:
+                return self.cloud_page(f'Konflikt Cloud: serwer ma v{remote.version}, a ten komputer pamięta v{remembered}. Nie wysłano danych. Najpierw sprawdź/pobierz nowszy stan albo rozwiąż konflikt świadomie.')
+            data,name=create_data_snapshot_zip()
+            result=push_snapshot(cfg['url'],cfg['office_id'],cfg['token'],data,remote.version)
+            now=datetime.now().isoformat(timespec='seconds')
+            with db() as con:
+                settings_set(con,'cloud_last_version',str(result.version)); settings_set(con,'cloud_last_sync',now); settings_set(con,'cloud_last_sha256',result.sha256)
+                immutable_audit(con,None,'cloud',None,'Wysłano snapshot do Cloud',f'{name}\nWersja: {result.version}\nSHA-256: {result.sha256}',self.current_author(f))
+            return self.cloud_page(f'Wysłano pełny stan do Cloud jako wersję v{result.version}.')
+        except Exception as exc:
+            return self.cloud_page(f'Nie wysłano danych: {exc}')
+
+    def cloud_pull(self,f):
+        if not self.require_admin(): return
+        with db() as con: cfg=cloud_config(con)
+        try:
+            from rk_cloud import pull_snapshot
+            raw,meta=pull_snapshot(cfg['url'],cfg['office_id'],cfg['token'])
+            create_shutdown_backup(retention=30)
+            ok,msg=schedule_data_snapshot_restore(raw,f"Cloud {cfg['office_id']}",meta.version)
+            if ok:
+                with db() as con: immutable_audit(con,None,'cloud',None,'Zaplanowano pobranie snapshotu z Cloud',f'Wersja: {meta.version}\nSHA-256: {meta.sha256}',self.current_author(f))
+            return self.cloud_page(msg)
+        except Exception as exc:
+            return self.cloud_page(f'Nie pobrano danych: {exc}')
+
 
     def tags_page(self,qs):
         q=(qs.get('q') or [''])[0].strip(); like=f"%{q}%"
@@ -4892,13 +5363,13 @@ class Handler(BaseHTTPRequestHandler):
             due=f"<span class='pill'>Termin: {fmt_date(r['due_date'])}</span>" if r['due_date'] else ''
             cards.append(f"<div class='entity-card'><div class='case-control-bar'><span class='pill'>{esc(r['status'])}</span>{due}</div><h3 style='margin:8px 0 4px'><a class='case-link' href='/draft/{r['id']}'>{esc(r['title'])}</a></h3><div class='small muted'>{esc(case_label)} · {esc(r['doc_type'])}</div>{file_info}<div class='small muted' style='margin-top:7px'>Autor: {esc(r['created_by'])} · zmiana: {esc(str(r['updated_at'])[:16])}</div></div>")
         status_opts="<option value=''>Wszystkie statusy</option>"+''.join(f"<option {'selected' if status==x else ''}>{x}</option>" for x in ['Roboczy','Do weryfikacji','Do podpisu','Gotowy','Złożony','Archiwalny'])
-        body=f"""<div class='topbar'><div><h1>Projekty pism</h1><div class='sub'>Robocze pisma, wersje do weryfikacji i dokumenty oczekujące na podpis.</div></div><a class='btn primary' href='/draft/new'>+ Nowy projekt</a></div><div class='card'><form method='get' class='searchbar'><input name='q' value='{esc(q)}' placeholder='Szukaj projektu, treści lub sprawy…'><select name='status'>{status_opts}</select><label style='white-space:nowrap'><input type='checkbox' style='width:auto' name='mine' value='1' {'checked' if mine else ''}> Moje</label><button class='btn'>Filtruj</button></form></div><br><div class='entity-grid'>{''.join(cards) if cards else '<div class="card empty">Brak projektów pism.</div>'}</div>"""
+        body=f"""<div class='topbar'><div><h1>Projekty pism</h1><div class='sub'>Robocze pisma, wersje, szablony i dokumenty oczekujące na podpis.</div></div><div><a class='btn' href='/draft/templates'>Szablony pism</a> <a class='btn primary' href='/draft/new'>+ Nowy projekt</a></div></div><div class='card'><form method='get' class='searchbar'><input name='q' value='{esc(q)}' placeholder='Szukaj projektu, treści lub sprawy…'><select name='status'>{status_opts}</select><label style='white-space:nowrap'><input type='checkbox' style='width:auto' name='mine' value='1' {'checked' if mine else ''}> Moje</label><button class='btn'>Filtruj</button></form></div><br><div class='entity-grid'>{''.join(cards) if cards else '<div class="card empty">Brak projektów pism.</div>'}</div>"""
         self.send_html(layout('Projekty pism',body,'drafts'))
 
     def draft_new_page(self,qs=None,message=''):
         case_id=int(((qs or {}).get('case_id') or ['0'])[0] or 0) or None
         msg=f"<div class='notice'>{esc(message)}</div>" if message else ''
-        body=f"""<div class='topbar'><div><h1>Nowy projekt pisma</h1><div class='sub'>Projekt może być przypisany do sprawy albo istnieć niezależnie.</div></div><a class='btn' href='/drafts'>Wróć</a></div>{msg}<div class='card'><form method='post' enctype='multipart/form-data' action='/draft/create' class='form-grid'><div class='full'><label>Tytuł *</label><input name='title' required></div><div><label>Sprawa</label><select name='case_id'>{self.draft_case_options(case_id)}</select></div><div><label>Rodzaj pisma</label><input name='doc_type' value='Pismo procesowe'></div><div><label>Status</label><select name='status'>{''.join(f'<option>{x}</option>' for x in ['Roboczy','Do weryfikacji','Do podpisu','Gotowy','Złożony','Archiwalny'])}</select></div><div><label>Termin</label><input type='date' name='due_date'></div><div class='full'><label>Treść / roboczy tekst</label><textarea name='content' style='min-height:260px'></textarea></div><div class='full'><label>Notatki</label><textarea name='notes'></textarea></div><div class='full'><label>Plik roboczy (opcjonalnie)</label><input type='file' name='file'></div><div class='full'><button class='btn primary'>Utwórz projekt</button></div></form></div>"""
+        body=f"""<div class='topbar'><div><h1>Nowy projekt pisma</h1><div class='sub'>Projekt może być przypisany do sprawy albo istnieć niezależnie.</div></div><div><a class='btn' href='/draft/templates'>Użyj szablonu</a> <a class='btn' href='/drafts'>Wróć</a></div></div>{msg}<div class='card'><form method='post' enctype='multipart/form-data' action='/draft/create' class='form-grid'><div class='full'><label>Tytuł *</label><input name='title' required></div><div><label>Sprawa</label><select name='case_id'>{self.draft_case_options(case_id)}</select></div><div><label>Rodzaj pisma</label><input name='doc_type' value='Pismo procesowe'></div><div><label>Status</label><select name='status'>{''.join(f'<option>{x}</option>' for x in ['Roboczy','Do weryfikacji','Do podpisu','Gotowy','Złożony','Archiwalny'])}</select></div><div><label>Termin</label><input type='date' name='due_date'></div><div class='full'><label>Treść / roboczy tekst</label><textarea name='content' style='min-height:260px'></textarea></div><div class='full'><label>Notatki</label><textarea name='notes'></textarea></div><div class='full'><label>Plik roboczy (opcjonalnie)</label><input type='file' name='file'></div><div class='full'><button class='btn primary'>Utwórz projekt</button></div></form></div>"""
         self.send_html(layout('Nowy projekt pisma',body,'drafts'))
 
     def draft_create(self,f,files):
@@ -4906,22 +5377,31 @@ class Handler(BaseHTTPRequestHandler):
         if not title: return self.draft_new_page({},'Podaj tytuł projektu.')
         cid=int(f.get('case_id') or 0) or None; stored=original=''
         if files.get('file') and files['file'][1]:
-            original=safe_filename(files['file'][0]); data=files['file'][1]; DRAFTS_DIR.mkdir(parents=True,exist_ok=True); stored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"; (DRAFTS_DIR/stored).write_bytes(data)
+            original=safe_filename(files['file'][0]); data=files['file'][1]; DRAFTS_DIR.mkdir(parents=True,exist_ok=True); stored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"; atomic_write_bytes(DRAFTS_DIR/stored,data)
         status=f.get('status','Roboczy') if f.get('status','Roboczy') in {'Roboczy','Do weryfikacji','Do podpisu','Gotowy','Złożony','Archiwalny'} else 'Roboczy'
         with db() as con:
             cur=con.execute("INSERT INTO writing_projects(case_id,title,doc_type,status,due_date,content,notes,stored_name,original_name,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(cid,title,(f.get('doc_type') or 'Pismo procesowe').strip(),status,f.get('due_date',''),f.get('content',''),f.get('notes',''),stored,original,a,a))
             audit(con,cid,'writing_project',cur.lastrowid,'Utworzono projekt pisma',f"Tytuł: {_change_value(title)}\nRodzaj: {_change_value((f.get('doc_type') or 'Pismo procesowe').strip())}\nStatus: {_change_value(status)}\nTermin: {_change_value(f.get('due_date',''))}",a)
+            save_draft_version(con,cur.lastrowid,a,'Utworzenie projektu')
         self.redirect(f'/draft/{cur.lastrowid}')
 
     def draft_view(self,did,message=''):
-        with db() as con: d=con.execute("SELECT w.*,c.title case_title,c.signature,c.internal_signature FROM writing_projects w LEFT JOIN cases c ON c.id=w.case_id WHERE w.id=?",(did,)).fetchone()
+        with db() as con:
+            d=con.execute("SELECT w.*,c.title case_title,c.signature,c.internal_signature FROM writing_projects w LEFT JOIN cases c ON c.id=w.case_id WHERE w.id=?",(did,)).fetchone()
+            versions=con.execute("SELECT * FROM draft_versions WHERE project_id=? ORDER BY version_no DESC LIMIT 50",(did,)).fetchall() if d else []
         if not d: return self.send_error(404)
         msg=f"<div class='notice'>{esc(message)}</div>" if message else ''
         case_html=f"<a href='/case/{d['case_id']}'>{esc(d['signature'] or d['internal_signature'] or d['case_title'])}</a>" if d['case_id'] else '—'
         file_buttons=f"<a class='btn' href='/draft/{did}/download'>Pobierz plik</a>" if d['stored_name'] else ''
         to_doc=f"<form method='post' action='/draft/{did}/to-document' style='display:inline'><button class='btn primary'>Dodaj do dokumentów sprawy</button></form>" if d['case_id'] else ''
         content=f"<pre class='doc-text-preview' style='white-space:pre-wrap'>{esc(d['content'])}</pre>" if d['content'] else "<div class='empty'>Brak treści roboczej w programie.</div>"
-        body=f"""<div class='topbar'><div><h1>{esc(d['title'])}</h1><div class='sub'>{case_html} · {esc(d['doc_type'])} · {esc(d['status'])}</div></div><div><a class='btn' href='/draft/{did}/edit'>Edytuj</a> {file_buttons} {to_doc}</div></div>{msg}<div class='grid'><div class='card span8'><h2>Treść projektu</h2>{content}</div><div class='card span4'><h2>Informacje</h2><p><b>Status:</b> {esc(d['status'])}<br><b>Termin:</b> {fmt_date(d['due_date']) if d['due_date'] else '—'}<br><b>Plik:</b> {esc(d['original_name']) or '—'}<br><b>Autor:</b> {esc(d['created_by'])}<br><b>Ostatnia zmiana:</b> {esc(str(d['updated_at'])[:16])}</p><h3>Notatki</h3><div style='white-space:pre-wrap'>{esc(d['notes']) or '—'}</div><hr><form method='post' action='/draft/{did}/archive'><button class='btn'>Archiwizuj projekt</button></form></div></div>"""
+        version_rows=[]
+        for v in versions:
+            file_label=f" · plik: {esc(v['original_name'])}" if v['original_name'] else ''
+            restore=f"<form method='post' action='/draft/{did}/version/{v['id']}/restore' style='display:inline' onsubmit=\"return confirm('Przywrócić tę wersję jako bieżącą? Bieżący stan zostanie zachowany w historii.');\"><button class='btn small'>Przywróć</button></form>"
+            version_rows.append(f"<tr><td>v{v['version_no']}</td><td>{esc(str(v['created_at'])[:16])}</td><td>{esc(v['created_by'])}</td><td>{esc(v['change_note'])}{file_label}</td><td>{restore}</td></tr>")
+        versions_html=''.join(version_rows) or '<tr><td colspan=5>Brak zapisanych wersji.</td></tr>'
+        body=f"""<div class='topbar'><div><h1>{esc(d['title'])}</h1><div class='sub'>{case_html} · {esc(d['doc_type'])} · {esc(d['status'])}</div></div><div><a class='btn' href='/draft/{did}/edit'>Edytuj</a> {file_buttons} {to_doc}</div></div>{msg}<div class='grid'><div class='card span8'><h2>Treść projektu</h2>{content}</div><div class='card span4'><h2>Informacje</h2><p><b>Status:</b> {esc(d['status'])}<br><b>Termin:</b> {fmt_date(d['due_date']) if d['due_date'] else '—'}<br><b>Plik:</b> {esc(d['original_name']) or '—'}<br><b>Autor:</b> {esc(d['created_by'])}<br><b>Ostatnia zmiana:</b> {esc(str(d['updated_at'])[:16])}</p><h3>Notatki</h3><div style='white-space:pre-wrap'>{esc(d['notes']) or '—'}</div><hr><form method='post' action='/draft/{did}/archive'><button class='btn'>Archiwizuj projekt</button></form></div><div class='card span12'><div class='section-head'><div><h2>Historia wersji</h2><div class='small muted'>Każdy zapis tworzy wersję tekstu i kopię pliku roboczego, jeśli plik istnieje.</div></div></div><table><tr><th>Wersja</th><th>Data</th><th>Autor</th><th>Opis</th><th></th></tr>{versions_html}</table></div></div>"""
         self.send_html(layout('Projekt pisma',body,'drafts'))
 
     def draft_edit_page(self,did,message=''):
@@ -4929,20 +5409,20 @@ class Handler(BaseHTTPRequestHandler):
         if not d: return self.send_error(404)
         status_opts=''.join(f"<option {'selected' if d['status']==x else ''}>{x}</option>" for x in ['Roboczy','Do weryfikacji','Do podpisu','Gotowy','Złożony','Archiwalny'])
         msg=f"<div class='notice'>{esc(message)}</div>" if message else ''
-        body=f"""<div class='topbar'><div><h1>Edytuj projekt pisma</h1></div><a class='btn' href='/draft/{did}'>Wróć</a></div>{msg}<div class='card'><form method='post' enctype='multipart/form-data' action='/draft/{did}/update' class='form-grid'><div class='full'><label>Tytuł *</label><input name='title' value='{esc(d['title'])}' required></div><div><label>Sprawa</label><select name='case_id'>{self.draft_case_options(d['case_id'])}</select></div><div><label>Rodzaj</label><input name='doc_type' value='{esc(d['doc_type'])}'></div><div><label>Status</label><select name='status'>{status_opts}</select></div><div><label>Termin</label><input type='date' name='due_date' value='{esc(d['due_date'])}'></div><div class='full'><label>Treść / roboczy tekst</label><textarea name='content' style='min-height:300px'>{esc(d['content'])}</textarea></div><div class='full'><label>Notatki</label><textarea name='notes'>{esc(d['notes'])}</textarea></div><div class='full'><label>Podmień / dodaj plik</label><input type='file' name='file'><div class='small muted'>Aktualny: {esc(d['original_name']) or 'brak'}</div></div><div class='full'><button class='btn primary'>Zapisz projekt</button></div></form></div>"""
+        body=f"""<div class='topbar'><div><h1>Edytuj projekt pisma</h1></div><a class='btn' href='/draft/{did}'>Wróć</a></div>{msg}<div class='card'><form method='post' enctype='multipart/form-data' action='/draft/{did}/update' class='form-grid'><div class='full'><label>Tytuł *</label><input name='title' value='{esc(d['title'])}' required></div><div><label>Sprawa</label><select name='case_id'>{self.draft_case_options(d['case_id'])}</select></div><div><label>Rodzaj</label><input name='doc_type' value='{esc(d['doc_type'])}'></div><div><label>Status</label><select name='status'>{status_opts}</select></div><div><label>Termin</label><input type='date' name='due_date' value='{esc(d['due_date'])}'></div><div class='full'><label>Treść / roboczy tekst</label><textarea name='content' style='min-height:300px'>{esc(d['content'])}</textarea></div><div class='full'><label>Notatki</label><textarea name='notes'>{esc(d['notes'])}</textarea></div><div class='full'><label>Podmień / dodaj plik</label><input type='file' name='file'><div class='small muted'>Aktualny: {esc(d['original_name']) or 'brak'}. Poprzedni plik pozostanie w historii wersji.</div></div><div class='full'><button class='btn primary'>Zapisz projekt i utwórz wersję</button></div></form></div>"""
         self.send_html(layout('Edytuj projekt',body,'drafts'))
 
     def draft_update(self,did,f,files):
         a=self.current_author(f); title=(f.get('title') or '').strip()
         if not title: return self.draft_edit_page(did,'Podaj tytuł projektu.')
-        with db() as con: old=con.execute('SELECT * FROM writing_projects WHERE id=?',(did,)).fetchone()
+        with db() as con:
+            old=con.execute('SELECT * FROM writing_projects WHERE id=?',(did,)).fetchone()
+            if old and not con.execute('SELECT 1 FROM draft_versions WHERE project_id=? LIMIT 1',(did,)).fetchone():
+                save_draft_version(con,did,a,'Stan początkowy przed pierwszą zmianą w DEV8')
         if not old: return self.send_error(404)
         stored,original=old['stored_name'],old['original_name']; replaced_file=False
         if files.get('file') and files['file'][1]:
-            original=safe_filename(files['file'][0]); data=files['file'][1]; DRAFTS_DIR.mkdir(parents=True,exist_ok=True); newstored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"; (DRAFTS_DIR/newstored).write_bytes(data)
-            if stored:
-                try: (DRAFTS_DIR/stored).unlink(missing_ok=True)
-                except Exception: pass
+            original=safe_filename(files['file'][0]); data=files['file'][1]; DRAFTS_DIR.mkdir(parents=True,exist_ok=True); newstored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"; atomic_write_bytes(DRAFTS_DIR/newstored,data)
             stored=newstored; replaced_file=True
         cid=int(f.get('case_id') or 0) or None; status=f.get('status','Roboczy')
         if status not in {'Roboczy','Do weryfikacji','Do podpisu','Gotowy','Złożony','Archiwalny'}: status='Roboczy'
@@ -4955,6 +5435,73 @@ class Handler(BaseHTTPRequestHandler):
         with db() as con:
             con.execute("UPDATE writing_projects SET case_id=?,title=?,doc_type=?,status=?,due_date=?,content=?,notes=?,stored_name=?,original_name=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(cid,title,newvals['doc_type'],status,newvals['due_date'],newvals['content'],newvals['notes'],stored,original,a,did))
             if details: audit(con,cid,'writing_project',did,'Edytowano projekt pisma',details,a)
+            save_draft_version(con,did,a,'Zapis projektu')
+        self.redirect(f'/draft/{did}')
+
+    def draft_templates_page(self,message=''):
+        with db() as con:
+            rows=con.execute("SELECT * FROM draft_templates ORDER BY name COLLATE NOCASE").fetchall()
+            cases=con.execute("SELECT id,signature,internal_signature,title FROM cases WHERE status<>'closed' ORDER BY title COLLATE NOCASE").fetchall()
+        msg=f"<div class='notice'>{esc(message)}</div>" if message else ''
+        case_opts='<option value="">— wybierz sprawę —</option>'+''.join(f"<option value='{c['id']}'>{esc((c['signature'] or c['internal_signature'] or c['title'])+' — '+c['title'])}</option>" for c in cases)
+        cards=[]
+        for t in rows:
+            create=f"<form method='post' action='/draft/from-template' class='form-grid'><input type='hidden' name='template_id' value='{t['id']}'><div class='full'><label>Sprawa</label><select name='case_id' required>{case_opts}</select></div><div class='full'><button class='btn primary'>Utwórz projekt z szablonu</button></div></form>"
+            delete=f"<form method='post' action='/draft/template/{t['id']}/delete' onsubmit=\"return confirm('Usunąć szablon? Istniejące projekty pozostaną.');\"><button class='btn small danger'>Usuń</button></form>"
+            preview=esc((t['content'] or '')[:500])
+            cards.append(f"<div class='entity-card'><div class='case-control-bar'><span class='pill'>{esc(t['doc_type'])}</span>{delete}</div><h3>{esc(t['name'])}</h3><pre class='template-preview'>{preview}</pre>{create}</div>")
+        placeholders='{{SĄD}}, {{SYGNATURA}}, {{SYGNATURA_WEWNĘTRZNA}}, {{KLIENT}}, {{TYTUŁ_SPRAWY}}, {{PRZEDMIOT}}, {{STRONY}}, {{DATA}}, {{PEŁNOMOCNIK}}'
+        cards_html=''.join(cards) or '<div class="empty">Brak szablonów.</div>'
+        body=f"""<div class='topbar'><div><h1>Szablony pism</h1><div class='sub'>Twórz projekty z automatycznym podstawieniem danych sprawy.</div></div><a class='btn' href='/drafts'>Projekty pism</a></div>{msg}<div class='grid'><div class='card span5'><h2>Nowy szablon</h2><form method='post' action='/draft/template/create'><label>Nazwa *</label><input name='name' required><label>Rodzaj pisma</label><input name='doc_type' value='Pismo procesowe'><label>Treść szablonu</label><textarea name='content' rows='18' placeholder='np. {{SĄD}}&#10;Sygn. {{SYGNATURA}}&#10;&#10;...'></textarea><div class='small muted'>Dostępne pola: {esc(placeholders)}</div><label>Notatki</label><textarea name='notes'></textarea><button class='btn primary'>Zapisz szablon</button></form></div><div class='card span7'><h2>Dostępne szablony</h2><div class='entity-grid'>{cards_html}</div></div></div>"""
+        self.send_html(layout('Szablony pism',body,'drafts'))
+
+    def draft_template_create(self,f):
+        name=(f.get('name') or '').strip(); a=self.current_author(f)
+        if not name: return self.draft_templates_page('Podaj nazwę szablonu.')
+        try:
+            with db() as con:
+                cur=con.execute("INSERT INTO draft_templates(name,doc_type,content,notes,created_by,updated_by) VALUES(?,?,?,?,?,?)",(name,(f.get('doc_type') or 'Pismo procesowe').strip(),f.get('content',''),f.get('notes',''),a,a))
+                immutable_audit(con,None,'draft_template',cur.lastrowid,'Dodano szablon pisma',name,a)
+        except sqlite3.IntegrityError:
+            return self.draft_templates_page('Szablon o tej nazwie już istnieje.')
+        self.redirect('/draft/templates')
+
+    def draft_template_delete(self,tid,f):
+        a=self.current_author(f)
+        with db() as con:
+            t=con.execute('SELECT * FROM draft_templates WHERE id=?',(tid,)).fetchone()
+            if t:
+                con.execute('DELETE FROM draft_templates WHERE id=?',(tid,)); immutable_audit(con,None,'draft_template',tid,'Usunięto szablon pisma',t['name'],a)
+        self.redirect('/draft/templates')
+
+    def draft_from_template(self,f):
+        a=self.current_author(f)
+        try: tid=int(f.get('template_id') or 0); cid=int(f.get('case_id') or 0)
+        except Exception: return self.draft_templates_page('Nieprawidłowy wybór szablonu lub sprawy.')
+        with db() as con:
+            t=con.execute('SELECT * FROM draft_templates WHERE id=?',(tid,)).fetchone(); c=con.execute('SELECT * FROM cases WHERE id=?',(cid,)).fetchone()
+            if not t or not c: return self.draft_templates_page('Nie znaleziono szablonu lub sprawy.')
+            content=fill_draft_template(t['content'],draft_template_context(con,cid,a))
+            title=f"{t['name']} — {c['title']}"
+            cur=con.execute("INSERT INTO writing_projects(case_id,title,doc_type,status,due_date,content,notes,stored_name,original_name,created_by,updated_by) VALUES(?,?,?,'Roboczy','',?,?, '', '', ?,?)",(cid,title,t['doc_type'],content,t['notes'],a,a))
+            save_draft_version(con,cur.lastrowid,a,f"Utworzono z szablonu: {t['name']}")
+            audit(con,cid,'writing_project',cur.lastrowid,'Utworzono projekt z szablonu',f"Szablon: {_change_value(t['name'])}\nTytuł: {_change_value(title)}",a)
+        self.redirect(f'/draft/{cur.lastrowid}')
+
+    def draft_version_restore(self,did,vid,f):
+        a=self.current_author(f)
+        with db() as con:
+            d=con.execute('SELECT * FROM writing_projects WHERE id=?',(did,)).fetchone(); v=con.execute('SELECT * FROM draft_versions WHERE id=? AND project_id=?',(vid,did)).fetchone()
+            if not d or not v: return self.send_error(404)
+            save_draft_version(con,did,a,'Stan przed przywróceniem starszej wersji')
+            stored=d['stored_name']; original=d['original_name']
+            if v['stored_name']:
+                src=DRAFTS_DIR/v['stored_name']
+                if src.is_file():
+                    newname=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{safe_filename(v['original_name'] or src.name)}"; shutil.copy2(src,DRAFTS_DIR/newname); stored=newname; original=v['original_name']
+            con.execute("UPDATE writing_projects SET title=?,doc_type=?,status=?,due_date=?,content=?,notes=?,stored_name=?,original_name=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(v['title'],v['doc_type'],v['status'],v['due_date'],v['content'],v['notes'],stored,original,a,did))
+            save_draft_version(con,did,a,f"Przywrócono wersję v{v['version_no']}")
+            audit(con,d['case_id'],'writing_project',did,'Przywrócono wersję projektu',f"Wersja: v{v['version_no']}",a)
         self.redirect(f'/draft/{did}')
 
     def draft_download(self,did):
@@ -5117,13 +5664,25 @@ class Handler(BaseHTTPRequestHandler):
                 curd=con.execute("INSERT INTO documents(case_id,doc_date,received_date,doc_type,doc_status,title,description,stored_name,original_name,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(cid,d.get('doc_date',''),d.get('received_date',''),d.get('doc_type','Inne'),d.get('doc_status','Aktywny'),d.get('title','Dokument'),d.get('description',''),stored,original if filedata else '',a,a))
                 if filedata:
                     con.execute("UPDATE documents SET file_hash=?,ocr_status='kolejka' WHERE id=?",(sha256_bytes(filedata),curd.lastrowid)); imported_index_ids.append(curd.lastrowid)
-            # projects of pleadings attached to the imported case
+            # Projekty pism + historia ich wersji. Stare ID są mapowane na nowe ID w docelowej bazie.
+            draft_id_map={}
             for w in tables.get('writing_projects',[]):
                 oldid=w.get('id'); original=safe_filename(w.get('original_name') or w.get('stored_name') or 'projekt'); stored=''
                 prefix=f'drafts/{oldid}/'; matches=[n for n in z.namelist() if n.startswith(prefix) and not n.endswith('/')]
                 if matches:
                     filedata=z.read(matches[0]); DRAFTS_DIR.mkdir(parents=True,exist_ok=True); stored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"; atomic_write_bytes(DRAFTS_DIR/stored,filedata)
-                con.execute("INSERT INTO writing_projects(case_id,title,doc_type,status,due_date,content,notes,stored_name,original_name,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(cid,w.get('title','Projekt pisma'),w.get('doc_type','Pismo procesowe'),w.get('status','Roboczy'),w.get('due_date',''),w.get('content',''),w.get('notes',''),stored,original if stored else '',a,a))
+                curw=con.execute("INSERT INTO writing_projects(case_id,title,doc_type,status,due_date,content,notes,stored_name,original_name,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(cid,w.get('title','Projekt pisma'),w.get('doc_type','Pismo procesowe'),w.get('status','Roboczy'),w.get('due_date',''),w.get('content',''),w.get('notes',''),stored,original if stored else '',a,a))
+                if oldid is not None: draft_id_map[int(oldid)]=curw.lastrowid
+            for v in tables.get('draft_versions',[]):
+                try: oldpid=int(v.get('project_id') or 0); oldvid=int(v.get('id') or 0)
+                except Exception: continue
+                newpid=draft_id_map.get(oldpid)
+                if not newpid: continue
+                original=safe_filename(v.get('original_name') or 'wersja'); vstored=''
+                prefix=f'draft_versions/{oldpid}/{oldvid}/'; matches=[n for n in z.namelist() if n.startswith(prefix) and not n.endswith('/')]
+                if matches:
+                    filedata=z.read(matches[0]); vdir=DRAFTS_DIR/f'wersje_{newpid}'; vdir.mkdir(parents=True,exist_ok=True); vname=f"v{int(v.get('version_no') or 0):03d}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"; atomic_write_bytes(vdir/vname,filedata); vstored=f'wersje_{newpid}/{vname}'
+                con.execute("INSERT OR IGNORE INTO draft_versions(project_id,version_no,title,doc_type,status,due_date,content,notes,stored_name,original_name,change_note,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?,CURRENT_TIMESTAMP))",(newpid,int(v.get('version_no') or 1),v.get('title',''),v.get('doc_type',''),v.get('status','Roboczy'),v.get('due_date',''),v.get('content',''),v.get('notes',''),vstored,original if vstored else '',v.get('change_note',''),a,v.get('created_at')))
             audit(con,cid,'case',cid,'Zaimportowano sprawę',files['package'][0],a)
         for doc_id in imported_index_ids:
             enqueue_document_index(doc_id)

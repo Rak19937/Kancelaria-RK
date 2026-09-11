@@ -1,0 +1,53 @@
+RK KANCELARIA 0.2.0-dev8 — OFFICE SUITE & CLOUD FOUNDATION
+
+DEV8 łączy planowane etapy Dokumenty 2.0, Oś czasu 2.0, Projekty pism,
+Recovery/backup oraz fundament synchronizacji Cloud/PWA w jedno wydanie.
+
+1. DOKUMENTY 2.0
+- data dokumentu, wpływu i doręczenia,
+- nadawca, autor dokumentu, tagi,
+- rozszerzone statusy dokumentów,
+- powiązanie dokumentu z zadaniem/terminem,
+- PDF/JPG/PNG i tekstowe formaty w podglądzie,
+- otwieranie pliku/folderu w Desktop,
+- obsługa brakującego pliku i ponowne wskazanie,
+- dokładny wpis historii przy dodaniu/edycji pisma.
+
+2. OŚ CZASU 2.0
+- jeden chronologiczny widok dla zdarzeń, dokumentów, zadań, notatek i projektów pism,
+- filtry bez przeładowania strony,
+- bezpośrednie linki do elementów sprawy.
+
+3. PROJEKTY PISM I SZABLONY
+- biblioteka szablonów,
+- pola automatyczne: sąd, sygnatura, klient, strony, przedmiot, data, pełnomocnik,
+- tworzenie projektu z szablonu,
+- historia wersji projektu,
+- przywracanie starszej wersji,
+- zachowanie wersji plików,
+- pakiet eksportu sprawy przenosi również historię wersji projektu.
+
+4. BACKUP / RECOVERY
+- retencja 30 kopii,
+- ręczny pełny PRAGMA integrity_check,
+- ekran Recovery,
+- pełny snapshot ZIP: baza + dokumenty + projekty pism,
+- pełny snapshot nie przenosi sesji, DPAPI ani tokenu Cloud,
+- bezpieczne przywracanie snapshotu dopiero po restarcie,
+- kopia bezpieczeństwa przed restore/importem.
+
+5. CLOUD / PWA
+- aplikacja ma manifest PWA i Service Worker,
+- Service Worker cache'uje tylko pliki statyczne; dane spraw i dokumenty nie są cache'owane offline,
+- ekran Cloud/PWA w administracji,
+- wersjonowany push/pull pełnego snapshotu,
+- optimistic locking: konflikt wersji blokuje ciche nadpisanie,
+- opcjonalny backend rk_cloud_server.py oparty o PostgreSQL,
+- konfiguracja przez UI lub RK_CLOUD_URL / RK_CLOUD_OFFICE_ID / RK_CLOUD_TOKEN.
+
+UWAGA ARCHITEKTONICZNA
+Cloud Bridge w DEV8 świadomie nie udaje scalania rekord-po-rekordzie. Dla wielu urządzeń
+równolegle zmieniających dane konflikt jest blokowany i wymaga świadomego rozstrzygnięcia.
+Tryb jednej żywej bazy dla wielu użytkowników nadal najlepiej realizować przez centralnie
+uruchomioną RK KANCELARIA dostępną po HTTPS/VPN; PostgreSQL w DEV8 jest fundamentem
+wersjonowanego magazynu Cloud, a nie ukrytą, ryzykowną automatyczną konwersją całej warstwy SQLite.

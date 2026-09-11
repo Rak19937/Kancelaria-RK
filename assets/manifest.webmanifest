@@ -1,0 +1,13 @@
+{
+  "name": "RK KANCELARIA",
+  "short_name": "RK KANCELARIA",
+  "description": "Baza spraw i workflow kancelarii",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#082b36",
+  "theme_color": "#082b36",
+  "icons": [
+    {"src": "/assets/rk_kancelaria_logo.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ]
+}

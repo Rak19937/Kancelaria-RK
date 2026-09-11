@@ -156,3 +156,21 @@
     }, {once: true});
   }
 })();
+
+// DEV8 — Timeline 2.0: filtruj typy wpisów bez przeładowania strony.
+document.addEventListener('click',e=>{
+  const btn=e.target.closest('[data-timeline-filter]');
+  if(!btn) return;
+  e.preventDefault();
+  const filter=btn.dataset.timelineFilter||'all';
+  const root=btn.closest('.timeline-wrap') || document;
+  root.querySelectorAll('[data-timeline-filter]').forEach(x=>x.classList.toggle('active',x===btn));
+  root.querySelectorAll('.timeline-item').forEach(item=>{
+    item.hidden = filter!=='all' && item.dataset.kind!==filter;
+  });
+});
+
+// DEV8 PWA. Service Worker nie cache'uje danych spraw ani dokumentów.
+if('serviceWorker' in navigator && (location.protocol==='https:' || location.hostname==='localhost' || location.hostname==='127.0.0.1')){
+  window.addEventListener('load',()=>navigator.serviceWorker.register('/service-worker.js',{scope:'/'}).catch(()=>{}));
+}

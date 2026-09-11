@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Bezpieczna synchronizacja RK KANCELARIA Installed <-> Portable.
 
-Model synchronizacji 0.2.0-dev3:
+Model synchronizacji 0.2.0-dev8:
 - jedna wspólna historia danych,
 - automatyczny kierunek, gdy od ostatniej synchronizacji zmieniła się tylko jedna strona,
 - konflikt, gdy obie strony zmieniły się niezależnie,
@@ -34,7 +34,7 @@ from typing import Iterable
 
 from rk_paths import installed_data_dir, resolve_runtime_paths
 
-SCHEMA_VERSION = 210
+SCHEMA_VERSION = 230
 SYNC_FORMAT = 2
 MANAGED_DIRS = ("dokumenty", "projekty_pism")
 LOCAL_SETTING_KEYS = {"backup_key_dpapi", "backup_key_verifier"}
@@ -43,7 +43,7 @@ IGNORE_TABLE_PREFIXES = ("document_fts",)
 STATE_NAME = ".rk_sync_state.json"
 LOCK_NAME = ".rk_app_running.json"
 BACKUP_DIR_NAME = "backup_synchronizacji"
-SYNC_BACKUP_RETENTION = 10
+SYNC_BACKUP_RETENTION = 30
 
 
 class SyncError(RuntimeError):
