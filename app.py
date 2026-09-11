@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RK KANCELARIA 0.2.0-dev5 — DASHBOARD REFRESH.
+"""RK KANCELARIA 0.2.0-dev6 — DATA SAFETY & ACTIVITY DETAILS.
 
 Rozwój stabilnej 0.15.2: centralne ścieżki i fundament trybu Installed/Portable.
 Funkcje kancelaryjne, dokumenty, backup/recovery i Desktop pozostają zgodne z 0.15.2.
@@ -43,12 +43,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from http.cookies import SimpleCookie
 
-from rk_paths import resolve_runtime_paths
+from rk_paths import resolve_runtime_paths, installed_data_dir
 
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.2.0-dev5"
+VERSION = "0.2.0-dev6"
 SCHEMA_VERSION = 210
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
@@ -73,6 +73,9 @@ RECOVERY_DIR = RUNTIME_PATHS.recovery_dir
 PENDING_RESTORE_DIR = RUNTIME_PATHS.pending_restore_dir
 PENDING_RESTORE_DB = PENDING_RESTORE_DIR / "sprawnik_restore.sqlite3"
 PENDING_RESTORE_MARKER = PENDING_RESTORE_DIR / "restore.json"
+PENDING_IMPORT_DOCS = PENDING_RESTORE_DIR / "import_dokumenty"
+PENDING_IMPORT_DRAFTS = PENDING_RESTORE_DIR / "import_projekty_pism"
+PRE_IMPORT_BACKUPS_DIR = DATA_DIR / "backup_przed_importem"
 BACKUP_KEY_FILE = RUNTIME_PATHS.backup_key_file
 TRASH_RETENTION_DAYS = 30
 # Ochrona przed przypadkowym wczytaniem wieluset MB/GB do pamięci przez pojedynczy formularz.
@@ -119,6 +122,13 @@ def _legacy_candidates() -> list[Path]:
 
     # Najważniejszy przypadek: aktualizacja przez podmianę app.py w starym folderze.
     add(RUNTIME_PATHS.app_dir / "sprawnik.sqlite3")
+
+    # Stara wersja Installed -> %LOCALAPPDATA%\RK_KANCELARIA\Dane\sprawnik.sqlite3.
+    # W trybie Installed będzie to DB_PATH i zostanie automatycznie pominięta przez add().
+    try:
+        add(installed_data_dir() / "sprawnik.sqlite3")
+    except Exception:
+        pass
 
     # Poprzednie paczki rozpakowane obok bieżącej wersji.
     parents = {RUNTIME_PATHS.app_dir.parent}
@@ -170,6 +180,209 @@ def _db_score(path: Path) -> tuple[int, float]:
     except OSError:
         mtime = 0.0
     return (score, mtime)
+
+
+
+def _database_summary(path: Path) -> dict:
+    """Lekki opis bazy używany do bezpiecznego porównania przed importem."""
+    out = {"ok": False, "reason": "", "core_records": 0, "latest_activity": "", "counts": {}, "version": ""}
+    ok, reason = sqlite_integrity(path)
+    out["ok"], out["reason"] = ok, reason
+    if not ok:
+        return out
+    try:
+        uri = f"file:{path.as_posix()}?mode=ro"
+        con = sqlite3.connect(uri, uri=True, timeout=5)
+        con.row_factory = sqlite3.Row
+        try:
+            tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            core_tables = ("cases", "tasks", "documents", "events", "case_notes", "writing_projects")
+            for table in core_tables:
+                if table in tables:
+                    try:
+                        out["counts"][table] = int(con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                    except sqlite3.DatabaseError:
+                        out["counts"][table] = 0
+            out["core_records"] = sum(out["counts"].values())
+            latest = []
+            candidates = (
+                ("audit_log", "created_at"),
+                ("immutable_audit", "created_at"),
+                ("cases", "updated_at"),
+                ("documents", "created_at"),
+                ("tasks", "created_at"),
+                ("events", "created_at"),
+                ("case_notes", "created_at"),
+                ("writing_projects", "updated_at"),
+            )
+            for table, col in candidates:
+                if table not in tables:
+                    continue
+                try:
+                    cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+                    if col in cols:
+                        val = con.execute(f"SELECT MAX({col}) FROM {table}").fetchone()[0]
+                        if val:
+                            latest.append(str(val))
+                except sqlite3.DatabaseError:
+                    pass
+            out["latest_activity"] = max(latest) if latest else ""
+        finally:
+            con.close()
+    except Exception as exc:
+        out["ok"] = False
+        out["reason"] = str(exc)
+        return out
+    try:
+        marker = path.parent / ".wersja_programu"
+        out["version"] = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+    except OSError:
+        pass
+    return out
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _tree_size(path: Path) -> int:
+    total = 0
+    if not path.exists():
+        return 0
+    try:
+        for item in path.rglob("*"):
+            if item.is_file():
+                try:
+                    total += item.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def installed_import_source() -> tuple[Path, Path] | None:
+    """Zwróć katalog i bazę starego Installed, jeśli jest to inne źródło niż bieżące Data."""
+    try:
+        src_dir = installed_data_dir()
+        src_db = src_dir / "sprawnik.sqlite3"
+        if src_dir.resolve() == DATA_DIR.resolve():
+            return None
+        if _looks_like_sqlite(src_db):
+            return src_dir, src_db
+    except Exception:
+        return None
+    return None
+
+
+def _backup_current_data_before_import() -> Path | None:
+    """Pełna lokalna siatka bezpieczeństwa: baza + dokumenty + projekty pism."""
+    if not DB_PATH.exists() and not FILES_DIR.exists() and not DRAFTS_DIR.exists():
+        return None
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    root = PRE_IMPORT_BACKUPS_DIR / f"import_{stamp}"
+    root.mkdir(parents=True, exist_ok=True)
+    if DB_PATH.exists() and _looks_like_sqlite(DB_PATH):
+        _sqlite_backup(DB_PATH, root / "sprawnik.sqlite3")
+    if FILES_DIR.exists():
+        shutil.copytree(FILES_DIR, root / "dokumenty", dirs_exist_ok=True, copy_function=shutil.copy2)
+    if DRAFTS_DIR.exists():
+        shutil.copytree(DRAFTS_DIR, root / "projekty_pism", dirs_exist_ok=True, copy_function=shutil.copy2)
+    if VERSION_MARKER.exists():
+        try:
+            shutil.copy2(VERSION_MARKER, root / ".wersja_programu")
+        except OSError:
+            pass
+    # Nie pozwalaj, aby jednorazowe kopie po importach rosły bez końca.
+    try:
+        old = sorted([x for x in PRE_IMPORT_BACKUPS_DIR.glob("import_*") if x.is_dir()], key=lambda x: x.stat().st_mtime, reverse=True)
+        for folder in old[3:]:
+            shutil.rmtree(folder, ignore_errors=True)
+    except OSError:
+        pass
+    return root
+
+
+def schedule_installed_import() -> tuple[bool, str]:
+    """Przygotuj bezpieczny import Installed -> bieżący Portable. Podmiana bazy następuje po restarcie."""
+    src = installed_import_source()
+    if not src:
+        return False, "Nie znaleziono osobnej bazy wersji Installed."
+    src_dir, src_db = src
+    src_summary = _database_summary(src_db)
+    if not src_summary["ok"]:
+        return False, f"Baza źródłowa nie przeszła kontroli SQLite: {src_summary['reason']}"
+    dst_summary = _database_summary(DB_PATH) if DB_PATH.exists() else {"ok": False, "core_records": 0, "latest_activity": "", "counts": {}, "version": ""}
+
+    # Jeżeli pliki są identyczne, nie planuj bezsensownej podmiany.
+    try:
+        if DB_PATH.exists() and DB_PATH.stat().st_size == src_db.stat().st_size and _file_sha256(DB_PATH) == _file_sha256(src_db):
+            return False, "Bieżąca baza i baza Installed są identyczne — import nie jest potrzebny."
+    except OSError:
+        pass
+
+    # Twarda ochrona przed nadpisaniem aktywniejszej/nowszej bazy starszym źródłem.
+    if dst_summary.get("ok") and int(dst_summary.get("core_records") or 0) > 0:
+        src_latest = str(src_summary.get("latest_activity") or "")
+        dst_latest = str(dst_summary.get("latest_activity") or "")
+        src_core = int(src_summary.get("core_records") or 0)
+        dst_core = int(dst_summary.get("core_records") or 0)
+        if dst_latest and src_latest and dst_latest > src_latest:
+            return False, ("Import zablokowany: bieżąca baza zawiera nowszą aktywność niż baza Installed "
+                           f"({dst_latest} > {src_latest}). Najpierw wykonaj ręczne porównanie/synchronizację.")
+        if dst_core > src_core and (not src_latest or not dst_latest or dst_latest >= src_latest):
+            return False, ("Import zablokowany: bieżąca baza zawiera więcej danych roboczych niż źródło Installed "
+                           f"({dst_core} > {src_core}). Program nie nadpisze jej automatycznie starszą/mniejszą bazą.")
+
+    # Oszacuj miejsce na kopię bezpieczeństwa + staging importu.
+    current_payload = (DB_PATH.stat().st_size if DB_PATH.exists() else 0) + _tree_size(FILES_DIR) + _tree_size(DRAFTS_DIR)
+    source_payload = src_db.stat().st_size + _tree_size(src_dir / "dokumenty") + _tree_size(src_dir / "projekty_pism")
+    try:
+        free = shutil.disk_usage(DATA_DIR).free
+        needed = int((current_payload + source_payload) * 1.15) + 50 * 1024 * 1024
+        if free < needed:
+            return False, f"Za mało wolnego miejsca na bezpieczny import. Potrzeba ok. {needed/1024/1024:.0f} MB wolnego miejsca."
+    except OSError:
+        pass
+
+    try:
+        backup_dir = _backup_current_data_before_import()
+        PENDING_RESTORE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = PENDING_RESTORE_DB.with_suffix(".sqlite3.tmp")
+        _sqlite_backup(src_db, tmp)
+        ok, why = sqlite_integrity(tmp)
+        if not ok:
+            tmp.unlink(missing_ok=True)
+            return False, f"Migawka importu nie przeszła kontroli SQLite: {why}"
+        os.replace(tmp, PENDING_RESTORE_DB)
+
+        for staging in (PENDING_IMPORT_DOCS, PENDING_IMPORT_DRAFTS):
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+        if (src_dir / "dokumenty").is_dir():
+            shutil.copytree(src_dir / "dokumenty", PENDING_IMPORT_DOCS, copy_function=shutil.copy2)
+        if (src_dir / "projekty_pism").is_dir():
+            shutil.copytree(src_dir / "projekty_pism", PENDING_IMPORT_DRAFTS, copy_function=shutil.copy2)
+
+        meta = {
+            "kind": "installed_import",
+            "source": str(src_dir),
+            "source_version": src_summary.get("version", ""),
+            "source_core_records": src_summary.get("core_records", 0),
+            "source_latest_activity": src_summary.get("latest_activity", ""),
+            "backup_dir": str(backup_dir) if backup_dir else "",
+            "scheduled_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        PENDING_RESTORE_MARKER.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True, ("Import został zweryfikowany i przygotowany. Zamknij RK KANCELARIA i uruchom ponownie. "
+                      "Przy starcie baza Installed zostanie zaimportowana, schemat zaktualizowany, a dokumenty przełączone na importowany zestaw.")
+    except Exception as exc:
+        log_event(f"Planowanie importu Installed: {exc}", "ERROR")
+        return False, f"Nie udało się przygotować importu: {exc}"
 
 
 def _sqlite_backup(src: Path, dst: Path) -> None:
@@ -346,6 +559,7 @@ STATUS_BADGES = {
     "closed": "green",
 }
 DOC_TYPES = ["Pismo procesowe", "Wniosek", "Apelacja", "Zażalenie", "Odpowiedź", "Postanowienie", "Wyrok", "Uzasadnienie", "Opinia biegłego", "Dowód", "Korespondencja", "Inne"]
+PLEADING_DOC_TYPES = {"Pismo procesowe", "Wniosek", "Apelacja", "Zażalenie", "Odpowiedź"}
 DOC_STATUSES = ["Aktywny", "Draft", "Do podpisu", "Złożone", "Doręczone", "Oczekiwanie na odpowiedź", "Archiwalne"]
 EVENT_TYPES = ["Czynność", "Rozprawa", "Posiedzenie", "Mediacja", "Orzeczenie", "Wpływ pisma", "Wysłanie pisma", "Doręczenie", "Telefon", "Notatka"]
 
@@ -557,16 +771,36 @@ def schedule_backup_restore(backup_path: Path) -> tuple[bool,str]:
 
 def apply_pending_restore_if_any() -> str:
     if not PENDING_RESTORE_MARKER.exists() or not PENDING_RESTORE_DB.exists(): return ''
+    try: meta=json.loads(PENDING_RESTORE_MARKER.read_text(encoding='utf-8'))
+    except Exception: meta={}
     ok,why=sqlite_integrity(PENDING_RESTORE_DB)
     if not ok: log_event(f'Odrzucono pending restore: {why}','ERROR'); return f'Nie przywrócono kopii: {why}'
     RECOVERY_DIR.mkdir(parents=True,exist_ok=True)
     if DB_PATH.exists() and _looks_like_sqlite(DB_PATH):
         safety=RECOVERY_DIR/f"baza_przed_restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sqlite3"; _sqlite_backup(DB_PATH,safety)
     os.replace(PENDING_RESTORE_DB,DB_PATH)
-    try: meta=json.loads(PENDING_RESTORE_MARKER.read_text(encoding='utf-8'))
-    except Exception: meta={}
+
+    kind=meta.get('kind','backup_restore')
+    if kind=='installed_import':
+        try:
+            if PENDING_IMPORT_DOCS.exists():
+                if FILES_DIR.exists(): shutil.rmtree(FILES_DIR,ignore_errors=True)
+                shutil.copytree(PENDING_IMPORT_DOCS,FILES_DIR,copy_function=shutil.copy2)
+            else:
+                FILES_DIR.mkdir(parents=True,exist_ok=True)
+            if PENDING_IMPORT_DRAFTS.exists():
+                if DRAFTS_DIR.exists(): shutil.rmtree(DRAFTS_DIR,ignore_errors=True)
+                shutil.copytree(PENDING_IMPORT_DRAFTS,DRAFTS_DIR,copy_function=shutil.copy2)
+            else:
+                DRAFTS_DIR.mkdir(parents=True,exist_ok=True)
+        finally:
+            shutil.rmtree(PENDING_IMPORT_DOCS,ignore_errors=True)
+            shutil.rmtree(PENDING_IMPORT_DRAFTS,ignore_errors=True)
+        msg=f"Zaimportowano dane z Installed: {meta.get('source','stara instalacja')}"
+    else:
+        msg=f"Przywrócono backup: {meta.get('source','wybrana kopia')}"
     PENDING_RESTORE_MARKER.unlink(missing_ok=True)
-    msg=f"Przywrócono backup: {meta.get('source','wybrana kopia')}"; log_event(msg,'WARNING'); return msg
+    log_event(msg,'WARNING'); return msg
 
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -1172,6 +1406,107 @@ def set_case_tags(con: sqlite3.Connection, case_id: int, raw: str) -> None:
 
 
 
+def _change_value(value, limit: int = 140) -> str:
+    if value is None or str(value) == '':
+        return '—'
+    text = str(value).replace('\r', ' ').replace('\n', ' ↵ ').strip()
+    if len(text) > limit:
+        text = text[:limit-1] + '…'
+    return f'„{text}”'
+
+
+def describe_changes(old, new_values: dict, labels: dict[str, str], *, compact_fields: set[str] | None = None) -> str:
+    """Czytelny diff do historii zmian. Jedna linia = jedno pole, co ułatwia scalanie autosave."""
+    if not old:
+        return ''
+    compact_fields = compact_fields or set()
+    lines = []
+    for field, label in labels.items():
+        try:
+            before = row_get(old, field, '')
+        except Exception:
+            before = ''
+        after = new_values.get(field, '')
+        if str(before or '') == str(after or ''):
+            continue
+        if field in compact_fields:
+            btxt = str(before or '')
+            atxt = str(after or '')
+            lines.append(f"• {label}: zmieniono ({len(btxt)} → {len(atxt)} znaków)")
+        else:
+            lines.append(f"• {label}: {_change_value(before)} → {_change_value(after)}")
+    return '\n'.join(lines)
+
+
+def _merge_audit_descriptions(previous: str, current: str) -> str:
+    """Scal autosave: zachowaj pierwotne 'przed' i najnowsze 'po' dla każdego pola."""
+    previous = (previous or '').strip()
+    current = (current or '').strip()
+    if not previous:
+        return current
+    if not current or current == previous:
+        return previous
+    lines = []
+    by_label: dict[str, int] = {}
+    change_re = re.compile(r'^• ([^:]+): (.+?) → (.+)$')
+
+    def add(line: str):
+        line = line.strip()
+        if not line:
+            return
+        m = change_re.match(line)
+        if not m:
+            if line not in lines:
+                lines.append(line)
+            return
+        label, before, after = m.groups()
+        if label in by_label:
+            idx = by_label[label]
+            old_match = change_re.match(lines[idx])
+            original_before = old_match.group(2) if old_match else before
+            lines[idx] = f"• {label}: {original_before} → {after}"
+        else:
+            by_label[label] = len(lines)
+            lines.append(line)
+
+    for line in previous.splitlines():
+        add(line)
+    for line in current.splitlines():
+        add(line)
+    return '\n'.join(lines)
+
+
+def audit_target_html(row) -> str:
+    """Odnośnik z historii bezpośrednio do zmienionego elementu, gdy ma sens."""
+    et = str(row_get(row, 'entity_type', '') or '')
+    try:
+        eid = int(row_get(row, 'entity_id', 0) or 0)
+    except Exception:
+        eid = 0
+    try:
+        cid = int(row_get(row, 'case_id', 0) or 0)
+    except Exception:
+        cid = 0
+    action = str(row_get(row, 'action', '') or '')
+    if not eid or 'Usunięto' in action:
+        return ''
+    if et == 'document':
+        return f"<a class='btn small' href='/document/{eid}/open'>Otwórz dokument</a>"
+    if et == 'writing_project':
+        return f"<a class='btn small' href='/draft/{eid}'>Otwórz projekt pisma</a>"
+    if et == 'task':
+        return f"<a class='btn small' href='/task/{eid}/edit'>Otwórz zadanie</a>"
+    if et == 'case' and cid:
+        return f"<a class='btn small' href='/case/{cid}'>Otwórz sprawę</a>"
+    if cid:
+        return f"<a class='btn small' href='/case/{cid}'>Otwórz sprawę</a>"
+    return ''
+
+
+def audit_description_html(value: str) -> str:
+    return esc(value or '').replace('\n', '<br>')
+
+
 def immutable_audit(con: sqlite3.Connection, case_id: int | None, entity_type: str, entity_id: int | None,
                     action: str, description: str, author: str) -> None:
     """Append-only technical log. Application code has no delete/update path for this table."""
@@ -1192,18 +1527,19 @@ def audit(con: sqlite3.Connection, case_id: int | None, entity_type: str, entity
     author=(author or '').strip()
     immutable_audit(con,case_id,entity_type,entity_id,action,description,author)
     now=datetime.now()
-    last=con.execute("SELECT id,created_at FROM audit_log WHERE case_id IS ? AND entity_type=? AND entity_id IS ? AND action=? AND author=? ORDER BY id DESC LIMIT 1",
+    last=con.execute("SELECT id,created_at,description FROM audit_log WHERE case_id IS ? AND entity_type=? AND entity_id IS ? AND action=? AND author=? ORDER BY id DESC LIMIT 1",
                      (case_id,entity_type,entity_id,action,author)).fetchone()
     if last:
         try:
             last_dt=datetime.strptime(last['created_at'][:19],'%Y-%m-%d %H:%M:%S')
             if (now-last_dt).total_seconds() <= 45:
-                con.execute("UPDATE audit_log SET description=?,created_at=CURRENT_TIMESTAMP WHERE id=?",(description[:600],last['id']))
+                merged=_merge_audit_descriptions(last['description'] or '',description)
+                con.execute("UPDATE audit_log SET description=?,created_at=CURRENT_TIMESTAMP WHERE id=?",(merged[:1800],last['id']))
                 return
         except Exception:
             pass
     con.execute("INSERT INTO audit_log(case_id,entity_type,entity_id,action,description,author) VALUES(?,?,?,?,?,?)",
-                (case_id,entity_type,entity_id,action[:80],description[:600],author[:120]))
+                (case_id,entity_type,entity_id,action[:80],description[:1800],author[:120]))
 
 
 def case_read_only(con: sqlite3.Connection, case_id: int) -> bool:
@@ -2310,7 +2646,7 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"/case/\d+/export/pdf", path): return self.case_export_pdf(int(path.split("/")[-3]), qs, None)
             if re.fullmatch(r"/party/\d+/edit", path): return self.party_edit(int(path.split("/")[2]))
             if re.fullmatch(r"/event/\d+/edit", path): return self.event_edit(int(path.split("/")[2]))
-            if re.fullmatch(r"/task/\d+/edit", path): return self.task_edit(int(path.split("/")[2]))
+            if re.fullmatch(r"/task/\d+/edit", path): return self.task_edit(int(path.split("/")[2]), qs)
             if re.fullmatch(r"/document/\d+/edit", path): return self.document_edit(int(path.split("/")[2]))
             if re.fullmatch(r"/relation/\d+/edit", path): return self.relation_edit(int(path.split("/")[2]))
             if re.fullmatch(r"/external-signature/\d+/edit", path): return self.external_signature_edit(int(path.split("/")[2]))
@@ -2391,6 +2727,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/security/key": return self.security_key_update(fields)
             if path == "/backup/encrypted": return self.encrypted_backup(fields)
             if path == "/backups/restore": return self.backup_restore_schedule(fields)
+            if path == "/data/import-installed": return self.data_import_installed(fields)
             if re.fullmatch(r"/document/\d+/relocate", path): return self.document_relocate(int(path.split("/")[2]), fields, files)
             if re.fullmatch(r"/document/\d+/open-default", path): return self.document_open_default(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/document/\d+/open-folder", path): return self.document_open_folder(int(path.split("/")[2]), fields)
@@ -2400,6 +2737,7 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"/draft/\d+/archive", path): return self.draft_archive(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/draft/\d+/to-document", path): return self.draft_to_document(int(path.split("/")[2]), fields)
             if path == "/case/create": return self.case_create(fields)
+            if path == "/task/create": return self.task_add_global(fields)
             if re.fullmatch(r"/case/\d+/update", path): return self.case_update(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/case/\d+/delete", path): return self.case_delete(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/case/\d+/pin", path): return self.case_pin_toggle(int(path.split("/")[2]), fields)
@@ -2930,7 +3268,7 @@ class Handler(BaseHTTPRequestHandler):
             readonly_banner=f"<div class='readonly-banner'><b>🔒 Sprawa zakończona — tryb tylko do odczytu.</b> Edycja jest zablokowana, aby nie zmienić przypadkowo akt archiwalnych. {unlock}</div>"
         elif c['status']=='closed' and ro_admin:
             readonly_banner=f"<div class='readonly-banner'><b>🔓 Zakończona sprawa jest czasowo odblokowana.</b> <form method='post' action='/case/{cid}/lock' style='display:inline'><button class='btn'>Zablokuj ponownie</button></form></div>"
-        history_html=''.join(f"<div class='audit-row'><b>{esc(row_get(x,'action'))}</b> · {esc(row_get(x,'description',row_get(x,'details','')))}<div class='author'>{esc(row_get(x,'created_at'))} · {esc(row_get(x,'author',row_get(x,'actor','')))}</div></div>" for x in history) or '<div class="empty">Brak historii zmian.</div>'
+        history_html=''.join(f"<div class='audit-row'><div><b>{esc(row_get(x,'action'))}</b></div><div class='small muted' style='margin:4px 0'>{audit_description_html(row_get(x,'description',row_get(x,'details','')))}</div><div style='margin:5px 0'>{audit_target_html(x)}</div><div class='author'>{esc(row_get(x,'created_at'))} · {esc(row_get(x,'author',row_get(x,'actor','')))}</div></div>" for x in history) or '<div class="empty">Brak historii zmian.</div>'
         lead_text=user_display_name(lead_user) if lead_user else '—'
         pin_char='★' if pinned else '☆'; pin_cls='on' if pinned else ''
 
@@ -3104,10 +3442,30 @@ class Handler(BaseHTTPRequestHandler):
         vals=[f.get(k,'').strip() for k in keys]; author=self.current_author(f)
         try: lead=int(f.get('lead_user_id','') or 0) or None
         except ValueError: lead=None
+        new_values=dict(zip(keys,vals))
+        labels={
+            'signature':'Sygnatura sądowa','internal_signature':'Sygnatura wewnętrzna','client':'Klient / zlecający',
+            'title':'Nazwa sprawy','court':'Sąd','department':'Wydział','category':'Kategoria','subject':'Przedmiot',
+            'status':'Status','waiting_for':'Czekamy na','next_step':'Następny krok','next_date':'Najbliższa data','notes':'Notatki'
+        }
         with db() as con:
+            old=con.execute("SELECT * FROM cases WHERE id=?",(cid,)).fetchone()
+            if not old: return self.send_error(404)
+            old_tags=[r['name'] for r in con.execute("SELECT t.name FROM case_tags ct JOIN tags t ON t.id=ct.tag_id WHERE ct.case_id=? ORDER BY t.name",(cid,)).fetchall()]
+            new_tags=parse_tags(f.get('tags',''))
+            details=describe_changes(old,new_values,labels,compact_fields={'notes'})
+            if old['lead_user_id'] != lead:
+                old_lead=con.execute("SELECT author_name,function FROM users WHERE id=?",(old['lead_user_id'],)).fetchone() if old['lead_user_id'] else None
+                new_lead=con.execute("SELECT author_name,function FROM users WHERE id=?",(lead,)).fetchone() if lead else None
+                line=f"• Prowadzący: {_change_value(user_display_name(old_lead) if old_lead else '—')} → {_change_value(user_display_name(new_lead) if new_lead else '—')}"
+                details=(details+'\n'+line).strip()
+            if old_tags != sorted(new_tags, key=str.casefold):
+                line=f"• Tagi: {_change_value(', '.join(old_tags))} → {_change_value(', '.join(new_tags))}"
+                details=(details+'\n'+line).strip()
             con.execute("UPDATE cases SET signature=?,internal_signature=?,client=?,title=?,court=?,department=?,category=?,subject=?,status=?,waiting_for=?,next_step=?,next_date=?,notes=?,lead_user_id=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(*vals,lead,author,cid))
             set_case_tags(con,cid,f.get('tags',''))
-            audit(con,cid,'case',cid,'Edytowano dane sprawy',f.get('title','').strip(),author)
+            if details:
+                audit(con,cid,'case',cid,'Edytowano dane sprawy',details,author)
         self.redirect(f'/case/{cid}')
 
     def case_delete(self,cid,f):
@@ -3174,12 +3532,13 @@ class Handler(BaseHTTPRequestHandler):
         signature=(f.get('signature','') or '').strip()[:240]
         author=self.current_author(f)
         with db() as con:
-            row=con.execute("SELECT case_id FROM case_external_signatures WHERE id=?",(sid,)).fetchone()
+            row=con.execute("SELECT * FROM case_external_signatures WHERE id=?",(sid,)).fetchone()
             if row:
                 cid=row['case_id']
                 if label and signature:
+                    details=describe_changes(row,{'label':label,'signature':signature},{'label':'Nazwa pola','signature':'Sygnatura / numer'})
                     con.execute("UPDATE case_external_signatures SET label=?,signature=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(label,signature,author,sid))
-                    audit(con,cid,'external_signature',sid,'Edytowano dodatkową sygnaturę',f"{label}: {signature}",author)
+                    if details: audit(con,cid,'external_signature',sid,'Edytowano dodatkową sygnaturę',details,author)
         self.redirect(f"/case/{cid}" if cid else '/cases')
 
     def external_signature_delete(self,sid,f):
@@ -3235,11 +3594,28 @@ class Handler(BaseHTTPRequestHandler):
         try: source=int(f.get('source_case_id','0') or 0); target=int(f.get('target_case_id','0') or 0)
         except ValueError: return self.redirect('/cases')
         rtype=f.get('relation_type','related'); rtype=rtype if rtype in RELATION_TYPES else 'related'; author=self.current_author(f)
+        note=f.get('note','').strip()
         if source and target and source!=target:
             with db() as con:
-                if con.execute("SELECT COUNT(*) FROM cases WHERE id IN (?,?)",(source,target)).fetchone()[0]==2:
-                    con.execute("UPDATE case_relations SET source_case_id=?,target_case_id=?,relation_type=?,note=?,updated_by=? WHERE id=?",(source,target,rtype,f.get('note','').strip(),author,rid))
-                    audit(con,source,'relation',rid,'Edytowano powiązanie',RELATION_TYPES.get(rtype,(rtype,rtype))[0],author)
+                old=con.execute("SELECT * FROM case_relations WHERE id=?",(rid,)).fetchone()
+                if old and con.execute("SELECT COUNT(*) FROM cases WHERE id IN (?,?)",(source,target)).fetchone()[0]==2:
+                    def case_name(xid):
+                        row=con.execute("SELECT signature,internal_signature,title FROM cases WHERE id=?",(xid,)).fetchone()
+                        if not row: return f'#{xid}'
+                        return primary_signature_text(xid,row['signature'],row['internal_signature']) if (row['signature'] or row['internal_signature']) else row['title']
+                    detail_lines=[]
+                    if old['source_case_id']!=source:
+                        detail_lines.append(f"• Sprawa bazowa: {_change_value(case_name(old['source_case_id']))} → {_change_value(case_name(source))}")
+                    if old['target_case_id']!=target:
+                        detail_lines.append(f"• Sprawa powiązana: {_change_value(case_name(old['target_case_id']))} → {_change_value(case_name(target))}")
+                    if old['relation_type']!=rtype:
+                        old_type=RELATION_TYPES.get(old['relation_type'],(old['relation_type'],old['relation_type']))[0]
+                        new_type=RELATION_TYPES.get(rtype,(rtype,rtype))[0]
+                        detail_lines.append(f"• Typ relacji: {_change_value(old_type)} → {_change_value(new_type)}")
+                    if (old['note'] or '')!=note:
+                        detail_lines.append(f"• Notatka: {_change_value(old['note'])} → {_change_value(note)}")
+                    con.execute("UPDATE case_relations SET source_case_id=?,target_case_id=?,relation_type=?,note=?,updated_by=? WHERE id=?",(source,target,rtype,note,author,rid))
+                    if detail_lines: audit(con,source,'relation',rid,'Edytowano powiązanie','\n'.join(detail_lines),author)
         self.redirect(f"/case/{source}" if source else '/cases')
 
     def relation_delete(self,rid,f):
@@ -3258,9 +3634,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def party_update(self,pid,f):
         cid=int(f.get('case_id','0') or 0); a=self.current_author(f)
+        new={'name':f.get('name','').strip(),'role':f.get('role','').strip(),'notes':f.get('notes','').strip()}
         with db() as con:
-            con.execute("UPDATE parties SET name=?,role=?,notes=?,updated_by=? WHERE id=?",(f.get('name','').strip(),f.get('role','').strip(),f.get('notes','').strip(),a,pid))
-            audit(con,cid,'party',pid,'Edytowano uczestnika',f.get('name','').strip(),a)
+            old=con.execute("SELECT * FROM parties WHERE id=?",(pid,)).fetchone()
+            if not old: return self.send_error(404)
+            cid=old['case_id']
+            details=describe_changes(old,new,{'name':'Imię i nazwisko','role':'Rola','notes':'Notatka'},compact_fields={'notes'})
+            con.execute("UPDATE parties SET name=?,role=?,notes=?,updated_by=? WHERE id=?",(new['name'],new['role'],new['notes'],a,pid))
+            if details: audit(con,cid,'party',pid,'Edytowano uczestnika',details,a)
         self.redirect(f"/case/{cid}")
 
     def event_edit(self,eid):
@@ -3273,12 +3654,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def event_update(self,eid,f):
         cid=int(f.get('case_id','0') or 0); a=self.current_author(f)
+        new={'event_date':f.get('event_date',''),'event_type':f.get('event_type','Czynność'),'title':f.get('title','').strip(),'description':f.get('description','').strip()}
         with db() as con:
-            con.execute("UPDATE events SET event_date=?,event_type=?,title=?,description=?,updated_by=? WHERE id=?",(f.get('event_date',''),f.get('event_type','Czynność'),f.get('title','').strip(),f.get('description','').strip(),a,eid))
-            audit(con,cid,'event',eid,'Edytowano zdarzenie',f.get('title','').strip(),a)
+            old=con.execute("SELECT * FROM events WHERE id=?",(eid,)).fetchone()
+            if not old: return self.send_error(404)
+            cid=old['case_id']
+            details=describe_changes(old,new,{'event_date':'Data','event_type':'Typ','title':'Tytuł','description':'Opis'},compact_fields={'description'})
+            con.execute("UPDATE events SET event_date=?,event_type=?,title=?,description=?,updated_by=? WHERE id=?",(new['event_date'],new['event_type'],new['title'],new['description'],a,eid))
+            if details: audit(con,cid,'event',eid,'Edytowano zdarzenie',details,a)
         self.redirect(f"/case/{cid}")
 
-    def task_edit(self,tid):
+    def task_edit(self,tid,qs=None):
+        qs=qs or {}
+        return_to=(qs.get('return_to') or [''])[0].strip()
         with db() as con:
             t=con.execute("SELECT t.*,c.signature,c.title case_title FROM tasks t JOIN cases c ON c.id=t.case_id WHERE t.id=?",(tid,)).fetchone()
             users=con.execute("SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name").fetchall()
@@ -3286,17 +3674,34 @@ class Handler(BaseHTTPRequestHandler):
         prio='<option value="normal" {n}>Normalny</option><option value="high" {h}>Wysoki</option>'.format(n='selected' if t['priority']=='normal' else '',h='selected' if t['priority']=='high' else '')
         stat='<option value="open" {o}>Otwarte</option><option value="done" {d}>Wykonane</option>'.format(o='selected' if t['status']=='open' else '',d='selected' if t['status']=='done' else '')
         user_opts='<option value="">— nie przypisano —</option>'+''.join(f"<option value='{u['id']}' {'selected' if t['assigned_user_id']==u['id'] else ''}>{esc(user_display_name(u))}</option>" for u in users)
-        body=f'''<div class="topbar"><div><h1>Edytuj zadanie</h1><div class="sub">{esc(t['signature'] or t['case_title'])}</div></div></div><div class="card"><form method="post" action="/task/{tid}/update" class="form-grid" data-autosave="1"><input type="hidden" name="case_id" value="{t['case_id']}"><div class="full"><label>Zadanie</label><input name="title" required value="{esc(t['title'])}"></div><div><label>Termin</label><input type="date" name="due_date" value="{esc(t['due_date'])}"></div><div><label>Priorytet</label><select name="priority">{prio}</select></div><div><label>Status</label><select name="status">{stat}</select></div><div><label>Wykonawca</label><select name="assigned_user_id">{user_opts}</select></div><div class="full"><label>Zależność / czekamy na</label><input name="depends_on" value="{esc(t['depends_on'])}"></div><div class="full"><label>Notatki</label><textarea name="notes">{esc(t['notes'])}</textarea></div><div class="full"><button class="btn primary">Zapisz zmiany</button> <a class="btn" href="/case/{t['case_id']}">Anuluj</a></div></form></div>'''
+        back_href=return_to if return_to.startswith('/') else f"/case/{t['case_id']}"
+        body=f'''<div class="topbar"><div><h1>Edytuj zadanie</h1><div class="sub">{esc(t['signature'] or t['case_title'])}</div></div></div><div class="card"><form method="post" action="/task/{tid}/update" class="form-grid" data-autosave="1"><input type="hidden" name="case_id" value="{t['case_id']}"><input type="hidden" name="return_to" value="{esc(return_to)}"><div class="full"><label>Zadanie</label><input name="title" required value="{esc(t['title'])}"></div><div><label>Termin</label><input type="date" name="due_date" value="{esc(t['due_date'])}"></div><div><label>Priorytet</label><select name="priority">{prio}</select></div><div><label>Status</label><select name="status">{stat}</select></div><div><label>Wykonawca</label><select name="assigned_user_id">{user_opts}</select></div><div class="full"><label>Zależność / czekamy na</label><input name="depends_on" value="{esc(t['depends_on'])}"></div><div class="full"><label>Notatki</label><textarea name="notes">{esc(t['notes'])}</textarea></div><div class="full"><button class="btn primary">Zapisz zmiany</button> <a class="btn" href="{esc(back_href)}">Anuluj</a></div></form></div>'''
         self.send_html(layout('Edycja zadania',body,'tasks'))
 
     def task_update(self,tid,f):
         cid=int(f.get('case_id','0') or 0); a=self.current_author(f)
         try: assigned=int(f.get('assigned_user_id','') or 0) or None
         except ValueError: assigned=None
+        new={
+            'title':f.get('title','').strip(),'due_date':f.get('due_date',''),'status':f.get('status','open'),
+            'priority':f.get('priority','normal'),'assigned_user_id':assigned,'depends_on':f.get('depends_on','').strip(),'notes':f.get('notes','').strip()
+        }
         with db() as con:
-            con.execute("UPDATE tasks SET title=?,due_date=?,status=?,priority=?,assigned_user_id=?,depends_on=?,notes=?,updated_by=? WHERE id=?",(f.get('title','').strip(),f.get('due_date',''),f.get('status','open'),f.get('priority','normal'),assigned,f.get('depends_on','').strip(),f.get('notes','').strip(),a,tid))
-            audit(con,cid,'task',tid,'Edytowano zadanie',f.get('title','').strip(),a)
-        self.redirect(f'/case/{cid}')
+            old=con.execute("SELECT * FROM tasks WHERE id=?",(tid,)).fetchone()
+            if not old: return self.send_error(404)
+            cid=old['case_id']
+            details=describe_changes(old,new,{
+                'title':'Zadanie','due_date':'Termin','status':'Status','priority':'Priorytet','depends_on':'Zależność / czekamy na','notes':'Notatki'
+            },compact_fields={'notes'})
+            if old['assigned_user_id'] != assigned:
+                old_u=con.execute("SELECT author_name,function FROM users WHERE id=?",(old['assigned_user_id'],)).fetchone() if old['assigned_user_id'] else None
+                new_u=con.execute("SELECT author_name,function FROM users WHERE id=?",(assigned,)).fetchone() if assigned else None
+                line=f"• Wykonawca: {_change_value(user_display_name(old_u) if old_u else '—')} → {_change_value(user_display_name(new_u) if new_u else '—')}"
+                details=(details+'\n'+line).strip()
+            con.execute("UPDATE tasks SET title=?,due_date=?,status=?,priority=?,assigned_user_id=?,depends_on=?,notes=?,updated_by=? WHERE id=?",(new['title'],new['due_date'],new['status'],new['priority'],assigned,new['depends_on'],new['notes'],a,tid))
+            if details: audit(con,cid,'task',tid,'Edytowano zadanie',details,a)
+        target=(f.get('return_to','') or '').strip()
+        self.redirect(target if target.startswith('/') else f'/case/{cid}')
 
     def document_edit(self,did):
         with db() as con:
@@ -3329,7 +3734,16 @@ class Handler(BaseHTTPRequestHandler):
                 newstored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"; atomic_write_bytes(folder/newstored,newdata)
                 oldstored=stored; stored=newstored
             else: oldstored=''
-            con.execute("UPDATE documents SET doc_date=?,received_date=?,doc_type=?,doc_status=?,title=?,description=?,stored_name=?,original_name=?,updated_by=? WHERE id=?",(f.get('doc_date',''),f.get('received_date',''),f.get('doc_type','Inne'),f.get('doc_status','Aktywny'),f.get('title','').strip(),f.get('description','').strip(),stored,original,a,did)); cid=d['case_id']
+            new_values={
+                'doc_date':f.get('doc_date',''),'received_date':f.get('received_date',''),'doc_type':f.get('doc_type','Inne'),
+                'doc_status':f.get('doc_status','Aktywny'),'title':f.get('title','').strip(),'description':f.get('description','').strip()
+            }
+            details=describe_changes(d,new_values,{
+                'doc_date':'Data dokumentu','received_date':'Data wpływu','doc_type':'Rodzaj','doc_status':'Status dokumentu','title':'Tytuł','description':'Opis'
+            },compact_fields={'description'})
+            if newdata is not None:
+                details=(details+'\n'+f"• Plik: {_change_value(d['original_name'])} → {_change_value(original)}").strip()
+            con.execute("UPDATE documents SET doc_date=?,received_date=?,doc_type=?,doc_status=?,title=?,description=?,stored_name=?,original_name=?,updated_by=? WHERE id=?",(new_values['doc_date'],new_values['received_date'],new_values['doc_type'],new_values['doc_status'],new_values['title'],new_values['description'],stored,original,a,did)); cid=d['case_id']
             if newdata is not None:
                 con.execute("UPDATE documents SET file_hash=?,extracted_text='',indexed_at='',ocr_status='kolejka' WHERE id=?",(sha256_bytes(newdata),did))
                 if oldstored:
@@ -3339,33 +3753,55 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     cur=con.execute('SELECT * FROM documents WHERE id=?',(did,)).fetchone(); con.execute('DELETE FROM document_fts WHERE document_id=?',(did,)); con.execute('INSERT INTO document_fts(document_id,case_id,title,filename,body) VALUES(?,?,?,?,?)',(did,cid,cur['title'],cur['original_name'],cur['extracted_text']))
                 except sqlite3.DatabaseError: pass
-            audit(con,cid,'document',did,'Edytowano dokument',f.get('title','').strip(),a)
+            if details:
+                action='Edytowano pismo' if new_values['doc_type'] in PLEADING_DOC_TYPES else 'Edytowano dokument'
+                audit(con,cid,'document',did,action,details,a)
         if newdata is not None:
             enqueue_document_index(did)
-        self.redirect(f"/case/{cid}")
+        target=(f.get('return_to','') or '').strip()
+        self.redirect(target if target.startswith('/') else f"/case/{cid}")
 
     def party_add(self,cid,f):
         a=self.current_author(f); name=f.get('name','').strip()
         with db() as con:
             cur=con.execute("INSERT INTO parties(case_id,name,role,notes,created_by,updated_by) VALUES(?,?,?,?,?,?)",(cid,name,f.get('role','').strip(),f.get('notes','').strip(),a,a))
-            audit(con,cid,'party',cur.lastrowid,'Dodano uczestnika',name,a)
+            audit(con,cid,'party',cur.lastrowid,'Dodano uczestnika',f"Imię i nazwisko: {_change_value(name)}\nRola: {_change_value(f.get('role','').strip())}",a)
         self.redirect(f'/case/{cid}')
 
     def event_add(self,cid,f):
         a=self.current_author(f); title=f.get('title','').strip()
         with db() as con:
             cur=con.execute("INSERT INTO events(case_id,event_date,event_type,title,description,created_by,updated_by) VALUES(?,?,?,?,?,?,?)",(cid,f.get('event_date',''),f.get('event_type','Czynność'),title,f.get('description','').strip(),a,a))
-            audit(con,cid,'event',cur.lastrowid,'Dodano zdarzenie',title,a)
+            audit(con,cid,'event',cur.lastrowid,'Dodano zdarzenie',f"Tytuł: {_change_value(title)}\nData: {_change_value(f.get('event_date',''))}\nTyp: {_change_value(f.get('event_type','Czynność'))}",a)
         self.redirect(f'/case/{cid}')
 
     def task_add(self,cid,f):
         a=self.current_author(f); title=f.get('title','').strip()
+        if not title:
+            target=(f.get('return_to','') or '').strip()
+            return self.redirect(target if target.startswith('/') else f'/case/{cid}')
         try: assigned=int(f.get('assigned_user_id','') or 0) or None
         except ValueError: assigned=None
         with db() as con:
+            if not con.execute("SELECT 1 FROM cases WHERE id=?",(cid,)).fetchone(): return self.send_error(404)
+            if case_read_only(con,cid): return self.send_error(403,'Sprawa zakończona jest tylko do odczytu.')
             cur=con.execute("INSERT INTO tasks(case_id,title,due_date,status,priority,assigned_user_id,depends_on,notes,created_by,updated_by) VALUES(?,?,?,'open',?,?,?,?,?,?)",(cid,title,f.get('due_date',''),f.get('priority','normal'),assigned,f.get('depends_on','').strip(),f.get('notes','').strip(),a,a))
-            audit(con,cid,'task',cur.lastrowid,'Dodano zadanie',title,a)
-        self.redirect(f'/case/{cid}')
+            assigned_row=con.execute("SELECT author_name,function FROM users WHERE id=?",(assigned,)).fetchone() if assigned else None
+            details=(f"Zadanie: {_change_value(title)}\n"
+                     f"Termin: {_change_value(f.get('due_date',''))}\n"
+                     f"Priorytet: {_change_value('Wysoki' if f.get('priority','normal')=='high' else 'Normalny')}\n"
+                     f"Wykonawca: {_change_value(user_display_name(assigned_row) if assigned_row else '—')}")
+            if f.get('depends_on','').strip(): details += f"\nZależność: {_change_value(f.get('depends_on','').strip())}"
+            audit(con,cid,'task',cur.lastrowid,'Dodano zadanie',details,a)
+        target=(f.get('return_to','') or '').strip()
+        self.redirect(target if target.startswith('/') else f'/case/{cid}')
+
+    def task_add_global(self,f):
+        try: cid=int(f.get('case_id','0') or 0)
+        except ValueError: cid=0
+        if not cid: return self.redirect('/tasks')
+        f=dict(f); f['return_to']='/tasks'
+        return self.task_add(cid,f)
 
     def document_add(self,cid,f,files):
         if not self.ensure_case_editable(cid): return
@@ -3381,10 +3817,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_html(layout('Wykryto duplikat',body,'documents'),409)
             folder=FILES_DIR/f"sprawa_{cid}"; folder.mkdir(parents=True,exist_ok=True); stored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"; atomic_write_bytes(folder/stored,data)
         with db() as con:
-            cur=con.execute("INSERT INTO documents(case_id,doc_date,received_date,doc_type,doc_status,title,description,stored_name,original_name,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(cid,f.get('doc_date',''),f.get('received_date',''),f.get('doc_type','Inne'),f.get('doc_status','Aktywny'),title,f.get('description','').strip(),stored,original,a,a))
+            dtype=f.get('doc_type','Inne'); dstatus=f.get('doc_status','Aktywny'); ddate=f.get('doc_date',''); rdate=f.get('received_date','')
+            cur=con.execute("INSERT INTO documents(case_id,doc_date,received_date,doc_type,doc_status,title,description,stored_name,original_name,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(cid,ddate,rdate,dtype,dstatus,title,f.get('description','').strip(),stored,original,a,a))
             doc_id=cur.lastrowid
             if data is not None: con.execute("UPDATE documents SET file_hash=?,ocr_status='kolejka' WHERE id=?",(sha256_bytes(data),doc_id))
-            audit(con,cid,'document',doc_id,'Dodano dokument',title,a)
+            details=(f"Tytuł: {_change_value(title)}\nRodzaj: {_change_value(dtype)}\nStatus: {_change_value(dstatus)}"
+                     f"\nData dokumentu: {_change_value(ddate)}\nData wpływu: {_change_value(rdate)}")
+            if original: details += f"\nPlik: {_change_value(original)}"
+            action='Dodano pismo' if dtype in PLEADING_DOC_TYPES else 'Dodano dokument'
+            audit(con,cid,'document',doc_id,action,details,a)
         if data is not None: enqueue_document_index(doc_id)
         target=(f.get('return_to','') or '').strip()
         self.redirect(target if target.startswith('/') else f'/case/{cid}')
@@ -3396,15 +3837,17 @@ class Handler(BaseHTTPRequestHandler):
             if r:
                 cid=r['case_id']; new='done' if r['status']!='done' else 'open'
                 con.execute("UPDATE tasks SET status=?,updated_by=? WHERE id=?",(new,a,tid))
-                audit(con,cid,'task',tid,'Zmieniono status zadania',f"{r['title']} → {'wykonane' if new=='done' else 'otwarte'}",a)
-        self.redirect(f'/case/{cid}' if cid else '/tasks')
+                audit(con,cid,'task',tid,'Zmieniono status zadania',f"• Status: {_change_value('Wykonane' if r['status']=='done' else 'Otwarte')} → {_change_value('Wykonane' if new=='done' else 'Otwarte')}\nZadanie: {_change_value(r['title'])}",a)
+        target=(f.get('return_to','') or '').strip()
+        self.redirect(target if target.startswith('/') else (f'/case/{cid}' if cid else '/tasks'))
 
     def task_delete(self,tid,f):
         cid=int(f.get('case_id','0') or 0); a=self.current_author(f)
         with db() as con:
             row=con.execute("SELECT case_id FROM tasks WHERE id=?",(tid,)).fetchone(); cid=row['case_id'] if row else cid
             move_to_trash(con,'task',tid,a)
-        self.redirect(f'/case/{cid}' if cid else '/tasks')
+        target=(f.get('return_to','') or '').strip()
+        self.redirect(target if target.startswith('/') else (f'/case/{cid}' if cid else '/tasks'))
 
     def event_delete(self,eid,f):
         cid=int(f.get('case_id','0') or 0); a=self.current_author(f)
@@ -3560,6 +4003,7 @@ class Handler(BaseHTTPRequestHandler):
     def tasks_page(self,qs):
         show=(qs.get('show') or ['open'])[0]; mine=(qs.get('mine') or [''])[0]=='1'
         u=current_request_user(); uid=u['id'] if u else 0
+        current_return=f"/tasks?show={quote(show)}"+('&mine=1' if mine else '')
         with db() as con:
             sql="""SELECT t.*,c.title case_title,c.signature,c.internal_signature,u.author_name assigned_name,u.function assigned_function
                    FROM tasks t JOIN cases c ON c.id=t.case_id LEFT JOIN users u ON u.id=t.assigned_user_id WHERE 1=1"""; params=[]
@@ -3568,6 +4012,9 @@ class Handler(BaseHTTPRequestHandler):
             sql += " ORDER BY t.status,CASE WHEN t.due_date='' THEN 1 ELSE 0 END,t.due_date,CASE t.priority WHEN 'high' THEN 0 ELSE 1 END"
             rows=con.execute(sql,params).fetchall()
             task_sig_map=load_external_signature_map(con,[r['case_id'] for r in rows])
+            cases=con.execute("SELECT id,signature,internal_signature,title,status,closed_edit_unlocked FROM cases WHERE status<>'closed' OR closed_edit_unlocked=1 ORDER BY signature='',signature,title").fetchall()
+            case_sig_map=load_external_signature_map(con,[r['id'] for r in cases])
+            users=con.execute("SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name").fetchall()
         parts=[]
         for r in rows:
             toggle='↩' if r['status']=='done' else '✓'; label=primary_signature_fast(r['case_id'],r['signature'],task_sig_map); cls='muted' if r['status']=='done' else ''
@@ -3579,11 +4026,26 @@ class Handler(BaseHTTPRequestHandler):
             if r['updated_by'] and r['updated_by']!=r['created_by']: auth.append('zmiana: '+esc(r['updated_by']))
             auth_html=f"<div class='author'>{' · '.join(auth)}</div>" if auth else ''
             prio='Wysoki' if r['priority']=='high' else 'Normalny'
-            parts.append(f"<tr><td><form method='post' action='/task/{r['id']}/toggle'><input type='hidden' name='case_id' value='{r['case_id']}'><button class='btn small'>{toggle}</button></form></td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td class='{cls}'><b>{esc(r['title'])}</b>{dep}{auth_html}</td><td>{fmt_date(r['due_date'])}</td><td>{esc(assigned)}</td><td>{prio}</td><td class='nowrap'><a class='btn small' href='/task/{r['id']}/edit'>Edytuj</a> <form style='display:inline' method='post' action='/task/{r['id']}/delete' onsubmit=\"return confirm('Przenieść zadanie do Kosza?');\"><input type='hidden' name='case_id' value='{r['case_id']}'><button class='btn small danger'>Do kosza</button></form></td></tr>")
+            edit_return=quote(current_return,safe='')
+            parts.append(f"<tr><td><form method='post' action='/task/{r['id']}/toggle'><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small'>{toggle}</button></form></td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td class='{cls}'><b>{esc(r['title'])}</b>{dep}{auth_html}</td><td>{fmt_date(r['due_date'])}</td><td>{esc(assigned)}</td><td>{prio}</td><td class='nowrap'><a class='btn small' href='/task/{r['id']}/edit?return_to={edit_return}'>Edytuj</a> <form style='display:inline' method='post' action='/task/{r['id']}/delete' onsubmit=\"return confirm('Przenieść zadanie do Kosza?');\"><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small danger'>Do kosza</button></form></td></tr>")
         trs=''.join(parts) or '<tr><td colspan=7>Brak zadań.</td></tr>'
         qp='&mine=1' if mine else ''; a1='primary' if show=='open' else ''; a2='primary' if show=='all' else ''
         mine_button="<a class='btn primary' href='/tasks?show=open&mine=1'>Moje zadania</a> <a class='btn' href='/tasks?show=open'>Wszystkie zadania</a>" if mine else "<a class='btn' href='/tasks?show=open&mine=1'>Moje zadania</a>"
-        body=f"""<div class='topbar'><div><h1>{'Moje zadania' if mine else 'Zadania'}</h1><div class='sub'>Czynności we wszystkich sprawach z możliwością przypisania wykonawcy.</div></div><div>{mine_button} <a class='btn {a1}' href='/tasks?show=open{qp}'>Otwarte</a> <a class='btn {a2}' href='/tasks?show=all{qp}'>Wszystkie</a></div></div><div class='card'><table><tr><th></th><th>Sprawa</th><th>Zadanie</th><th>Termin</th><th>Wykonawca</th><th>Priorytet</th><th>Akcje</th></tr>{trs}</table></div>"""
+        case_opts=[]
+        for c in cases:
+            sig=primary_signature_fast(c['id'],c['signature'],case_sig_map)
+            prefix='' if sig=='Bez sygnatury' else sig+' — '
+            case_opts.append(f"<option value='{c['id']}'>{esc(prefix+c['title'])} · {esc(internal_signature_text(c['internal_signature']))}</option>")
+        user_opts='<option value="">— nie przypisano —</option>'+''.join(f"<option value='{x['id']}'>{esc(user_display_name(x))}</option>" for x in users)
+        create_form=(f"""<div class='card' id='new-task'><div class='section-head'><div><h2>Nowe zadanie</h2><div class='small muted'>Dodaj czynność bez wchodzenia do konkretnej sprawy.</div></div></div>
+        <form method='post' action='/task/create' class='form-grid'><input type='hidden' name='return_to' value='/tasks'>
+        <div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz sprawę —</option>{''.join(case_opts)}</select></div>
+        <div class='full'><label>Zadanie *</label><input name='title' required placeholder='np. Przygotować odpowiedź na pismo'></div>
+        <div><label>Termin</label><input type='date' name='due_date'></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div>
+        <div class='full'><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div>
+        <div class='full'><label>Zależność / czekamy na</label><input name='depends_on'></div><div class='full'><label>Notatki</label><textarea name='notes'></textarea></div>
+        <div class='full'><button class='btn primary'>Dodaj zadanie</button></div></form></div><br>""" if cases else "<div class='notice'>Najpierw dodaj aktywną sprawę, aby utworzyć zadanie.</div>")
+        body=f"""<div class='topbar'><div><h1>{'Moje zadania' if mine else 'Zadania'}</h1><div class='sub'>Czynności we wszystkich sprawach z możliwością przypisania wykonawcy.</div></div><div><a class='btn primary' href='#new-task'>+ Nowe zadanie</a> {mine_button} <a class='btn {a1}' href='/tasks?show=open{qp}'>Otwarte</a> <a class='btn {a2}' href='/tasks?show=all{qp}'>Wszystkie</a></div></div>{create_form}<div class='card'><table><tr><th></th><th>Sprawa</th><th>Zadanie</th><th>Termin</th><th>Wykonawca</th><th>Priorytet</th><th>Akcje</th></tr>{trs}</table></div>"""
         self.send_html(layout('Zadania',body,'tasks'))
 
     def documents_page(self,qs):
@@ -3671,8 +4133,9 @@ class Handler(BaseHTTPRequestHandler):
             if r['case_id'] and r['case_title']:
                 sig=primary_signature_text(r['case_id'],r['signature'],r['internal_signature']); case=f"<a class='case-link' href='/case/{r['case_id']}'>{esc(sig if sig!='Bez sygnatury' else r['case_title'])}</a>"
             else: case='—'
-            items.append(f"<tr><td class='nowrap'>{esc(r['created_at'])}</td><td>{case}</td><td><b>{esc(r['action'])}</b><div class='small muted'>{esc(r['description'])}</div></td><td>{esc(r['author']) or '—'}</td></tr>")
-        body=f"""<div class='topbar'><div><h1>Historia zmian</h1><div class='sub'>Dziennik czynności w sprawach. Autosave tej samej operacji jest scalany.</div></div></div><div class='card'><form class='searchbar'><input name='q' value='{esc(q)}' placeholder='Autor, czynność, sprawa…'>{f"<input type='hidden' name='case_id' value='{cid}'>" if cid else ''}<button class='btn'>Filtruj</button></form></div><br><div class='card'><table><tr><th>Data</th><th>Sprawa</th><th>Zmiana</th><th>Autor</th></tr>{''.join(items) or '<tr><td colspan=4>Brak wpisów.</td></tr>'}</table></div>"""
+            target=audit_target_html(r)
+            items.append(f"<tr><td class='nowrap'>{esc(r['created_at'])}</td><td>{case}</td><td><b>{esc(r['action'])}</b><div class='small muted' style='margin:4px 0'>{audit_description_html(r['description'])}</div>{target}</td><td>{esc(r['author']) or '—'}</td></tr>")
+        body=f"""<div class='topbar'><div><h1>Historia zmian</h1><div class='sub'>Dziennik czynności: dokładnie co zmieniono, przez kogo i kiedy. Przy dokumentach, pismach i zadaniach dostępny jest bezpośredni odnośnik.</div></div></div><div class='card'><form class='searchbar'><input name='q' value='{esc(q)}' placeholder='Autor, czynność, sprawa…'>{f"<input type='hidden' name='case_id' value='{cid}'>" if cid else ''}<button class='btn'>Filtruj</button></form></div><br><div class='card'><table><tr><th>Data</th><th>Sprawa</th><th>Zmiana</th><th>Autor</th></tr>{''.join(items) or '<tr><td colspan=4>Brak wpisów.</td></tr>'}</table></div>"""
         self.send_html(layout('Historia zmian',body,'history'))
 
     def trash_page(self,qs):
@@ -3714,9 +4177,39 @@ class Handler(BaseHTTPRequestHandler):
             for x in files:
                 restore=(f"<form method='post' action='/backups/restore' style='display:inline' onsubmit=\"return confirm('Przygotować przywrócenie tej kopii? Bieżąca baza zostanie wcześniej zabezpieczona, a właściwe przywrócenie nastąpi po ponownym uruchomieniu.');\"><input type='hidden' name='backup' value='{esc(x.name)}'><button class='btn small'>Przywróć</button></form>" if current_request_user() and current_request_user()['role']=='admin' else '')
                 rows.append(f"<tr><td>{esc(label)}</td><td>{esc(datetime.fromtimestamp(x.stat().st_mtime).strftime('%d.%m.%Y %H:%M'))}</td><td>{esc(x.name)}{' 🔒' if x.name.endswith('.rkenc') else ''}</td><td>{x.stat().st_size/1024:.1f} KB</td><td>{restore}</td></tr>")
-        msg=f"<div class='notice'>{esc(message)}</div>" if message else ''; pending=("<div class='notice'><b>Przywrócenie jest zaplanowane.</b> Zamknij RK KANCELARIA i uruchom ją ponownie. Przed podmianą zostanie zachowana dodatkowa kopia bieżącej bazy.</div>" if PENDING_RESTORE_MARKER.exists() else '')
-        body=f"""<div class='topbar'><div><h1>Kopie bezpieczeństwa</h1><div class='sub'>Kopie dzienne + kopie przy zamykaniu. Przywracanie odbywa się dopiero podczas restartu, aby nie podmieniać aktywnej bazy.</div></div><div><a class='btn' href='/security'>Szyfrowanie</a> <a class='btn primary' href='/backup'>Pobierz bieżącą bazę</a></div></div>{msg}{pending}<div class='notice'><b>Ostatnia automatyczna kopia dzienna:</b> {esc(when)}<br><span class='small'>{esc(path)}</span></div><div class='card'><table><tr><th>Rodzaj</th><th>Data</th><th>Plik</th><th>Rozmiar</th><th></th></tr>{''.join(rows) or '<tr><td colspan=5>Brak kopii.</td></tr>'}</table></div>"""
+        msg=f"<div class='notice'>{esc(message)}</div>" if message else ''
+        pending=''
+        if PENDING_RESTORE_MARKER.exists():
+            try: pmeta=json.loads(PENDING_RESTORE_MARKER.read_text(encoding='utf-8'))
+            except Exception: pmeta={}
+            if pmeta.get('kind')=='installed_import':
+                pending="<div class='notice'><b>Import danych Installed jest przygotowany.</b> Zamknij RK KANCELARIA i uruchom ją ponownie. Baza i dokumenty zostaną przełączone dopiero przy starcie, po wykonaniu kopii bezpieczeństwa.</div>"
+            else:
+                pending="<div class='notice'><b>Przywrócenie jest zaplanowane.</b> Zamknij RK KANCELARIA i uruchom ją ponownie. Przed podmianą zostanie zachowana dodatkowa kopia bieżącej bazy.</div>"
+
+        db_ok,db_reason=sqlite_integrity(DB_PATH)
+        db_state=(f"<span class='backup-ok'>✓ Baza SQLite: {esc(db_reason)}</span>" if db_ok else f"<span class='conflict-warning'>⚠ Baza SQLite: {esc(db_reason)}</span>")
+        import_card=''
+        src=installed_import_source()
+        if src:
+            src_dir,src_db=src; ss=_database_summary(src_db); ds=_database_summary(DB_PATH) if DB_PATH.exists() else {'core_records':0,'latest_activity':'','version':''}
+            counts=ss.get('counts',{})
+            summary=(f"{counts.get('cases',0)} spraw · {counts.get('documents',0)} dokumentów · {counts.get('tasks',0)} zadań")
+            admin=bool(current_request_user() and current_request_user()['role']=='admin')
+            button=("<form method='post' action='/data/import-installed' onsubmit=\"return confirm('Przygotować import danych ze starej wersji Installed? Bieżąca baza i dokumenty zostaną wcześniej skopiowane do backup_przed_importem. Właściwa podmiana nastąpi dopiero po restarcie.');\"><button class='btn primary'>Importuj dane z Installed</button></form>" if admin and not PENDING_RESTORE_MARKER.exists() else '')
+            import_card=f"""<div class='card'><div class='section-head'><div><h2>Import ze starej RK KANCELARIA (Installed)</h2><div class='small muted'>Program wykrył osobny katalog danych: {esc(str(src_dir))}</div></div></div><p><b>Źródło:</b> {esc(summary)}<br><b>Wersja źródła:</b> {esc(ss.get('version') or 'nieoznaczona')}<br><b>Ostatnia aktywność:</b> {esc(ss.get('latest_activity') or 'brak danych')}<br><b>Bieżąca baza:</b> {int(ds.get('core_records') or 0)} elementów roboczych · ostatnia aktywność {esc(ds.get('latest_activity') or '—')}</p><p class='small muted'>Import jest chroniony: źródło przechodzi quick_check, przed importem powstaje kopia bazy, dokumentów i projektów pism, a program blokuje automatyczne nadpisanie bazy zawierającej nowszą aktywność.</p>{button}</div><br>"""
+        elif APP_MODE=='portable':
+            import_card="<div class='card'><h2>Import ze starej wersji</h2><div class='small muted'>Nie znaleziono osobnej bazy Installed w standardowym katalogu %LOCALAPPDATA%\\RK_KANCELARIA\\Dane.</div></div><br>"
+
+        body=f"""<div class='topbar'><div><h1>Kopie bezpieczeństwa</h1><div class='sub'>Kopie dzienne + kopie przy zamykaniu. Przywracanie i import są wykonywane bezpiecznie po restarcie.</div></div><div><a class='btn' href='/security'>Szyfrowanie</a> <a class='btn primary' href='/backup'>Pobierz bieżącą bazę</a></div></div>{msg}{pending}<div class='notice'><b>Ostatnia automatyczna kopia dzienna:</b> {esc(when)}<br><span class='small'>{esc(path)}</span><br>{db_state}</div>{import_card}<div class='card'><table><tr><th>Rodzaj</th><th>Data</th><th>Plik</th><th>Rozmiar</th><th></th></tr>{''.join(rows) or '<tr><td colspan=5>Brak kopii.</td></tr>'}</table></div>"""
         self.send_html(layout('Kopie bezpieczeństwa',body,'backups'))
+
+    def data_import_installed(self,f):
+        if not self.require_admin(): return
+        ok,msg=schedule_installed_import()
+        if ok:
+            log_event('Użytkownik przygotował import danych z wersji Installed','WARNING')
+        return self.backups_page(msg)
 
     def backup_restore_schedule(self,f):
         if not self.require_admin(): return
@@ -4081,7 +4574,7 @@ class Handler(BaseHTTPRequestHandler):
         status=f.get('status','Roboczy') if f.get('status','Roboczy') in {'Roboczy','Do weryfikacji','Do podpisu','Gotowy','Złożony','Archiwalny'} else 'Roboczy'
         with db() as con:
             cur=con.execute("INSERT INTO writing_projects(case_id,title,doc_type,status,due_date,content,notes,stored_name,original_name,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(cid,title,(f.get('doc_type') or 'Pismo procesowe').strip(),status,f.get('due_date',''),f.get('content',''),f.get('notes',''),stored,original,a,a))
-            audit(con,cid,'writing_project',cur.lastrowid,'Utworzono projekt pisma',title,a)
+            audit(con,cid,'writing_project',cur.lastrowid,'Utworzono projekt pisma',f"Tytuł: {_change_value(title)}\nRodzaj: {_change_value((f.get('doc_type') or 'Pismo procesowe').strip())}\nStatus: {_change_value(status)}\nTermin: {_change_value(f.get('due_date',''))}",a)
         self.redirect(f'/draft/{cur.lastrowid}')
 
     def draft_view(self,did,message=''):
@@ -4108,18 +4601,24 @@ class Handler(BaseHTTPRequestHandler):
         if not title: return self.draft_edit_page(did,'Podaj tytuł projektu.')
         with db() as con: old=con.execute('SELECT * FROM writing_projects WHERE id=?',(did,)).fetchone()
         if not old: return self.send_error(404)
-        stored,original=old['stored_name'],old['original_name']
+        stored,original=old['stored_name'],old['original_name']; replaced_file=False
         if files.get('file') and files['file'][1]:
             original=safe_filename(files['file'][0]); data=files['file'][1]; DRAFTS_DIR.mkdir(parents=True,exist_ok=True); newstored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"; (DRAFTS_DIR/newstored).write_bytes(data)
             if stored:
                 try: (DRAFTS_DIR/stored).unlink(missing_ok=True)
                 except Exception: pass
-            stored=newstored
+            stored=newstored; replaced_file=True
         cid=int(f.get('case_id') or 0) or None; status=f.get('status','Roboczy')
         if status not in {'Roboczy','Do weryfikacji','Do podpisu','Gotowy','Złożony','Archiwalny'}: status='Roboczy'
+        newvals={'title':title,'doc_type':(f.get('doc_type') or 'Pismo procesowe').strip(),'status':status,'due_date':f.get('due_date',''),'content':f.get('content',''),'notes':f.get('notes','')}
+        details=describe_changes(old,newvals,{'title':'Tytuł','doc_type':'Rodzaj','status':'Status','due_date':'Termin','content':'Treść projektu','notes':'Notatki'},compact_fields={'content','notes'})
+        if old['case_id'] != cid:
+            details=(details+'\n'+f"• Przypisana sprawa: {_change_value(old['case_id'] or '—')} → {_change_value(cid or '—')}").strip()
+        if replaced_file:
+            details=(details+'\n'+f"• Plik: {_change_value(old['original_name'])} → {_change_value(original)}").strip()
         with db() as con:
-            con.execute("UPDATE writing_projects SET case_id=?,title=?,doc_type=?,status=?,due_date=?,content=?,notes=?,stored_name=?,original_name=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(cid,title,(f.get('doc_type') or 'Pismo procesowe').strip(),status,f.get('due_date',''),f.get('content',''),f.get('notes',''),stored,original,a,did))
-            audit(con,cid,'writing_project',did,'Edytowano projekt pisma',title,a)
+            con.execute("UPDATE writing_projects SET case_id=?,title=?,doc_type=?,status=?,due_date=?,content=?,notes=?,stored_name=?,original_name=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(cid,title,newvals['doc_type'],status,newvals['due_date'],newvals['content'],newvals['notes'],stored,original,a,did))
+            if details: audit(con,cid,'writing_project',did,'Edytowano projekt pisma',details,a)
         self.redirect(f'/draft/{did}')
 
     def draft_download(self,did):
@@ -4158,7 +4657,7 @@ class Handler(BaseHTTPRequestHandler):
             original=safe_filename((d['title'] or 'projekt')+'.txt'); data=(d['content'] or '').encode('utf-8')
         stored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"; atomic_write_bytes(folder/stored,data)
         with db() as con:
-            cur=con.execute("INSERT INTO documents(case_id,doc_date,received_date,doc_type,doc_status,title,description,stored_name,original_name,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(cid,date.today().isoformat(),'',d['doc_type'] or 'Pismo procesowe','Do podpisu',d['title'],d['notes'] or '',stored,original,a,a)); doc_id=cur.lastrowid; con.execute("UPDATE documents SET file_hash=?,ocr_status='kolejka' WHERE id=?",(sha256_bytes(data),doc_id)); audit(con,cid,'document',doc_id,'Utworzono dokument z projektu pisma',d['title'],a)
+            cur=con.execute("INSERT INTO documents(case_id,doc_date,received_date,doc_type,doc_status,title,description,stored_name,original_name,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(cid,date.today().isoformat(),'',d['doc_type'] or 'Pismo procesowe','Do podpisu',d['title'],d['notes'] or '',stored,original,a,a)); doc_id=cur.lastrowid; con.execute("UPDATE documents SET file_hash=?,ocr_status='kolejka' WHERE id=?",(sha256_bytes(data),doc_id)); audit(con,cid,'document',doc_id,'Dodano pismo z projektu',f"Tytuł: {_change_value(d['title'])}\nProjekt źródłowy: #{did}\nPlik: {_change_value(original)}\nStatus: {_change_value('Do podpisu')}",a)
             con.execute("UPDATE writing_projects SET status='Do podpisu',updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(a,did))
         enqueue_document_index(doc_id)
         self.redirect(f'/document/{doc_id}/open')

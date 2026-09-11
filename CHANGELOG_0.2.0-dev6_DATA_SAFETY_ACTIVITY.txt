@@ -1,0 +1,14 @@
+RK KANCELARIA 0.2.0-dev6 — DATA SAFETY & ACTIVITY DETAILS
+
+- dodawanie nowego zadania bezpośrednio z pulpitu „Zadania”,
+- po utworzeniu/edycji/usunięciu zadania program wraca do pulpitu zadań,
+- historia zmian pokazuje dokładnie, co zmieniono (wartość przed → po),
+- wpisy historii zawierają bezpośrednie odnośniki do spraw, zadań, dokumentów i projektów pism,
+- dodanie dokumentu typu procesowego jest rejestrowane jako „Dodano pismo” wraz z opisem i linkiem,
+- autosave scala kolejne zmiany pól w jeden czytelny wpis audytowy,
+- bezpieczny import danych ze starej wersji Installed do Portable z poziomu Kopii bezpieczeństwa,
+- przed importem: kontrola integralności SQLite, sprawdzenie miejsca i pełny backup bazy, dokumentów oraz projektów,
+- zabezpieczenie przed przypadkowym nadpisaniem nowszej bazy starszymi danymi,
+- import bazy i plików jest przygotowywany transakcyjnie i finalizowany po restarcie,
+- zachowano dotychczasowy podgląd/obsługę dokumentów i synchronizację Installed ↔ Portable,
+- migrację przetestowano na rzeczywistej bazie 0.15.2: liczba spraw, zadań, dokumentów i użytkowników została zachowana; integrity_check = OK.
