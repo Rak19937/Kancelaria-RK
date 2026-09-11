@@ -34,7 +34,7 @@ from typing import Iterable
 
 from rk_paths import installed_data_dir, resolve_runtime_paths
 
-SCHEMA_VERSION = 230
+SCHEMA_VERSION = 240
 SYNC_FORMAT = 2
 MANAGED_DIRS = ("dokumenty", "projekty_pism")
 LOCAL_SETTING_KEYS = {"backup_key_dpapi", "backup_key_verifier"}

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RK KANCELARIA 0.2.0-dev8 — OFFICE SUITE & CLOUD FOUNDATION.
+"""RK KANCELARIA 0.2.0-dev9 — UX & DESIGN REFRESH.
 
 Rozwój stabilnej 0.15.2: centralne ścieżki i fundament trybu Installed/Portable.
 Funkcje kancelaryjne, dokumenty, backup/recovery i Desktop pozostają zgodne z 0.15.2.
@@ -48,8 +48,8 @@ from rk_paths import resolve_runtime_paths, installed_data_dir
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.2.0-dev8"
-SCHEMA_VERSION = 230
+VERSION = "0.2.0-dev9"
+SCHEMA_VERSION = 240
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
 APP_MODE = RUNTIME_PATHS.mode
@@ -878,6 +878,23 @@ def init_db() -> None:
                 updated_by TEXT DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS process_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+                event_date TEXT DEFAULT '',
+                event_type TEXT DEFAULT 'Inna czynność',
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                court TEXT DEFAULT '',
+                signature TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'done',
+                document_id INTEGER,
+                next_date TEXT DEFAULT '',
+                created_by TEXT DEFAULT '',
+                updated_by TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             CREATE TABLE IF NOT EXISTS tasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
@@ -1085,6 +1102,7 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_cases_title ON cases(title);
             CREATE INDEX IF NOT EXISTS idx_events_case ON events(case_id);
             CREATE INDEX IF NOT EXISTS idx_tasks_case ON tasks(case_id);
+            CREATE INDEX IF NOT EXISTS idx_process_events_case ON process_events(case_id,event_date);
             CREATE INDEX IF NOT EXISTS idx_docs_case ON documents(case_id);
             CREATE INDEX IF NOT EXISTS idx_parties_case ON parties(case_id);
             CREATE INDEX IF NOT EXISTS idx_notes_case ON case_notes(case_id);
@@ -1120,10 +1138,18 @@ def init_db() -> None:
         })
         ensure_columns("parties", {"created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''", "created_at": "TEXT DEFAULT ''"})
         ensure_columns("events", {"created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''"})
+        ensure_columns("process_events", {
+            "event_date": "TEXT DEFAULT ''", "event_type": "TEXT DEFAULT 'Inna czynność'",
+            "title": "TEXT DEFAULT ''", "description": "TEXT DEFAULT ''", "court": "TEXT DEFAULT ''",
+            "signature": "TEXT DEFAULT ''", "status": "TEXT NOT NULL DEFAULT 'done'", "document_id": "INTEGER",
+            "next_date": "TEXT DEFAULT ''", "created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''",
+            "created_at": "TEXT DEFAULT ''", "updated_at": "TEXT DEFAULT ''"
+        })
         ensure_columns("tasks", {
             "created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''", "assigned_user_id": "INTEGER",
             "deadline_base_date": "TEXT DEFAULT ''", "deadline_days": "INTEGER", "deadline_rule": "TEXT DEFAULT ''",
-            "deadline_source": "TEXT DEFAULT ''", "deadline_manual": "INTEGER NOT NULL DEFAULT 0"
+            "deadline_source": "TEXT DEFAULT ''", "deadline_manual": "INTEGER NOT NULL DEFAULT 0",
+            "completed_at": "TEXT DEFAULT ''", "completed_by": "TEXT DEFAULT ''"
         })
         ensure_columns("documents", {
             "received_date": "TEXT DEFAULT ''", "delivered_date": "TEXT DEFAULT ''",
@@ -1138,6 +1164,7 @@ def init_db() -> None:
         ensure_columns("case_relations", {"note": "TEXT DEFAULT ''", "created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''"})
         ensure_columns("case_notes", {"author": "TEXT DEFAULT ''", "created_at": "TEXT DEFAULT ''"})
         ensure_columns("users", {"function": "TEXT NOT NULL DEFAULT ''"})
+        ensure_columns("case_checklist_items", {"completed_at": "TEXT DEFAULT ''", "completed_by": "TEXT DEFAULT ''"})
 
         con.execute("""CREATE TABLE IF NOT EXISTS saved_views (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1641,6 +1668,8 @@ def audit_target_html(row) -> str:
         return f"<a class='btn small' href='/draft/{eid}'>Otwórz projekt pisma</a>"
     if et == 'task':
         return f"<a class='btn small' href='/task/{eid}/edit'>Otwórz zadanie</a>"
+    if et == 'process_event' and cid:
+        return f"<a class='btn small' href='/case/{cid}/history#process'>Otwórz historię procesu</a>"
     if et == 'case' and cid:
         return f"<a class='btn small' href='/case/{cid}'>Otwórz sprawę</a>"
     if cid:
@@ -2232,6 +2261,7 @@ def export_case_package(case_id: int) -> tuple[bytes,str]:
         tables={}
         tables['parties']=[dict(x) for x in con.execute('SELECT * FROM parties WHERE case_id=? ORDER BY id',(case_id,))]
         tables['events']=[dict(x) for x in con.execute('SELECT * FROM events WHERE case_id=? ORDER BY id',(case_id,))]
+        tables['process_events']=[dict(x) for x in con.execute('SELECT * FROM process_events WHERE case_id=? ORDER BY id',(case_id,))]
         tables['tasks']=[dict(x) for x in con.execute('SELECT * FROM tasks WHERE case_id=? ORDER BY id',(case_id,))]
         tables['documents']=[dict(x) for x in con.execute('SELECT * FROM documents WHERE case_id=? ORDER BY id',(case_id,))]
         tables['notes']=[dict(x) for x in con.execute('SELECT * FROM case_notes WHERE case_id=? ORDER BY id',(case_id,))]
@@ -2285,6 +2315,7 @@ def row_payload(row: sqlite3.Row) -> str:
 TRASH_TABLES = {
     'task': ('tasks','Zadanie'),
     'event': ('events','Zdarzenie'),
+    'process_event': ('process_events','Zdarzenie procesowe'),
     'party': ('parties','Osoba / uczestnik'),
     'document': ('documents','Dokument'),
     'note': ('case_notes','Notatka'),
@@ -2414,41 +2445,44 @@ def layout(title: str, body: str, active: str = "") -> str:
     user = current_request_user()
     nav_sections = [
         ("PRACA", [
-            ("/", "Pulpit", "dashboard"),
-            ("/today", "Dzisiaj", "today"),
-            ("/cases", "Sprawy", "cases"),
-            ("/cases?mine=1", "Moje sprawy", "my_cases"),
-            ("/cases/closed", "Sprawy zakończone", "closed_cases"),
-            ("/tasks", "Zadania", "tasks"),
-            ("/views", "Moje widoki", "views"),
-            ("/drafts", "Projekty pism", "drafts"),
-            ("/draft/templates", "Szablony pism", "draft_templates"),
+            ("/", "⌂", "Pulpit", "dashboard"),
+            ("/today", "◷", "Dzisiaj", "today"),
+            ("/cases", "§", "Sprawy", "cases"),
+            ("/cases?mine=1", "◎", "Moje sprawy", "my_cases"),
+            ("/tasks", "✓", "Zadania", "tasks"),
+            ("/documents", "▤", "Dokumenty", "documents"),
+            ("/drafts", "✎", "Projekty pism", "drafts"),
         ]),
-        ("BAZA", [
-            ("/documents", "Dokumenty", "documents"),
-            ("/entities", "Kartoteka podmiotów", "entities"),
-            ("/checklists", "Checklisty", "checklists"),
-            ("/tags", "Tagi", "tags"),
-            ("/search", "Wyszukiwarka", "search"),
+        ("WIĘCEJ", [
+            ("/cases/closed", "□", "Sprawy zakończone", "closed_cases"),
+            ("/entities", "♙", "Kartoteka podmiotów", "entities"),
+            ("/checklists", "☑", "Checklisty", "checklists"),
+            ("/views", "☆", "Moje widoki", "views"),
+            ("/draft/templates", "▣", "Szablony pism", "draft_templates"),
+            ("/tags", "#", "Tagi", "tags"),
+            ("/search", "⌕", "Wyszukiwarka", "search"),
         ]),
         ("SYSTEM", [
-            ("/history", "Historia zmian", "history"),
-            ("/trash", "Kosz", "trash"),
-            ("/backups", "Kopie bezpieczeństwa", "backups"),
+            ("/history", "↺", "Historia zmian", "history"),
+            ("/trash", "⌫", "Kosz", "trash"),
+            ("/backups", "⛁", "Kopie bezpieczeństwa", "backups"),
         ]),
     ]
     if user and user['role'] == 'admin':
-        nav_sections[-1][1].append(("/audit", "Dziennik audytowy", "audit"))
-        nav_sections[-1][1].append(("/security", "Bezpieczeństwo", "security"))
-        nav_sections[-1][1].append(("/recovery", "Recovery", "recovery"))
-        nav_sections[-1][1].append(("/cloud", "Cloud / PWA", "cloud"))
-        nav_sections[-1][1].append(("/admin/users", "Użytkownicy", "users"))
-    nav_html = "".join(
-        f'<div class="nav-section"><div class="nav-section-title">{esc(section)}</div>' +
-        "".join(f'<a class="nav-link {"active" if active==key else ""}" href="{href}">{label}</a>' for href,label,key in items) +
-        '</div>'
-        for section, items in nav_sections
-    )
+        nav_sections[-1][1].append(("/audit", "≡", "Dziennik audytowy", "audit"))
+        nav_sections[-1][1].append(("/security", "◇", "Bezpieczeństwo", "security"))
+        nav_sections[-1][1].append(("/recovery", "↥", "Recovery", "recovery"))
+        nav_sections[-1][1].append(("/cloud", "☁", "Cloud / PWA", "cloud"))
+        nav_sections[-1][1].append(("/admin/users", "♟", "Użytkownicy", "users"))
+    nav_parts=[]
+    for section,items in nav_sections:
+        links="".join(f'<a class="nav-link {"active" if active==key else ""}" href="{href}"><span class="nav-icon">{icon}</span><span>{label}</span></a>' for href,icon,label,key in items)
+        if section=='SYSTEM':
+            opened=' open' if any(active==x[3] for x in items) else ''
+            nav_parts.append(f'<details class="nav-system"{opened}><summary><span>USTAWIENIA I SYSTEM</span><span class="nav-system-arrow">›</span></summary><div class="nav-system-links">{links}</div></details>')
+        else:
+            nav_parts.append(f'<div class="nav-section"><div class="nav-section-title">{esc(section)}</div>{links}</div>')
+    nav_html=''.join(nav_parts)
     if user:
         role = "Administrator" if user['role']=='admin' else "Użytkownik"
         func = f"<div class='small' style='color:#d7c48a;margin-top:3px'>{esc(user['function'])}</div>" if user['function'] else ''
@@ -2467,7 +2501,7 @@ def layout(title: str, body: str, active: str = "") -> str:
 <link rel="stylesheet" href="/assets/rk_app.css?v={VERSION}">
 </head><body data-auto-shutdown="{'1' if AUTO_SHUTDOWN else '0'}"><div class="app"><aside class="sidebar"><div class="brand"><img src="/assets/rk_kancelaria_logo.png" alt="RK"><div class="brand-title">RK KANCELARIA<small>Baza spraw · v{VERSION}</small></div></div>{nav_html}
 {user_box}
-<div class='shortcut-help'><span class='kbd'>Ctrl+K</span> szukaj · <span class='kbd'>Ctrl+J</span> dodaj czynność · <span class='kbd'>Ctrl+N</span> nowa sprawa · <span class='kbd'>Ctrl+D</span> dokument</div>
+<div class='sidebar-tools'><button type='button' class='sidebar-mini-btn' data-compact-toggle title='Przełącz gęstość interfejsu'>↔ Tryb kompaktowy</button></div><div class='shortcut-help'><span class='kbd'>Ctrl+K</span> szukaj · <span class='kbd'>Ctrl+J</span> dodaj · <span class='kbd'>Ctrl+N</span> sprawa</div>
 <div class="program-author">AUTOR PROGRAMU<b>{APP_AUTHOR}</b></div>
 </aside><main class="main">{startup_notice}{body}</main></div><a class="global-add" href="/quick-add" title="Dodaj czynność" aria-label="Dodaj czynność">＋</a><div id="autosaveStatus" class="autosave-status"></div>
 <script src="/assets/rk_app.js?v={VERSION}" defer></script></body></html>"""
@@ -2928,12 +2962,12 @@ class Handler(BaseHTTPRequestHandler):
         return bytes(data)
 
     def mutation_case_id(self,path,fields):
-        m=re.fullmatch(r"/case/(\d+)/(?:update|delete|party|event|task|document|relation|external-signature|note|next-action)",path)
+        m=re.fullmatch(r"/case/(\d+)/(?:update|delete|party|event|task|document|relation|external-signature|note|next-action|process-event|next-action/complete)",path)
         if m: return int(m.group(1))
         if path in {'/task/create','/deadline/create','/quick/event','/quick/note','/quick/document'}:
             try: return int(fields.get('case_id','0') or 0) or None
             except (TypeError,ValueError): return None
-        mapping=[('party','parties','case_id'),('event','events','case_id'),('task','tasks','case_id'),('document','documents','case_id'),('external-signature','case_external_signatures','case_id'),('note','case_notes','case_id'),('case-entity','case_entities','case_id'),('checklist/item','case_checklist_items','case_id')]
+        mapping=[('party','parties','case_id'),('event','events','case_id'),('process-event','process_events','case_id'),('task','tasks','case_id'),('document','documents','case_id'),('external-signature','case_external_signatures','case_id'),('note','case_notes','case_id'),('case-entity','case_entities','case_id'),('checklist/item','case_checklist_items','case_id')]
         for prefix,table,col in mapping:
             mm=re.fullmatch(rf"/{re.escape(prefix)}/(\d+)/(?:update|delete|toggle)",path)
             if mm:
@@ -2965,6 +2999,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.require_auth():
             return
         try:
+            if path == '/onboarding': return self.onboarding_page()
             if path == '/account': return self.account_page()
             if path == '/admin/users': return self.users_page()
             if path == '/admin/user/new': return self.user_new_page()
@@ -2990,6 +3025,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/trash": return self.trash_page(qs)
             if path == "/history": return self.history_page(qs)
             if path == "/backups": return self.backups_page()
+            if re.fullmatch(r"/case/\d+/history", path): return self.case_history_page(int(path.split("/")[2]))
+            if re.fullmatch(r"/process-event/\d+/edit", path): return self.process_event_edit(int(path.split("/")[2]))
             if re.fullmatch(r"/case/\d+", path): return self.case_view(int(path.split("/")[-1]))
             if re.fullmatch(r"/case/\d+/edit", path): return self.case_edit(int(path.split("/")[-2]))
             if re.fullmatch(r"/case/\d+/export", path): return self.case_export_page(int(path.split("/")[-2]))
@@ -3020,7 +3057,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
         except Exception as e:
             log_app_exception(path, e)
-            self.send_html(layout("Błąd", f'<div class="card"><h1>Błąd</h1><p>{esc(e)}</p><p class="small muted">Szczegóły techniczne zapisano lokalnie w: {esc(str(ERROR_LOG))}</p><p><a class="btn" href="/">Wróć</a></p></div>'), 500)
+            self.send_html(layout("Nie udało się wykonać operacji", f'<div class="card friendly-error"><div class="friendly-error-icon">!</div><h1>Coś poszło nie tak</h1><p>Nie udało się otworzyć tej części programu. Twoje zapisane dane nie zostały usunięte.</p><p><a class="btn primary" href="/">Wróć do pulpitu</a></p><details><summary>Pokaż szczegóły techniczne</summary><pre>{esc(str(e))}</pre><div class="small muted">Log: {esc(str(ERROR_LOG))}</div></details></div>'), 500)
 
     def do_POST(self):
         _REQUEST_CONTEXT.remote_addr = self.client_address[0] if self.client_address else ''
@@ -3110,6 +3147,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/quick/document": return self.quick_document_add(fields, files)
             if re.fullmatch(r"/case/\d+/update", path): return self.case_update(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/case/\d+/next-action", path): return self.case_next_action(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/case/\d+/next-action/complete", path): return self.case_next_action_complete(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/case/\d+/process-event", path): return self.process_event_add(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/case/\d+/delete", path): return self.case_delete(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/case/\d+/pin", path): return self.case_pin_toggle(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/case/\d+/duplicate", path): return self.case_duplicate(int(path.split("/")[2]), fields)
@@ -3124,6 +3163,9 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"/case/\d+/export/pdf", path): return self.case_export_pdf(int(path.split("/")[2]), {}, fields)
             if re.fullmatch(r"/party/\d+/update", path): return self.party_update(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/event/\d+/update", path): return self.event_update(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/process-event/\d+/update", path): return self.process_event_update(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/process-event/\d+/toggle", path): return self.process_event_toggle(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/process-event/\d+/delete", path): return self.process_event_delete(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/task/\d+/update", path): return self.task_update(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/document/\d+/update", path): return self.document_update(int(path.split("/")[2]), fields, files)
             if re.fullmatch(r"/relation/\d+/update", path): return self.relation_update(int(path.split("/")[2]), fields)
@@ -3140,7 +3182,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
         except Exception as e:
             log_app_exception(path, e)
-            self.send_html(layout("Błąd", f'<div class="card"><h1>Błąd</h1><p>{esc(e)}</p><p class="small muted">Szczegóły techniczne zapisano lokalnie w: {esc(str(ERROR_LOG))}</p><p><a class="btn" href="/">Wróć</a></p></div>'), 500)
+            self.send_html(layout("Nie udało się wykonać operacji", f'<div class="card friendly-error"><div class="friendly-error-icon">!</div><h1>Coś poszło nie tak</h1><p>Nie udało się otworzyć tej części programu. Twoje zapisane dane nie zostały usunięte.</p><p><a class="btn primary" href="/">Wróć do pulpitu</a></p><details><summary>Pokaż szczegóły techniczne</summary><pre>{esc(str(e))}</pre><div class="small muted">Log: {esc(str(ERROR_LOG))}</div></details></div>'), 500)
 
     def setup_page(self, error=''):
         if user_count() > 0:
@@ -3162,8 +3204,20 @@ class Handler(BaseHTTPRequestHandler):
         if pw!=pw2: return self.setup_page('Hasła nie są identyczne.')
         ph,salt=password_hash(pw)
         with db() as con:
-            con.execute("INSERT INTO users(username,author_name,password_hash,password_salt,role,function,is_active) VALUES(?,?,?,?, 'admin',?,1)",(username,author,ph,salt,function))
-        return self.login_submit({'username':username,'password':pw})
+            cur=con.execute("INSERT INTO users(username,author_name,password_hash,password_salt,role,function,is_active) VALUES(?,?,?,?, 'admin',?,1)",(username,author,ph,salt,function))
+            uid=cur.lastrowid
+        token=make_session(uid)
+        self.send_response(303); self.send_header('Location','/onboarding'); self.set_session_cookie(token); self.end_headers()
+
+    def onboarding_page(self):
+        with db() as con:
+            case_count=con.execute("SELECT COUNT(*) FROM cases").fetchone()[0]
+            task_count=con.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+            doc_count=con.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        case_state='done' if case_count else 'current'
+        work_state='done' if (task_count or doc_count) else ('current' if case_count else '')
+        body=f"""<div class='onboarding-wrap'><div class='onboarding-hero'><div class='eyebrow'>WITAJ W RK KANCELARIA</div><h1>Trzy kroki i możesz pracować</h1><p>Nie musisz poznawać całego programu. Zacznij od sprawy, a reszta pojawi się wtedy, kiedy będzie potrzebna.</p></div><div class='onboarding-steps'><div class='onboarding-step done'><span>1</span><div><b>Konto gotowe</b><small>Jesteś zalogowany. Program zapisuje autora każdej czynności.</small></div><strong>✓</strong></div><div class='onboarding-step {case_state}'><span>2</span><div><b>Dodaj pierwszą sprawę</b><small>Wystarczy nazwa i jedno zdanie: czego dotyczy sprawa.</small></div><a class='btn primary' href='/case/new'>{'Dodaj sprawę' if not case_count else 'Sprawy'}</a></div><div class='onboarding-step {work_state}'><span>3</span><div><b>Dodaj zadanie albo dokument</b><small>To wystarczy, aby zacząć korzystać z pulpitu i historii sprawy.</small></div><a class='btn' href='/quick-add'>Szybko dodaj</a></div></div><div class='onboarding-footer'><a class='btn primary' href='/'>Przejdź do pulpitu</a><span class='small muted'>Zaawansowane funkcje znajdziesz później w sekcji System.</span></div></div>"""
+        self.send_html(layout('Pierwsze kroki',body,'dashboard'))
 
     def login_page(self, qs=None, error=''):
         if user_count()==0: return self.redirect('/setup')
@@ -3541,7 +3595,8 @@ class Handler(BaseHTTPRequestHandler):
             </div>
           </div>
           <div class="dashboard-hero-tools">
-            <form class="searchbar dashboard-search" action="/search"><input name="q" data-global-search placeholder="Szukaj klienta, sygnatury, tagu…"><button class="btn primary">Szukaj</button></form>
+            <div class="live-clock-card" aria-label="Aktualny czas"><div class="live-clock-label">AKTUALNY CZAS</div><div id="liveClock" class="live-clock" data-live-clock>--:--:--</div><div id="liveClockDate" class="live-clock-date">{esc(today_label)}</div></div>
+            <form class="searchbar dashboard-search" action="/search"><input name="q" data-global-search placeholder="Szukaj sprawy, klienta, sygnatury lub dokumentu…"><button class="btn primary">Szukaj</button></form>
             <div class="quick-actions"><a class="btn primary" href="/quick-add">+ Dodaj czynność</a><a class="btn" href="/today">Dzisiaj</a><a class="btn" href="/case/new">+ Nowa sprawa</a><a class="btn" href="/tasks">Zadania</a><a class="btn" href="/documents">Dokumenty</a><a class="btn" href="/draft/new">+ Projekt pisma</a></div>
           </div>
         </section>
@@ -3558,10 +3613,129 @@ class Handler(BaseHTTPRequestHandler):
           <div class="card span12"><div class="section-head"><div><div class='section-kicker'>TERMINARZ</div><h2>Najbliższe czynności</h2></div><a class="btn small" href="/tasks">Wszystkie zadania</a></div><div class='table-scroll'><table><tr><th>Data</th><th>Sprawa</th><th>Czynność</th><th>Priorytet</th></tr>{dated_rows}</table></div></div>
           <div class="card span7"><div class='section-kicker'>DO UŁOŻENIA</div><h2>Do zaplanowania / bez daty</h2><div class='table-scroll'><table><tr><th>Sprawa</th><th>Czynność</th><th>Priorytet</th></tr>{undated_rows}</table></div></div>
           <div class="card span5"><div class='section-kicker'>KALENDARZ SPRAW</div><h2>Najbliższe terminy spraw</h2><div class='table-scroll'><table><tr><th>Data</th><th>Sprawa</th><th>Następny krok</th></tr>{upcoming_rows}</table></div></div>
-          <div class="card span12"><div class='section-kicker'>AKTYWNOŚĆ</div><h2>Ostatnie zdarzenia</h2><div class="timeline">{recent_html}</div></div>
-          <div class="card span12 backup-card"><div class='section-head'><div><div class='section-kicker'>BEZPIECZEŃSTWO DANYCH</div><h2>Kopia bezpieczeństwa</h2><div class='small muted'>Automatyczna kopia SQLite raz dziennie; przechowywane jest 20 ostatnich kopii.</div></div><a class='btn small' href='/backups'>Kopie</a></div><div class='backup-ok'>✓ Ostatnia kopia: {esc(backup_when)}</div></div>
+          <div class="card span12"><div class='section-kicker'>OSTATNIO</div><h2>Co ostatnio wydarzyło się w sprawach</h2><div class="timeline">{recent_html}</div></div>
+          <div class="card span12 backup-card"><div class='section-head'><div><div class='section-kicker'>BEZPIECZEŃSTWO DANYCH</div><h2>Kopia bezpieczeństwa</h2><div class='small muted'>Automatyczna kopia SQLite raz dziennie; przechowywanych jest 30 ostatnich kopii.</div></div><a class='btn small' href='/backups'>Kopie</a></div><div class='backup-ok'>✓ Ostatnia kopia: {esc(backup_when)}</div></div>
         </div>"""
         self.send_html(layout("Pulpit", body, "dashboard"))
+
+    def case_next_action_complete(self,cid,f):
+        if not self.ensure_case_editable(cid): return
+        a=self.current_author(f)
+        with db() as con:
+            c=con.execute("SELECT next_step,next_date,waiting_for FROM cases WHERE id=?",(cid,)).fetchone()
+            if not c: return self.send_error(404)
+            title=(c['next_step'] or '').strip()
+            if title:
+                desc=[]
+                if c['next_date']: desc.append('termin: '+fmt_date(c['next_date']))
+                if c['waiting_for']: desc.append('czekaliśmy na: '+c['waiting_for'])
+                audit(con,cid,'case',cid,'Wykonano następny ruch',title+((' · '+' · '.join(desc)) if desc else ''),a)
+                con.execute("UPDATE cases SET next_step='',next_date='',waiting_for='',updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(a,cid))
+        self.redirect(f'/case/{cid}')
+
+    def process_event_add(self,cid,f):
+        if not self.ensure_case_editable(cid): return
+        title=(f.get('title') or '').strip(); a=self.current_author(f)
+        if not title: return self.redirect(f'/case/{cid}/history#process')
+        status=f.get('status','done')
+        if status not in {'done','planned','waiting'}: status='done'
+        try: doc_id=int(f.get('document_id') or 0) or None
+        except ValueError: doc_id=None
+        with db() as con:
+            cur=con.execute("""INSERT INTO process_events(case_id,event_date,event_type,title,description,court,signature,status,document_id,next_date,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",(cid,f.get('event_date',''),(f.get('event_type') or 'Inna czynność').strip(),title,(f.get('description') or '').strip(),(f.get('court') or '').strip(),(f.get('signature') or '').strip(),status,doc_id,f.get('next_date',''),a,a))
+            details=f"{fmt_date(f.get('event_date',''))} · {(f.get('event_type') or 'Inna czynność').strip()} · {title}"
+            audit(con,cid,'process_event',cur.lastrowid,'Dodano zdarzenie procesowe',details,a)
+        self.redirect(f'/case/{cid}/history#process')
+
+    def process_event_toggle(self,pid,f):
+        a=self.current_author(f)
+        with db() as con:
+            r=con.execute("SELECT * FROM process_events WHERE id=?",(pid,)).fetchone()
+            if not r: return self.send_error(404)
+            cid=r['case_id']
+            if case_read_only(con,cid): return self.redirect(f'/case/{cid}/history#process')
+            new='planned' if r['status']=='done' else 'done'
+            con.execute("UPDATE process_events SET status=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(new,a,pid))
+            audit(con,cid,'process_event',pid,'Zdarzenie procesowe oznaczono jako wykonane' if new=='done' else 'Cofnięto wykonanie zdarzenia procesowego',r['title'],a)
+        self.redirect(f'/case/{cid}/history#process')
+
+    def process_event_delete(self,pid,f):
+        a=self.current_author(f)
+        with db() as con:
+            r=con.execute("SELECT case_id FROM process_events WHERE id=?",(pid,)).fetchone()
+            cid=r['case_id'] if r else 0
+            if r and not case_read_only(con,cid): move_to_trash(con,'process_event',pid,a)
+        self.redirect(f'/case/{cid}/history#process' if cid else '/cases')
+
+    def process_event_edit(self,pid):
+        with db() as con:
+            r=con.execute("SELECT * FROM process_events WHERE id=?",(pid,)).fetchone()
+            docs=con.execute("SELECT id,title,doc_date FROM documents WHERE case_id=? ORDER BY doc_date DESC,id DESC",(r['case_id'],)).fetchall() if r else []
+        if not r: return self.send_error(404)
+        status_opts=''.join(f"<option value='{x}' {'selected' if r['status']==x else ''}>{lbl}</option>" for x,lbl in [('done','Wykonane'),('planned','Planowane'),('waiting','Oczekuje')])
+        doc_opts='<option value="">— bez dokumentu —</option>'+''.join(f"<option value='{d['id']}' {'selected' if r['document_id']==d['id'] else ''}>{esc(d['title'])} · {fmt_date(d['doc_date'])}</option>" for d in docs)
+        types=['Pozew / wniosek','Pismo strony','Zarządzenie','Postanowienie','Wyrok','Rozprawa / posiedzenie','Przesłuchanie','Opinia biegłego','Mediacja','Doręczenie','Środek zaskarżenia','Inna czynność']
+        type_opts=''.join(f"<option {'selected' if r['event_type']==x else ''}>{x}</option>" for x in types)
+        body=f"""<div class='topbar'><div><h1>Edytuj zdarzenie procesowe</h1><div class='sub'>Zmieniaj wyłącznie opis przebiegu postępowania.</div></div><a class='btn' href='/case/{r['case_id']}/history#process'>Wróć</a></div><div class='card'><form method='post' action='/process-event/{pid}/update' class='form-grid'><div><label>Data</label><input type='date' name='event_date' value='{esc(r['event_date'])}'></div><div><label>Rodzaj</label><select name='event_type'>{type_opts}</select></div><div class='full'><label>Co wydarzyło się procesowo? *</label><input name='title' value='{esc(r['title'])}' required></div><div class='full'><label>Krótki opis</label><textarea name='description'>{esc(r['description'])}</textarea></div><div><label>Sąd / organ</label><input name='court' value='{esc(r['court'])}'></div><div><label>Sygnatura</label><input name='signature' value='{esc(r['signature'])}'></div><div><label>Status</label><select name='status'>{status_opts}</select></div><div><label>Następny termin</label><input type='date' name='next_date' value='{esc(r['next_date'])}'></div><div class='full'><label>Powiązany dokument</label><select name='document_id'>{doc_opts}</select></div><div class='full'><button class='btn primary'>Zapisz</button></div></form></div>"""
+        self.send_html(layout('Zdarzenie procesowe',body,'cases'))
+
+    def process_event_update(self,pid,f):
+        a=self.current_author(f); title=(f.get('title') or '').strip()
+        if not title: return self.process_event_edit(pid)
+        status=f.get('status','done'); status=status if status in {'done','planned','waiting'} else 'done'
+        try: doc_id=int(f.get('document_id') or 0) or None
+        except ValueError: doc_id=None
+        with db() as con:
+            old=con.execute("SELECT * FROM process_events WHERE id=?",(pid,)).fetchone()
+            if not old: return self.send_error(404)
+            cid=old['case_id']
+            if case_read_only(con,cid): return self.redirect(f'/case/{cid}/history#process')
+            new={'event_date':f.get('event_date',''),'event_type':(f.get('event_type') or 'Inna czynność').strip(),'title':title,'description':(f.get('description') or '').strip(),'court':(f.get('court') or '').strip(),'signature':(f.get('signature') or '').strip(),'status':status,'next_date':f.get('next_date','')}
+            details=describe_changes(old,new,{'event_date':'Data','event_type':'Rodzaj','title':'Zdarzenie','description':'Opis','court':'Sąd / organ','signature':'Sygnatura','status':'Status','next_date':'Następny termin'},compact_fields={'description'})
+            con.execute("UPDATE process_events SET event_date=?,event_type=?,title=?,description=?,court=?,signature=?,status=?,document_id=?,next_date=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(new['event_date'],new['event_type'],title,new['description'],new['court'],new['signature'],status,doc_id,new['next_date'],a,pid))
+            if details: audit(con,cid,'process_event',pid,'Zmieniono zdarzenie procesowe',details,a)
+        self.redirect(f'/case/{cid}/history#process')
+
+    def case_history_page(self,cid):
+        with db() as con:
+            c=con.execute("SELECT * FROM cases WHERE id=?",(cid,)).fetchone()
+            if not c: return self.send_error(404)
+            process=con.execute("SELECT p.*,d.title document_title FROM process_events p LEFT JOIN documents d ON d.id=p.document_id WHERE p.case_id=? ORDER BY CASE WHEN p.event_date='' THEN 1 ELSE 0 END,p.event_date DESC,p.id DESC",(cid,)).fetchall()
+            activity=con.execute("SELECT * FROM audit_log WHERE case_id=? ORDER BY id DESC LIMIT 200",(cid,)).fetchall()
+            docs=con.execute("SELECT id,title,doc_date FROM documents WHERE case_id=? ORDER BY doc_date DESC,id DESC",(cid,)).fetchall()
+            readonly=case_read_only(con,cid)
+        sig=primary_signature_text(cid,c['signature'],c['internal_signature'])
+        def status_label(st): return {'done':'Wykonane','planned':'Planowane','waiting':'Oczekuje'}.get(st,st)
+        process_parts=[]
+        for r in process:
+            doc=f"<a class='linked-chip' href='/document/{r['document_id']}/open'>▤ {esc(r['document_title'] or 'Dokument')}</a>" if r['document_id'] else ''
+            meta=' · '.join(x for x in [esc(r['event_type']),esc(r['court']),esc(r['signature'])] if x)
+            next_html=f"<div class='process-next'>Następny termin: <b>{fmt_date(r['next_date'])}</b></div>" if r['next_date'] else ''
+            desc_html=f"<p>{esc(r['description'])}</p>" if r['description'] else ''
+            if readonly:
+                actions=''
+            else:
+                toggle_label='↩ Cofnij wykonanie' if r['status']=='done' else '✓ Oznacz jako wykonane'
+                actions=f"""<div class='process-actions'><form method='post' action='/process-event/{r['id']}/toggle'><button class='btn small'>{toggle_label}</button></form><a class='btn small' href='/process-event/{r['id']}/edit'>Edytuj</a><form method='post' action='/process-event/{r['id']}/delete' onsubmit="return confirm('Przenieść zdarzenie procesowe do Kosza?');"><button class='btn small danger'>Do kosza</button></form></div>"""
+            process_parts.append(f"""<article class='process-entry status-{esc(r['status'])}'><div class='process-date'>{fmt_date(r['event_date'])}</div><div class='process-dot'></div><div class='process-content'><div class='process-entry-head'><h3>{esc(r['title'])}</h3><span class='state-chip {esc(r['status'])}'>{status_label(r['status'])}</span></div><div class='small muted'>{meta or 'Czynność procesowa'}</div>{desc_html}{doc}{next_html}<div class='author'>{esc(r['created_by'])} · {esc(str(r['created_at'])[:16])}</div>{actions}</div></article>""")
+        process_html=''.join(process_parts) or "<div class='empty'><b>Brak wpisów w historii procesu.</b><div class='small'>Dodaj pierwsze zdarzenie, np. wniesienie pozwu, rozprawę albo postanowienie.</div></div>"
+        # Historia sprawy pokazuje zdarzenia użytkowe, a Historia zmian — pełny audyt.
+        work_prefixes=('Dodano','Utworzono','Zadanie','Element checklisty','Wykonano','Złożono','Wysłano','Doręczono','Przywrócono','Zarchiwizowano','Zastosowano','Przypisano','Cofnięto wykonanie')
+        activity_work=[r for r in activity if any(str(r['action'] or '').startswith(prefix) for prefix in work_prefixes)]
+        def feed(rows,empty):
+            parts=[]
+            for r in rows:
+                target=audit_target_html(r)
+                parts.append(f"<div class='history-feed-item'><div class='history-feed-dot'></div><div><div class='history-feed-title'>{esc(r['action'])}</div><div class='small muted'>{audit_description_html(r['description'])}</div>{target}<div class='author'>{esc(str(r['created_at'])[:16])} · {esc(r['author']) or '—'}</div></div></div>")
+            return ''.join(parts) or f'<div class="empty">{esc(empty)}</div>'
+        activity_html=feed(activity_work,'Brak czynności w historii sprawy.')
+        changes_html=feed(activity,'Brak zapisanych zmian danych.')
+        doc_opts='<option value="">— bez dokumentu —</option>'+''.join(f"<option value='{d['id']}'>{esc(d['title'])} · {fmt_date(d['doc_date'])}</option>" for d in docs)
+        types=['Pozew / wniosek','Pismo strony','Zarządzenie','Postanowienie','Wyrok','Rozprawa / posiedzenie','Przesłuchanie','Opinia biegłego','Mediacja','Doręczenie','Środek zaskarżenia','Inna czynność']
+        type_opts=''.join(f'<option>{esc(x)}</option>' for x in types)
+        add_form='' if readonly else f"""<details class='card add-panel' id='new-process-event'><summary><span class='add-panel-plus'>＋</span><span><b>Dodaj zdarzenie procesowe</b><small>Wpisz wyłącznie to, co wydarzyło się w postępowaniu.</small></span></summary><div class='add-panel-body'><form method='post' action='/case/{cid}/process-event' class='form-grid'><div><label>Data</label><input type='date' name='event_date' value='{date.today().isoformat()}'></div><div><label>Rodzaj</label><select name='event_type'>{type_opts}</select></div><div class='full'><label>Co wydarzyło się procesowo? *</label><input name='title' required placeholder='np. Sąd wydał postanowienie o dopuszczeniu dowodu z opinii biegłego'></div><div><label>Status</label><select name='status'><option value='done'>Wykonane / wydarzyło się</option><option value='planned'>Planowane</option><option value='waiting'>Oczekuje</option></select></div><div><label>Następny termin</label><input type='date' name='next_date'></div><details class='advanced-fields full'><summary>Więcej informacji</summary><div class='form-grid'><div><label>Sąd / organ</label><input name='court' value='{esc(c['court'])}'></div><div><label>Sygnatura</label><input name='signature' value='{esc(c['signature'])}'></div><div class='full'><label>Krótki opis</label><textarea name='description'></textarea></div><div class='full'><label>Powiązany dokument</label><select name='document_id'>{doc_opts}</select></div></div></details><div class='full'><button class='btn primary'>Dodaj do historii procesu</button></div></form></div></details>"""
+        body=f"""<div class='topbar'><div><div class='eyebrow'>HISTORIA SPRAWY</div><h1>{esc(sig if sig!='Bez sygnatury' else c['title'])}</h1><div class='sub'><b>{esc(c['subject']) or esc(c['title'])}</b> · {esc(c['client']) or 'bez wskazanego klienta'}</div></div><div><button class='btn primary' type='button' data-open-details='new-process-event'>+ Zdarzenie procesowe</button> <a class='btn' href='/case/{cid}'>Wróć do sprawy</a></div></div><nav class='history-tabs'><a href='#process'>Historia procesu</a><a href='#activity'>Historia sprawy</a><a href='#changes'>Historia zmian</a></nav><section id='process' class='history-section'><div class='section-head'><div><h2>Historia procesu</h2><div class='small muted'>Tylko to, co wydarzyło się procesowo przed sądem lub organem.</div></div></div><div class='process-timeline'>{process_html}</div></section>{add_form}<section id='activity' class='history-section'><div class='section-head'><div><h2>Historia sprawy</h2><div class='small muted'>Praca kancelarii: dokumenty, zadania, notatki, pisma i wykonane czynności.</div></div></div><div class='history-feed'>{activity_html}</div></section><section id='changes' class='history-section'><div class='section-head'><div><h2>Historia zmian danych</h2><div class='small muted'>Pełny dziennik: kto, kiedy i co zmienił.</div></div><a class='btn small' href='/history?case_id={cid}'>Otwórz pełny dziennik</a></div><div class='history-feed'>{changes_html}</div></section>"""
+        self.send_html(layout('Historia sprawy',body,'cases'))
 
     def cases(self, qs, closed_only=False):
         q=(qs.get('q') or [''])[0].strip()
@@ -3677,7 +3851,7 @@ class Handler(BaseHTTPRequestHandler):
                 return f"<a class='btn small {active}' href='/cases?view={view}{suffix}{('&focus='+key) if key else ''}'>{label}</a>"
             focus_bar="<div class='quick-filter-bar'><span class='small muted'>Szybkie widoki:</span> "+''.join([focus_link('','Wszystkie'),focus_link('7d','Następne 7 dni'),focus_link('waiting','Czekamy na'),focus_link('no-next','Brak następnego ruchu')])+"</div>"
         body=f"""<div class='topbar'><div><h1>{page_title}</h1><div class='sub'>{page_sub}</div></div><div>{extra_action} {new_button}</div></div>{tag_note}{focus_bar}
-        <div class='card'><form class='form-grid' method='get'>{mine_hidden}<input type='hidden' name='view' value='{view}'>{f"<input type='hidden' name='focus' value='{esc(focus)}'>" if focus else ''}<div><label>Szukaj</label><input name='q' value='{esc(q)}' placeholder='Sygnatura, klient, prowadzący, oczekiwanie, tag…'></div>{status_filter}<div class='full'><button class='btn'>Filtruj</button> <a class='btn' href='{clear_url}'>Wyczyść</a> <a class='btn' href='/tags'>Tagi</a></div></form></div><br>
+        <details class='card filter-panel'><summary>Filtry spraw</summary><form class='form-grid' method='get' style='margin-top:12px'>{mine_hidden}<input type='hidden' name='view' value='{view}'>{f"<input type='hidden' name='focus' value='{esc(focus)}'>" if focus else ''}<div><label>Szukaj</label><input name='q' value='{esc(q)}' placeholder='Sygnatura, klient, prowadzący, oczekiwanie, tag…'></div>{status_filter}<div class='full'><button class='btn'>Filtruj</button> <a class='btn' href='{clear_url}'>Wyczyść</a> <a class='btn' href='/tags'>Tagi</a></div></form></details><br>
         <div class='cases-toolbar'><div class='small muted'>⭐ oznacza sprawę przypiętą do Twojego konta.</div><div class='view-switch'><a class='view-tab {'active' if view=='compact' else ''}' href='{view_url('compact')}'>Kompaktowy</a><a class='view-tab {'active' if view=='detailed' else ''}' href='{view_url('detailed')}'>Szczegółowy</a></div></div>{save_view}{list_html}"""
         self.send_html(layout(page_title,body,active_key))
 
@@ -3688,22 +3862,24 @@ class Handler(BaseHTTPRequestHandler):
             entities=con.execute("SELECT id,display_name,pesel,nip,krs FROM entities ORDER BY display_name COLLATE NOCASE").fetchall()
         lead_opts='<option value="">— nie przypisano —</option>'+''.join(f"<option value='{u['id']}'>{esc(user_display_name(u))}</option>" for u in users)
         entity_opts='<option value="">— wybierz z kartoteki —</option>'+''.join(f"<option value='{e['id']}'>{esc(entity_display(e))}{' · PESEL '+esc(e['pesel']) if e['pesel'] else ''}{' · NIP '+esc(e['nip']) if e['nip'] else ''}</option>" for e in entities)
-        body=f"""<div class='topbar'><div><h1>Nowa sprawa</h1><div class='sub'>Dodaj podstawowe dane. Kontrola konfliktu interesów działa dla podmiotów wybranych z kartoteki.</div></div><div><a class='btn' href='/case/import'>Importuj pakiet sprawy</a></div></div>
-        <div class='card'><form method='post' action='/case/create' class='form-grid'>
+        body=f"""<div class='topbar'><div><h1>Nowa sprawa</h1><div class='sub'>Na początek wystarczą podstawowe informacje. Resztę możesz uzupełnić później.</div></div><div><a class='btn' href='/case/import'>Importuj sprawę</a></div></div>
+        <div class='card friendly-form'><form method='post' action='/case/create' class='form-grid'>
+        <div class='full'><label>Nazwa sprawy * <span class='help-dot' title='Krótka nazwa robocza, np. Kłosowska przeciwko Sobol'>?</span></label><input name='title' required autofocus placeholder='np. Kłosowska przeciwko Sobol'></div>
+        <div class='full important-field'><label>Czego dotyczy sprawa? / Przedmiot * <span class='help-dot' title='Jedno krótkie zdanie, po którym każdy od razu rozumie sprawę.'>?</span></label><input name='subject' required placeholder='np. zapłata za bezumowne korzystanie z lokalu'><div class='small muted'>To zdanie będzie widoczne na liście i w nagłówku sprawy.</div></div>
+        <div><label>Klient — kartoteka</label><select name='client_entity_id'>{entity_opts}</select></div><div><label>Klient — wpis tekstowy</label><input name='client' placeholder='np. Cecylia Kłosowska'></div>
+        <div class='full'><label>Co trzeba zrobić dalej?</label><input name='next_step' placeholder='np. przygotować odpowiedź na pozew'></div><div><label>Termin następnej czynności</label><input type='date' name='next_date'></div><div><label>Status</label><select name='status'>{opts}</select></div>
+        <details class='advanced-fields full'><summary>Więcej informacji — sygnatury, sąd, prowadzący, druga strona…</summary><div class='form-grid'>
         <div><label>Sygnatura sądowa</label><input name='signature'></div><div><label>Sygnatura wewnętrzna</label><input name='internal_signature' placeholder='np. RK/ALI/001/26'></div>
-        <div class='full'><label>Nazwa sprawy *</label><input name='title' required></div>
-        <div><label>Klient — kartoteka</label><select name='client_entity_id'>{entity_opts}</select></div><div><label>Przeciwnik / druga strona — kartoteka</label><select name='opponent_entity_id'>{entity_opts}</select></div>
-        <div class='full'><label>Klient / zlecający — wpis tekstowy (dla starszego trybu)</label><input name='client' placeholder='Jeśli wybierzesz klienta z kartoteki, to pole uzupełni się automatycznie.'></div>
-        <div><label>Prowadzący sprawę</label><select name='lead_user_id'>{lead_opts}</select></div><div><label>Status</label><select name='status'>{opts}</select></div>
-        <div class='full'><label>Czekamy na / powód oczekiwania</label><input name='waiting_for' placeholder='np. sąd, klient, przeciwnik, urząd albo własny opis'></div>
-        <div><label>Sąd</label><input name='court'></div><div><label>Wydział</label><input name='department'></div><div><label>Kategoria</label><input name='category' placeholder='np. cywilna, rodzinna, karna'></div><div><label>Najbliższa data</label><input type='date' name='next_date'></div>
-        <div class='full'><label>Tagi</label><input name='tags' placeholder='np. Alicja, Sobol, zabezpieczenie'><div class='small muted'>Oddzielaj przecinkiem lub średnikiem.</div></div>
-        <div class='full'><label>Przedmiot</label><input name='subject'></div><div class='full'><label>Następny krok</label><input name='next_step'></div>
-        <div class='full'><label>Notatki</label><textarea name='notes'></textarea></div><div class='full'><button class='btn primary'>Sprawdź konflikt i utwórz sprawę</button> <a class='btn' href='/cases'>Anuluj</a></div></form></div>"""
+        <div><label>Przeciwnik / druga strona — kartoteka</label><select name='opponent_entity_id'>{entity_opts}</select></div><div><label>Prowadzący sprawę</label><select name='lead_user_id'>{lead_opts}</select></div>
+        <div class='full'><label>Czekamy na / powód oczekiwania</label><input name='waiting_for' placeholder='np. sąd, klient, przeciwnik, urząd'></div>
+        <div><label>Sąd / organ</label><input name='court'></div><div><label>Wydział</label><input name='department'></div><div><label>Kategoria</label><input name='category' placeholder='np. cywilna, rodzinna, karna'></div>
+        <div class='full'><label>Tagi</label><input name='tags' placeholder='np. Alicja, zabezpieczenie, pilne'><div class='small muted'>Oddzielaj przecinkiem lub średnikiem.</div></div>
+        <div class='full'><label>Notatki</label><textarea name='notes'></textarea></div></div></details>
+        <div class='full form-actions'><button class='btn primary'>Utwórz sprawę</button> <a class='btn' href='/cases'>Anuluj</a></div></form></div>"""
         self.send_html(layout('Nowa sprawa',body,'cases'))
 
     def case_create(self, f):
-        if not f.get('title','').strip(): return self.redirect('/case/new')
+        if not f.get('title','').strip() or not f.get('subject','').strip(): return self.redirect('/case/new')
         try: client_eid=int(f.get('client_entity_id','') or 0) or None
         except ValueError: client_eid=None
         try: opponent_eid=int(f.get('opponent_entity_id','') or 0) or None
@@ -3769,6 +3945,7 @@ class Handler(BaseHTTPRequestHandler):
             external_signatures=con.execute("SELECT * FROM case_external_signatures WHERE case_id=? ORDER BY label COLLATE NOCASE, id",(cid,)).fetchall()
             users=con.execute("SELECT id,author_name,function,is_active FROM users ORDER BY author_name").fetchall()
             history=con.execute("SELECT * FROM audit_log WHERE case_id=? ORDER BY id DESC LIMIT 30",(cid,)).fetchall()
+            process_recent=con.execute("SELECT * FROM process_events WHERE case_id=? ORDER BY CASE WHEN event_date='' THEN 1 ELSE 0 END,event_date DESC,id DESC LIMIT 5",(cid,)).fetchall()
             lead_user=con.execute("SELECT * FROM users WHERE id=?",(c['lead_user_id'],)).fetchone() if c['lead_user_id'] else None
             pinned=bool(con.execute("SELECT 1 FROM user_case_pins WHERE user_id=? AND case_id=?",(uid,cid)).fetchone()) if uid else False
             structured_entities=con.execute("""SELECT ce.*,e.entity_type,e.display_name,e.pesel,e.nip,e.krs FROM case_entities ce JOIN entities e ON e.id=ce.entity_id WHERE ce.case_id=? ORDER BY ce.id""",(cid,)).fetchall()
@@ -3966,12 +4143,13 @@ class Handler(BaseHTTPRequestHandler):
 
         shown_sig, shown_kind = display_signature_meta(cid, c['signature'], c['internal_signature'])
         primary = primary_signature_fast(cid, c['signature'], case_sig_map)
+        next_complete_html=(f"<form method='post' action='/case/{cid}/next-action/complete' class='inline-form'><button class='btn success' type='submit'>✓ Oznacz jako wykonane</button></form>" if (c['next_step'] and not readonly) else '')
         body=f"""
-        <div class='topbar'><div><h1>{esc(primary)}</h1><div class='sub'>{esc(internal_signature_text(c['internal_signature']))} · {esc(c['title'])}</div></div><div class='case-control-bar'>
+        <div class='case-hero'><div class='case-hero-main'><div class='eyebrow'>KARTA SPRAWY</div><h1>{esc(primary)}</h1><div class='case-subject'>{esc(c['subject']) or esc(c['title'])}</div><div class='case-hero-meta'>{esc(internal_signature_text(c['internal_signature']))} · {esc(c['title'])} · klient: <b>{esc(c['client']) or '—'}</b></div></div><div class='case-control-bar'>
           <form method='post' action='/case/{cid}/pin'><button class='pin-btn {pin_cls}' title='Przypnij / odepnij'>{pin_char}</button></form>{badge(c['status'])}
-          <a class='btn' href='/case/{cid}/export'>PDF / wyciąg</a><a class='btn' href='/case/{cid}/export/package'>Eksport pełnej sprawy</a>{'' if readonly else f"<a class='btn' href='/draft/new?case_id={cid}'>+ Projekt pisma</a><a class='btn' href='/case/{cid}/edit'>Edytuj dane</a>"}
+          <a class='btn' href='/case/{cid}/export'>PDF / wyciąg</a><a class='btn' href='/case/{cid}/export/package'>Eksport pełnej sprawy</a><a class='btn primary-soft' href='/case/{cid}/history'>Historia sprawy</a>{'' if readonly else f"<a class='btn' href='/draft/new?case_id={cid}'>+ Projekt pisma</a><a class='btn' href='/case/{cid}/edit'>Edytuj dane</a>"}
           <form method='post' action='/case/{cid}/duplicate' onsubmit="return confirm('Utworzyć nową sprawę na podstawie tej? Sygnatury, dokumenty i historia nie będą kopiowane.');"><button class='btn'>Duplikuj sprawę</button></form>
-        </div></div><div id='rkCaseContext' data-case-id='{cid}'></div>{readonly_banner}
+        </div></div><div class='case-nav-strip'><a href='#case-overview'>Pulpit sprawy</a><a href='/case/{cid}/history#process'>Historia procesu</a><a href='#documents'>Dokumenty</a><a href='#case-tasks'>Zadania</a><a href='#case-people'>Osoby</a><a href='#case-notes'>Notatki</a><a href='/case/{cid}/history#activity'>Historia sprawy</a></div><div id='rkCaseContext' data-case-id='{cid}'></div>{readonly_banner}
         <div class='case-summary-grid'>
           <div class='case-summary-item'><div class='k'>Klient</div><div class='v'>{esc(c['client']) or '—'}</div></div>
           <div class='case-summary-item'><div class='k'>Prowadzący</div><div class='v'>{esc(lead_text)}</div></div>
@@ -3980,19 +4158,20 @@ class Handler(BaseHTTPRequestHandler):
           <div class='case-summary-item'><div class='k'>Najbliższa data</div><div class='v'>{fmt_date(c['next_date'])}</div></div>
           <div class='case-summary-item'><div class='k'>Następna czynność</div><div class='v' title='{esc(c['next_step'])}'>{esc(c['next_step']) or '—'}</div></div>
         </div>
-        {'' if readonly else f"<div class='card next-action-card'><div class='section-head'><div><div class='section-kicker'>NASTĘPNY RUCH</div><h2>Co dalej w tej sprawie?</h2></div><a class='btn small' href='/deadline'>Kalkulator terminu</a></div><form method='post' action='/case/{cid}/next-action' class='form-grid'><div class='full'><label>Następna czynność</label><input name='next_step' value='{esc(c['next_step'])}' placeholder='np. złożyć odpowiedź na zażalenie'></div><div><label>Data / termin</label><input type='date' name='next_date' value='{esc(c['next_date'])}'></div><div><label>Czekamy na</label><input name='waiting_for' value='{esc(c['waiting_for'])}' placeholder='np. sąd / klient / organ'></div><div class='full'><button class='btn primary'>Zapisz następny ruch</button></div></form></div>"}
+        {'' if readonly else f"<div class='card next-action-card'><div class='section-head'><div><div class='section-kicker'>NASTĘPNY RUCH</div><h2>Co dalej w tej sprawie?</h2></div><a class='btn small' href='/deadline'>Kalkulator terminu</a></div><form method='post' action='/case/{cid}/next-action' class='form-grid'><div class='full'><label>Następna czynność</label><input name='next_step' value='{esc(c['next_step'])}' placeholder='np. złożyć odpowiedź na zażalenie'></div><div><label>Data / termin</label><input type='date' name='next_date' value='{esc(c['next_date'])}'></div><div><label>Czekamy na</label><input name='waiting_for' value='{esc(c['waiting_for'])}' placeholder='np. sąd / klient / organ'></div><div class='full'><button class='btn primary'>Zapisz następny ruch</button></div></form>{next_complete_html}</div>"}
         <div class='card' style='margin-bottom:16px'><b>Przejdź do spraw powiązanych:</b> <span style='margin-left:8px'>{quick_html}</span></div>
-        <div class='grid'>
-          <div class='card span8'><h2>Informacje</h2><table><tr><th>Sygnatura sądowa</th><td>{esc(c['signature']) or '—'}</td></tr><tr><th>Sygnatura wewnętrzna</th><td>{esc(c['internal_signature']) or '—'}</td></tr><tr><th>Klient / zlecający</th><td><b>{esc(c['client']) or '—'}</b></td></tr><tr><th>Prowadzący</th><td>{esc(lead_text)}</td></tr><tr><th>Czekamy na</th><td>{esc(c['waiting_for']) or '—'}</td></tr><tr><th>Tagi</th><td>{tags_html}</td></tr><tr><th>Przedmiot</th><td>{esc(c['subject']) or '—'}</td></tr><tr><th>Sąd</th><td>{esc(c['court']) or '—'} {('· '+esc(c['department'])) if c['department'] else ''}</td></tr><tr><th>Kategoria</th><td>{esc(c['category']) or '—'}</td></tr><tr><th>Następny krok</th><td><b>{esc(c['next_step']) or '—'}</b></td></tr><tr><th>Najbliższa data</th><td>{fmt_date(c['next_date'])}</td></tr></table>{main_note}{case_auth_html}</div>
-          <div class='card span12'><div class='section-head'><div><h2>Podmioty sprawy</h2><div class='small muted'>Strukturalna kartoteka osób i firm — wykorzystywana także do kontroli konfliktu interesów.</div></div><a class='btn small' href='/entities'>Kartoteka</a></div><table><tr><th>Podmiot</th><th>Rola</th><th>Notatka</th><th></th></tr>{structured_html}</table>{'' if readonly else f"<details><summary>+ Przypisz podmiot z kartoteki</summary><form method='post' action='/case/{cid}/entity' class='form-grid' style='margin-top:12px'><div><label>Podmiot</label><select name='entity_id' required>{entity_opts}</select></div><div><label>Rola</label><input name='role' required placeholder='np. Klient, Przeciwnik, Świadek'></div><div class='full'><label>Notatka</label><input name='notes'></div><div class='full'><button class='btn primary'>Sprawdź konflikt i przypisz</button></div></form></details>"}</div>
+        <div class='grid' id='case-overview'>
+          <div class='card span8'><h2>Najważniejsze informacje</h2><table><tr><th>Sygnatura sądowa</th><td>{esc(c['signature']) or '—'}</td></tr><tr><th>Sygnatura wewnętrzna</th><td>{esc(c['internal_signature']) or '—'}</td></tr><tr><th>Klient / zlecający</th><td><b>{esc(c['client']) or '—'}</b></td></tr><tr><th>Prowadzący</th><td>{esc(lead_text)}</td></tr><tr><th>Czekamy na</th><td>{esc(c['waiting_for']) or '—'}</td></tr><tr><th>Tagi</th><td>{tags_html}</td></tr><tr class='important-row'><th>Czego dotyczy sprawa?</th><td><b>{esc(c['subject']) or esc(c['title'])}</b></td></tr><tr><th>Sąd</th><td>{esc(c['court']) or '—'} {('· '+esc(c['department'])) if c['department'] else ''}</td></tr><tr><th>Kategoria</th><td>{esc(c['category']) or '—'}</td></tr><tr><th>Następny krok</th><td><b>{esc(c['next_step']) or '—'}</b></td></tr><tr><th>Najbliższa data</th><td>{fmt_date(c['next_date'])}</td></tr></table>{main_note}{case_auth_html}</div>
+          <div class='card span12' id='case-people'><div class='section-head'><div><h2>Osoby i podmioty sprawy</h2><div class='small muted'>Strukturalna kartoteka osób i firm — wykorzystywana także do kontroli konfliktu interesów.</div></div><a class='btn small' href='/entities'>Kartoteka</a></div><table><tr><th>Podmiot</th><th>Rola</th><th>Notatka</th><th></th></tr>{structured_html}</table>{'' if readonly else f"<details><summary>+ Przypisz podmiot z kartoteki</summary><form method='post' action='/case/{cid}/entity' class='form-grid' style='margin-top:12px'><div><label>Podmiot</label><select name='entity_id' required>{entity_opts}</select></div><div><label>Rola</label><input name='role' required placeholder='np. Klient, Przeciwnik, Świadek'></div><div class='full'><label>Notatka</label><input name='notes'></div><div class='full'><button class='btn primary'>Sprawdź konflikt i przypisz</button></div></form></details>"}</div>
           <div class='card span4'><h2>Strony / uczestnicy — wpisy tekstowe</h2><table>{parties_html}</table>{'' if readonly else f"<details><summary>+ Dodaj wpis tekstowy</summary><form method='post' action='/case/{cid}/party' class='form-grid' style='margin-top:12px'><div><label>Imię i nazwisko</label><input name='name' required></div><div><label>Rola</label><input name='role'></div><div class='full'><label>Notatka</label><input name='notes'></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details>"}</div>
           <div class='card span12'><h2>Sygnatury innych organów</h2><div class='small muted' style='margin-bottom:10px'>Dodaj dowolną liczbę oznaczeń spoza sygnatury sądowej.</div><table><tr><th>Nazwa / organ</th><th>Sygnatura / numer</th><th></th></tr>{external_signatures_html}</table><details><summary>+ Dodaj dodatkową sygnaturę</summary><form method='post' action='/case/{cid}/external-signature' class='form-grid' style='margin-top:12px'><div><label>Nazwa pola *</label><input name='label' required placeholder='np. Sygnatura prokuratury'></div><div><label>Sygnatura / numer *</label><input name='signature' required></div><div class='full'><button class='btn primary'>Dodaj sygnaturę</button></div></form></details></div>
           <div class='card span12'><h2>Powiązane sprawy</h2><table><tr><th>Relacja</th><th>Sprawa</th><th>Notatka / autor</th><th></th></tr>{relations_html}</table><details><summary>+ Połącz z inną sprawą</summary>{relation_form}</details></div>
-          <div class='card span7'><div class='section-head'><div><h2>Oś czasu 2.0</h2><div class='small muted'>Zdarzenia, dokumenty, zadania, notatki i projekty w jednym strumieniu.</div></div></div>{timeline_filters}<div class='timeline'>{events_html}</div><details><summary>+ Dodaj zdarzenie</summary><form method='post' action='/case/{cid}/event' class='form-grid' style='margin-top:12px'><div><label>Data</label><input type='date' name='event_date' value='{date.today().isoformat()}'></div><div><label>Typ</label><select name='event_type'>{event_opts}</select></div><div class='full'><label>Tytuł</label><input name='title' required></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details></div>
-          <div class='card span5'><h2>Zadania</h2>{tasks_html}<details><summary>+ Dodaj zadanie</summary><form method='post' action='/case/{cid}/task' class='form-grid' style='margin-top:12px'><div class='full'><label>Zadanie</label><input name='title' required></div><div><label>Termin</label><input type='date' name='due_date'></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div><div class='full'><label>Wykonawca</label><select name='assigned_user_id'>{task_user_opts}</select></div><div class='full'><label>Zależność / czekamy na</label><input name='depends_on'></div><div class='full'><label>Notatki</label><textarea name='notes'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details></div>
-          <div class='card span12'><div class='section-head'><div><h2>Kontrola kompletności</h2><div class='small muted'>Checklista sprawy — można zastosować szablon odpowiedni do kategorii albo dodawać własne elementy.</div></div><a class='btn small' href='/checklists'>Szablony</a></div>{checklist_html}{'' if readonly else f"<div class='form-grid' style='margin-top:12px'><form method='post' action='/case/{cid}/checklist/apply'><label>Zastosuj szablon</label><select name='template_id' required>{checklist_opts}</select><button class='btn'>Zastosuj</button></form><form method='post' action='/case/{cid}/checklist/add'><label>Dodaj własny element</label><input name='label' required placeholder='np. Potwierdzenie opłaty'><button class='btn'>Dodaj</button></form></div>"}</div>
-          <div class='card span12' id='documents'><div class='section-head'><div><h2>Dokumenty 2.0</h2><div class='small muted'>Metadane, status, doręczenie, tagi i powiązanie z terminem/zadaniem.</div></div><a class='btn small' href='/documents?q={quote(c['internal_signature'] or c['signature'] or c['title'])}'>Otwórz teczkę dokumentów</a></div><table><tr><th>Daty</th><th>Rodzaj</th><th>Dokument / autor</th><th>Plik</th><th></th></tr>{docs_html}</table>{'' if readonly else f"<details open><summary>+ Podepnij dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid' style='margin-top:12px'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_opts}</select></div><div><label>Status dokumentu</label><select name='doc_status'>{doc_status_opts}</select></div><div><label>Nadawca</label><input name='sender'></div><div><label>Autor dokumentu</label><input name='document_author'></div><div><label>Tagi</label><input name='tags' placeholder='np. dowód, odpowiedź, pilne'></div><div class='full'><label>Powiązane zadanie / termin</label><select name='linked_task_id'>{doc_task_opts}</select></div><div class='full'><label>Tytuł *</label><input id='newDocTitle' name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Plik (opcjonalnie)</label><input type='file' name='file'><label style='font-weight:500'><input style='width:auto' type='checkbox' name='allow_duplicate' value='1'> Zezwól na identyczny plik, jeśli świadomie chcę duplikat</label></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"}</div>
-          <div class='card span12'><h2>Notatki chronologiczne</h2>{notes_html}<details><summary>+ Dodaj notatkę</summary><form method='post' action='/case/{cid}/note' style='margin-top:12px'><label>Treść notatki</label><textarea name='note' required></textarea><button class='btn primary'>Dodaj notatkę</button></form></details></div>
+          <div class='card span12 process-preview-card'><div class='section-head'><div><div class='section-kicker'>PRZEBIEG POSTĘPOWANIA</div><h2>Historia procesu</h2><div class='small muted'>Najważniejsze zdarzenia procesowe — osobno od technicznej historii zmian.</div></div><a class='btn primary-soft' href='/case/{cid}/history#process'>Otwórz pełną historię procesu</a></div><div class='process-preview'>{''.join(f"<div class='process-preview-row'><span>{fmt_date(x['event_date'])}</span><b>{esc(x['title'])}</b><em>{'✓' if x['status']=='done' else '○'}</em></div>" for x in process_recent) or '<div class="empty">Brak wpisów procesowych. Dodaj je w Historii sprawy.</div>'}</div></div>
+          <div class='card span7'><div class='section-head'><div><h2>Oś czasu pracy</h2><div class='small muted'>Codzienna praca kancelarii: dokumenty, zadania, notatki i projekty.</div></div></div>{timeline_filters}<div class='timeline'>{events_html}</div><details><summary>+ Dodaj zdarzenie</summary><form method='post' action='/case/{cid}/event' class='form-grid' style='margin-top:12px'><div><label>Data</label><input type='date' name='event_date' value='{date.today().isoformat()}'></div><div><label>Typ</label><select name='event_type'>{event_opts}</select></div><div class='full'><label>Tytuł</label><input name='title' required></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details></div>
+          <details class='card span5 module-card' id='case-tasks'><summary class='module-summary'><span><b>Zadania</b><small>Otwarte i wykonane czynności w tej sprawie</small></span><span class='module-open-label'>Otwórz</span></summary><div class='module-body'>{tasks_html}<details class='add-panel nested'><summary>+ Dodaj zadanie</summary><form method='post' action='/case/{cid}/task' class='form-grid' style='margin-top:12px'><div class='full'><label>Zadanie</label><input name='title' required></div><div><label>Termin</label><input type='date' name='due_date'></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div><div class='full'><label>Wykonawca</label><select name='assigned_user_id'>{task_user_opts}</select></div><div class='full'><label>Zależność / czekamy na</label><input name='depends_on'></div><div class='full'><label>Notatki</label><textarea name='notes'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details></div></details>
+          <div class='card span12'><div class='section-head'><div><h2>Kontrola kompletności</h2><div class='small muted'>Checklista sprawy — można zastosować szablon odpowiedni do kategorii albo dodawać własne elementy.</div></div><a class='btn small' href='/checklists'>Szablony</a></div>{checklist_html}{'' if readonly else f"<details class='add-panel nested'><summary>+ Dodaj / zastosuj checklistę</summary><div class='form-grid' style='margin-top:12px'><form method='post' action='/case/{cid}/checklist/apply'><label>Zastosuj szablon</label><select name='template_id' required>{checklist_opts}</select><button class='btn'>Zastosuj</button></form><form method='post' action='/case/{cid}/checklist/add'><label>Dodaj własny element</label><input name='label' required placeholder='np. Potwierdzenie opłaty'><button class='btn'>Dodaj</button></form></div></details>"}</div>
+          <details class='card span12 module-card' id='documents'><summary class='module-summary'><span><b>Dokumenty</b><small>Dokumenty, pisma i załączniki tej sprawy</small></span><span class='module-open-label'>Otwórz</span></summary><div class='module-body'><div class='section-head'><div><h2>Dokumenty 2.0</h2><div class='small muted'>Metadane, status, doręczenie, tagi i powiązanie z terminem/zadaniem.</div></div><a class='btn small' href='/documents?q={quote(c['internal_signature'] or c['signature'] or c['title'])}'>Otwórz teczkę dokumentów</a></div><table><tr><th>Daty</th><th>Rodzaj</th><th>Dokument / autor</th><th>Plik</th><th></th></tr>{docs_html}</table>{'' if readonly else f"<details class='add-panel nested'><summary>+ Podepnij dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid' style='margin-top:12px'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_opts}</select></div><div><label>Status dokumentu</label><select name='doc_status'>{doc_status_opts}</select></div><div><label>Nadawca</label><input name='sender'></div><div><label>Autor dokumentu</label><input name='document_author'></div><div><label>Tagi</label><input name='tags' placeholder='np. dowód, odpowiedź, pilne'></div><div class='full'><label>Powiązane zadanie / termin</label><select name='linked_task_id'>{doc_task_opts}</select></div><div class='full'><label>Tytuł *</label><input id='newDocTitle' name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Plik (opcjonalnie)</label><input type='file' name='file'><label style='font-weight:500'><input style='width:auto' type='checkbox' name='allow_duplicate' value='1'> Zezwól na identyczny plik, jeśli świadomie chcę duplikat</label></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"}</div></details>
+          <details class='card span12 module-card' id='case-notes'><summary class='module-summary'><span><b>Notatki</b><small>Chronologiczne notatki kancelarii</small></span><span class='module-open-label'>Otwórz</span></summary><div class='module-body'>{notes_html}<details><summary>+ Dodaj notatkę</summary><form method='post' action='/case/{cid}/note' style='margin-top:12px'><label>Treść notatki</label><textarea name='note' required></textarea><button class='btn primary'>Dodaj notatkę</button></form></details></div></details>
           <div class='card span12'><div class='section-head'><div><h2>Historia zmian tej sprawy</h2><div class='small muted'>Kto, kiedy i co zmienił. Powtarzające się autosave są scalane.</div></div><a class='btn small' href='/history?case_id={cid}'>Pełna historia</a></div>{history_html}</div>
         </div>"""
         self.send_html(layout(primary if shown_sig != 'Bez sygnatury' else c['title'],body,'cases'))
@@ -4009,11 +4188,11 @@ class Handler(BaseHTTPRequestHandler):
         lead_opts='<option value="">— nie przypisano —</option>'+''.join(f"<option value='{u['id']}' {'selected' if c['lead_user_id']==u['id'] else ''}>{esc(user_display_name(u))}</option>" for u in users)
         body=f"""<div class='topbar'><div><h1>Edytuj sprawę</h1><div class='sub'>{esc(c['title'])}</div></div></div><div class='card'><form method='post' action='/case/{cid}/update' class='form-grid' data-autosave='1'>
         <div><label>Sygnatura sądowa</label><input name='signature' value='{esc(c['signature'])}'></div><div><label>Sygnatura wewnętrzna</label><input name='internal_signature' value='{esc(c['internal_signature'])}'></div>
-        <div class='full'><label>Nazwa sprawy *</label><input name='title' required value='{esc(c['title'])}'></div><div class='full'><label>Klient / zlecający</label><input name='client' value='{esc(c['client'])}'></div>
+        <div class='full'><label>Nazwa sprawy * <span class='help-dot' title='Krótka nazwa robocza sprawy'>?</span></label><input name='title' required value='{esc(c['title'])}'></div><div class='full'><label>Klient / zlecający</label><input name='client' value='{esc(c['client'])}'></div>
         <div><label>Prowadzący sprawę</label><select name='lead_user_id'>{lead_opts}</select></div><div><label>Status</label><select name='status'>{opts}</select></div>
         <div class='full'><label>Czekamy na / powód oczekiwania</label><input name='waiting_for' value='{esc(c['waiting_for'])}' placeholder='np. sąd, klient, przeciwnik, urząd'></div>
         <div><label>Sąd</label><input name='court' value='{esc(c['court'])}'></div><div><label>Wydział</label><input name='department' value='{esc(c['department'])}'></div><div><label>Kategoria</label><input name='category' value='{esc(c['category'])}'></div><div><label>Najbliższa data</label><input type='date' name='next_date' value='{esc(c['next_date'])}'></div>
-        <div class='full'><label>Tagi</label><input name='tags' value='{esc(tags)}'></div><div class='full'><label>Przedmiot</label><input name='subject' value='{esc(c['subject'])}'></div><div class='full'><label>Następny krok</label><input name='next_step' value='{esc(c['next_step'])}'></div><div class='full'><label>Notatki</label><textarea name='notes'>{esc(c['notes'])}</textarea></div><div class='full'><button class='btn primary'>Zapisz</button> <a class='btn' href='/case/{cid}'>Wróć</a></div></form></div>
+        <div class='full'><label>Tagi</label><input name='tags' value='{esc(tags)}'></div><div class='full important-field'><label>Czego dotyczy sprawa? / Przedmiot <span class='help-dot' title='Opis widoczny na pulpicie i karcie sprawy'>?</span></label><input name='subject' value='{esc(c['subject'])}' placeholder='np. alimenty, zapłata, rozwód, odszkodowanie'></div><div class='full'><label>Następny krok</label><input name='next_step' value='{esc(c['next_step'])}'></div><div class='full'><label>Notatki</label><textarea name='notes'>{esc(c['notes'])}</textarea></div><div class='full'><button class='btn primary'>Zapisz</button> <a class='btn' href='/case/{cid}'>Wróć</a></div></form></div>
         <br><div class='card danger-zone'><h2>Usuń sprawę</h2><p class='muted'>Usunięcie całej sprawy pozostaje operacją trwałą. Zwykłe zadania, dokumenty i wpisy trafiają natomiast do Kosza.</p><form method='post' action='/case/{cid}/delete' onsubmit="return confirm('Na pewno trwale usunąć całą sprawę?')"><button class='btn danger'>Usuń całą sprawę</button></form></div>"""
         self.send_html(layout('Edycja',body,'cases'))
 
@@ -4025,7 +4204,7 @@ class Handler(BaseHTTPRequestHandler):
         new_values=dict(zip(keys,vals))
         labels={
             'signature':'Sygnatura sądowa','internal_signature':'Sygnatura wewnętrzna','client':'Klient / zlecający',
-            'title':'Nazwa sprawy','court':'Sąd','department':'Wydział','category':'Kategoria','subject':'Przedmiot',
+            'title':'Nazwa sprawy','court':'Sąd','department':'Wydział','category':'Kategoria','subject':'Czego dotyczy sprawa',
             'status':'Status','waiting_for':'Czekamy na','next_step':'Następny krok','next_date':'Najbliższa data','notes':'Notatki'
         }
         with db() as con:
@@ -4448,8 +4627,10 @@ class Handler(BaseHTTPRequestHandler):
             r=con.execute("SELECT status,title,case_id FROM tasks WHERE id=?",(tid,)).fetchone()
             if r:
                 cid=r['case_id']; new='done' if r['status']!='done' else 'open'
-                con.execute("UPDATE tasks SET status=?,updated_by=? WHERE id=?",(new,a,tid))
-                audit(con,cid,'task',tid,'Zmieniono status zadania',f"• Status: {_change_value('Wykonane' if r['status']=='done' else 'Otwarte')} → {_change_value('Wykonane' if new=='done' else 'Otwarte')}\nZadanie: {_change_value(r['title'])}",a)
+                completed_at='' if new=='open' else datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                completed_by='' if new=='open' else a
+                con.execute("UPDATE tasks SET status=?,updated_by=?,completed_at=?,completed_by=? WHERE id=?",(new,a,completed_at,completed_by,tid))
+                audit(con,cid,'task',tid,'Zadanie oznaczono jako wykonane' if new=='done' else 'Cofnięto wykonanie zadania',f"Zadanie: {_change_value(r['title'])}",a)
         target=(f.get('return_to','') or '').strip()
         self.redirect(target if target.startswith('/') else (f'/case/{cid}' if cid else '/tasks'))
 
@@ -4687,7 +4868,7 @@ class Handler(BaseHTTPRequestHandler):
                 deadline_meta=f"<div class='small deadline-meta'>wyliczono: {fmt_date(r['deadline_base_date'])} + {esc(str(row_get(r,'deadline_days','')))} {esc(row_get(r,'deadline_rule',''))}{manual}</div>"
             edit_return=quote(current_return,safe='')
             parts.append(f"<tr><td><form method='post' action='/task/{r['id']}/toggle'><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small'>{toggle}</button></form></td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td class='{cls}'><b>{esc(r['title'])}</b>{dep}{deadline_meta}{auth_html}</td><td>{fmt_date(r['due_date'])}</td><td>{esc(assigned)}</td><td>{prio}</td><td class='nowrap'><a class='btn small' href='/task/{r['id']}/edit?return_to={edit_return}'>Edytuj</a> <form style='display:inline' method='post' action='/task/{r['id']}/delete' onsubmit=\"return confirm('Przenieść zadanie do Kosza?');\"><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small danger'>Do kosza</button></form></td></tr>")
-        trs=''.join(parts) or '<tr><td colspan=7>Brak zadań.</td></tr>'
+        trs=''.join(parts) or '<tr><td colspan=7><div class="empty compact-empty"><b>Brak zadań do pokazania.</b><div class="small">Dodaj nowe zadanie przyciskiem u góry.</div></div></td></tr>'
         qp='&mine=1' if mine else ''; a1='primary' if show=='open' else ''; a2='primary' if show=='all' else ''
         mine_button="<a class='btn primary' href='/tasks?show=open&mine=1'>Moje zadania</a> <a class='btn' href='/tasks?show=open'>Wszystkie zadania</a>" if mine else "<a class='btn' href='/tasks?show=open&mine=1'>Moje zadania</a>"
         def filter_link(key,label):
@@ -4701,16 +4882,16 @@ class Handler(BaseHTTPRequestHandler):
             prefix='' if sig=='Bez sygnatury' else sig+' — '
             case_opts.append(f"<option value='{c['id']}'>{esc(prefix+c['title'])} · {esc(internal_signature_text(c['internal_signature']))}</option>")
         user_opts='<option value="">— nie przypisano —</option>'+''.join(f"<option value='{x['id']}'>{esc(user_display_name(x))}</option>" for x in users)
-        create_form=(f"""<div class='card' id='new-task'><div class='section-head'><div><h2>Nowe zadanie</h2><div class='small muted'>Dodaj czynność bez wchodzenia do konkretnej sprawy.</div></div></div>
+        create_form=(f"""<details class='card add-panel' id='new-task'><summary><span class='add-panel-plus'>＋</span><span><b>Dodaj zadanie</b><small>Formularz pokaże się dopiero tutaj.</small></span></summary><div class='add-panel-body'>
         <form method='post' action='/task/create' class='form-grid'><input type='hidden' name='return_to' value='/tasks'>
         <div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz sprawę —</option>{''.join(case_opts)}</select></div>
-        <div class='full'><label>Zadanie *</label><input name='title' required placeholder='np. Przygotować odpowiedź na pismo'></div>
+        <div class='full'><label>Co trzeba zrobić? *</label><input name='title' required placeholder='np. Przygotować odpowiedź na pismo'></div>
         <div><label>Termin</label><input type='date' name='due_date'></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div>
         <div class='full'><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div>
-        <div class='full'><label>Zależność / czekamy na</label><input name='depends_on'></div><div class='full'><label>Notatki</label><textarea name='notes'></textarea></div>
-        <div class='full'><button class='btn primary'>Dodaj zadanie</button></div></form></div><br>""" if cases else "<div class='notice'>Najpierw dodaj aktywną sprawę, aby utworzyć zadanie.</div>")
+        <details class='advanced-fields full'><summary>Więcej opcji</summary><div class='form-grid'><div class='full'><label>Zależność / czekamy na</label><input name='depends_on'></div><div class='full'><label>Notatki</label><textarea name='notes'></textarea></div></div></details>
+        <div class='full'><button class='btn primary'>Dodaj zadanie</button></div></form></div></details>""" if cases else "<div class='notice'>Najpierw dodaj aktywną sprawę, aby utworzyć zadanie.</div>")
         save_view=self._save_view_form(self.path)
-        body=f"""<div class='topbar'><div><h1>{'Moje zadania' if mine else 'Zadania'}</h1><div class='sub'>Czynności we wszystkich sprawach z możliwością przypisania wykonawcy.</div></div><div><a class='btn primary' href='#new-task'>+ Nowe zadanie</a> <a class='btn' href='/deadline'>+ Termin procesowy</a> {mine_button} <a class='btn {a1}' href='/tasks?show=open{qp}'>Otwarte</a> <a class='btn {a2}' href='/tasks?show=all{qp}'>Wszystkie</a></div></div>{filter_bar}{save_view}{create_form}<div class='card'><table><tr><th></th><th>Sprawa</th><th>Zadanie</th><th>Termin</th><th>Wykonawca</th><th>Priorytet</th><th>Akcje</th></tr>{trs}</table></div>"""
+        body=f"""<div class='topbar'><div><h1>{'Moje zadania' if mine else 'Zadania'}</h1><div class='sub'>Najpierw lista zadań. Formularz dodawania otwierasz tylko wtedy, kiedy go potrzebujesz.</div></div><div><button class='btn primary' type='button' data-open-details='new-task'>+ Dodaj zadanie</button> <a class='btn' href='/deadline'>+ Termin procesowy</a> {mine_button}</div></div>{filter_bar}{save_view}<div class='card content-first'><div class='section-head'><div><h2>{'Moje zadania' if mine else 'Lista zadań'}</h2><div class='small muted'>Kliknij ✓, aby oznaczyć jako wykonane. Wykonane zadania pozostają w historii.</div></div><div><a class='btn small {a1}' href='/tasks?show=open{qp}'>Otwarte</a> <a class='btn small {a2}' href='/tasks?show=all{qp}'>Wszystkie</a></div></div><div class='table-scroll'><table><tr><th>Stan</th><th>Sprawa</th><th>Zadanie</th><th>Termin</th><th>Wykonawca</th><th>Priorytet</th><th>Akcje</th></tr>{trs}</table></div></div><div class='module-spacer'></div>{create_form}"""
         self.send_html(layout('Zadania',body,'tasks'))
 
     def documents_page(self,qs):
@@ -4775,7 +4956,7 @@ class Handler(BaseHTTPRequestHandler):
         order_desc='primary' if order=='desc' else ''; order_asc='primary' if order=='asc' else ''; hidden_q=f"&q={quote(q)}" if q else ''; hidden_type=f"&type={quote(dtype)}" if dtype else ''; hidden_status=f"&status={quote(dstatus)}" if dstatus else ''
         script="""<script>function filterDocs(folderId,type,btn){const f=document.getElementById(folderId);if(!f)return;f.querySelectorAll('.doc-type-filter').forEach(x=>x.classList.remove('active'));btn.classList.add('active');f.querySelectorAll('.doc-filter-row').forEach(r=>{r.style.display=(!type||r.dataset.docType===type)?'':'none'});f.querySelectorAll('.year-folder').forEach(y=>{const visible=[...y.querySelectorAll('.doc-filter-row')].some(r=>r.style.display!=='none');y.style.display=visible?'':'none';});}</script>"""
         save_view=self._save_view_form(self.path)
-        body=f"""<div class='topbar'><div><h1>Dokumenty</h1><div class='sub'>{len(groups)} teczek spraw · {len(rows)} dokumentów. Teczka → rok → dokument.</div></div><div><a class='btn primary' href='/quick-add'>+ Dokument</a> <a class='btn' href='/cases'>Wybierz sprawę</a></div></div><div class='card'><form class='form-grid' method='get'><input type='hidden' name='order' value='{order}'><div><label>Szukaj</label><input name='q' value='{esc(q)}' placeholder='Tytuł, plik, sygnatura, autor…'></div><div><label>Rodzaj</label><select name='type'><option value=''>Wszystkie</option>{opts}</select></div><div><label>Status</label><select name='status'><option value=''>Wszystkie statusy</option>{status_filter_opts}</select></div><div class='full'><button class='btn'>Filtruj</button> <a class='btn' href='/documents'>Wyczyść</a> <a class='btn' href='/documents?status=Do%20podpisu'>Do podpisu</a></div></form></div>{save_view}<br><div class='doc-toolbar'><div class='small muted'>W każdej teczce możesz dodatkowo filtrować typ dokumentu bez przeładowania strony.</div><div class='doc-toolbar-actions'><a class='btn small {order_desc}' href='/documents?order=desc{hidden_q}{hidden_type}{hidden_status}'>Najnowsze najpierw</a><a class='btn small {order_asc}' href='/documents?order=asc{hidden_q}{hidden_type}{hidden_status}'>Najstarsze najpierw</a><button class='btn small' type='button' onclick="document.querySelectorAll('.doc-case-folder').forEach(x=>x.open=true)">Rozwiń wszystkie</button><button class='btn small' type='button' onclick="document.querySelectorAll('.doc-case-folder').forEach(x=>x.open=false)">Zwiń wszystkie</button></div></div><div class='doc-folders'>{folders_html}</div>{script}"""
+        body=f"""<div class='topbar'><div><h1>Dokumenty</h1><div class='sub'>{len(groups)} teczek spraw · {len(rows)} dokumentów. Teczka → rok → dokument.</div></div><div><a class='btn primary' href='/quick-add'>+ Dokument</a> <a class='btn' href='/cases'>Wybierz sprawę</a></div></div><details class='card filter-panel'><summary>Filtry dokumentów</summary><form class='form-grid' method='get' style='margin-top:12px'><input type='hidden' name='order' value='{order}'><div><label>Szukaj</label><input name='q' value='{esc(q)}' placeholder='Tytuł, plik, sygnatura, autor…'></div><div><label>Rodzaj</label><select name='type'><option value=''>Wszystkie</option>{opts}</select></div><div><label>Status</label><select name='status'><option value=''>Wszystkie statusy</option>{status_filter_opts}</select></div><div class='full'><button class='btn'>Filtruj</button> <a class='btn' href='/documents'>Wyczyść</a> <a class='btn' href='/documents?status=Do%20podpisu'>Do podpisu</a></div></form></details>{save_view}<br><div class='doc-toolbar'><div class='small muted'>W każdej teczce możesz dodatkowo filtrować typ dokumentu bez przeładowania strony.</div><div class='doc-toolbar-actions'><a class='btn small {order_desc}' href='/documents?order=desc{hidden_q}{hidden_type}{hidden_status}'>Najnowsze najpierw</a><a class='btn small {order_asc}' href='/documents?order=asc{hidden_q}{hidden_type}{hidden_status}'>Najstarsze najpierw</a><button class='btn small' type='button' onclick="document.querySelectorAll('.doc-case-folder').forEach(x=>x.open=true)">Rozwiń wszystkie</button><button class='btn small' type='button' onclick="document.querySelectorAll('.doc-case-folder').forEach(x=>x.open=false)">Zwiń wszystkie</button></div></div><div class='doc-folders'>{folders_html}</div>{script}"""
         self.send_html(layout('Dokumenty',body,'documents'))
 
     def note_add(self,cid,f):
@@ -5231,7 +5412,7 @@ class Handler(BaseHTTPRequestHandler):
         for t in templates:
             li=''.join(f"<li>{esc(i['label'])}</li>" for i in items.get(t['id'],[]))
             cards.append(f"<div class='entity-card'><div class='small muted'>Kategoria: {esc(t['category']) or 'dowolna'}</div><h3>{esc(t['name'])}</h3><ol>{li}</ol><form method='post' action='/checklist/template/{t['id']}/delete' onsubmit=\"return confirm('Usunąć szablon? Checklisty już zastosowane w sprawach pozostaną.');\"><button class='btn small danger'>Usuń szablon</button></form></div>")
-        body=f"""<div class='topbar'><div><h1>Checklisty kompletności</h1><div class='sub'>Szablony można przypisywać według rodzaju/kategorii sprawy, a później odhaczać elementy na karcie sprawy.</div></div></div><div class='grid'><div class='card span5'><h2>Nowy szablon</h2><form method='post' action='/checklist/template/create'><label>Nazwa</label><input name='name' required placeholder='np. Sprawa cywilna — start'><label>Kategoria sprawy</label><input name='category' placeholder='np. cywilna'><label>Elementy — po jednym w wierszu</label><textarea name='items' rows='10' placeholder='Pełnomocnictwo\nOpłata skarbowa\nUmowa z klientem\nDokumenty źródłowe'></textarea><button class='btn primary'>Utwórz szablon</button></form></div><div class='card span7'><h2>Szablony</h2><div class='entity-grid'>{''.join(cards) or '<div class="empty">Brak szablonów.</div>'}</div></div></div>"""
+        body=f"""<div class='topbar'><div><h1>Checklisty kompletności</h1><div class='sub'>Najpierw dostępne checklisty. Nowy szablon dodajesz dopiero po kliknięciu.</div></div><button class='btn primary' type='button' data-open-details='new-checklist-template'>+ Nowy szablon</button></div><div class='card'><div class='section-head'><div><h2>Szablony</h2><div class='small muted'>Gotowe zestawy czynności do zastosowania w sprawie.</div></div></div><div class='entity-grid'>{''.join(cards) or '<div class="empty">Nie ma jeszcze szablonów checklist. <button class="btn small" type="button" data-open-details="new-checklist-template">Dodaj pierwszy</button></div>'}</div></div><div class='module-spacer'></div><details class='card add-panel' id='new-checklist-template'><summary><span class='add-panel-plus'>＋</span><span><b>Dodaj szablon checklisty</b><small>Formularz jest schowany, dopóki go nie potrzebujesz.</small></span></summary><div class='add-panel-body'><form method='post' action='/checklist/template/create'><label>Nazwa</label><input name='name' required placeholder='np. Sprawa cywilna — start'><label>Kategoria sprawy</label><input name='category' placeholder='np. cywilna'><label>Elementy — po jednym w wierszu</label><textarea name='items' rows='10' placeholder='Pełnomocnictwo\nOpłata skarbowa\nUmowa z klientem\nDokumenty źródłowe'></textarea><button class='btn primary'>Utwórz szablon</button></form></div></details>"""
         self.send_html(layout('Checklisty',body,'checklists'))
 
     def checklist_template_create(self,f):
@@ -5278,7 +5459,7 @@ class Handler(BaseHTTPRequestHandler):
             if not r: return self.redirect('/cases')
             cid=r['case_id']
             if case_read_only(con,cid): return self.redirect(f'/case/{cid}')
-            new=0 if r['is_done'] else 1; con.execute('UPDATE case_checklist_items SET is_done=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',(new,a,iid)); audit(con,cid,'checklist_item',iid,'Zmieniono checklistę',f"{r['label']} → {'wykonane' if new else 'niewykonane'}",a)
+            new=0 if r['is_done'] else 1; completed_at='' if not new else datetime.now().strftime('%Y-%m-%d %H:%M:%S'); completed_by='' if not new else a; con.execute('UPDATE case_checklist_items SET is_done=?,updated_by=?,updated_at=CURRENT_TIMESTAMP,completed_at=?,completed_by=? WHERE id=?',(new,a,completed_at,completed_by,iid)); audit(con,cid,'checklist_item',iid,'Element checklisty wykonany' if new else 'Cofnięto wykonanie elementu checklisty',r['label'],a)
         self.redirect(f'/case/{cid}')
 
     def checklist_item_delete(self,iid,f):
@@ -5452,7 +5633,7 @@ class Handler(BaseHTTPRequestHandler):
             cards.append(f"<div class='entity-card'><div class='case-control-bar'><span class='pill'>{esc(t['doc_type'])}</span>{delete}</div><h3>{esc(t['name'])}</h3><pre class='template-preview'>{preview}</pre>{create}</div>")
         placeholders='{{SĄD}}, {{SYGNATURA}}, {{SYGNATURA_WEWNĘTRZNA}}, {{KLIENT}}, {{TYTUŁ_SPRAWY}}, {{PRZEDMIOT}}, {{STRONY}}, {{DATA}}, {{PEŁNOMOCNIK}}'
         cards_html=''.join(cards) or '<div class="empty">Brak szablonów.</div>'
-        body=f"""<div class='topbar'><div><h1>Szablony pism</h1><div class='sub'>Twórz projekty z automatycznym podstawieniem danych sprawy.</div></div><a class='btn' href='/drafts'>Projekty pism</a></div>{msg}<div class='grid'><div class='card span5'><h2>Nowy szablon</h2><form method='post' action='/draft/template/create'><label>Nazwa *</label><input name='name' required><label>Rodzaj pisma</label><input name='doc_type' value='Pismo procesowe'><label>Treść szablonu</label><textarea name='content' rows='18' placeholder='np. {{SĄD}}&#10;Sygn. {{SYGNATURA}}&#10;&#10;...'></textarea><div class='small muted'>Dostępne pola: {esc(placeholders)}</div><label>Notatki</label><textarea name='notes'></textarea><button class='btn primary'>Zapisz szablon</button></form></div><div class='card span7'><h2>Dostępne szablony</h2><div class='entity-grid'>{cards_html}</div></div></div>"""
+        body=f"""<div class='topbar'><div><h1>Szablony pism</h1><div class='sub'>Najpierw wybierasz istniejący szablon. Formularz nowego szablonu pozostaje schowany.</div></div><div><button class='btn primary' type='button' data-open-details='new-draft-template'>+ Nowy szablon</button> <a class='btn' href='/drafts'>Projekty pism</a></div></div>{msg}<div class='card'><h2>Dostępne szablony</h2><div class='entity-grid'>{cards_html}</div></div><div class='module-spacer'></div><details class='card add-panel' id='new-draft-template'><summary><span class='add-panel-plus'>＋</span><span><b>Dodaj szablon pisma</b><small>Zaawansowane pola są widoczne dopiero po otwarciu.</small></span></summary><div class='add-panel-body'><form method='post' action='/draft/template/create'><label>Nazwa *</label><input name='name' required><label>Rodzaj pisma</label><input name='doc_type' value='Pismo procesowe'><label>Treść szablonu</label><textarea name='content' rows='18' placeholder='np. {{SĄD}}&#10;Sygn. {{SYGNATURA}}&#10;&#10;...'></textarea><div class='small muted'>Dostępne pola: {esc(placeholders)}</div><details class='advanced-fields'><summary>Więcej opcji</summary><label>Notatki</label><textarea name='notes'></textarea></details><button class='btn primary'>Zapisz szablon</button></form></div></details>"""
         self.send_html(layout('Szablony pism',body,'drafts'))
 
     def draft_template_create(self,f):
@@ -5624,7 +5805,7 @@ class Handler(BaseHTTPRequestHandler):
                     if 'created_by' in actual: d['created_by']=a
                     if 'updated_by' in actual: d['updated_by']=a
                     ns=list(d); con.execute(f"INSERT INTO {table}({','.join(ns)}) VALUES({','.join('?' for _ in ns)})",[d[x] for x in ns])
-            ins_rows('parties',tables.get('parties',[]),('entity_id',)); ins_rows('events',tables.get('events',[])); ins_rows('tasks',tables.get('tasks',[]),('assigned_user_id',)); ins_rows('case_notes',tables.get('notes',[]),('author',)); ins_rows('case_external_signatures',tables.get('external_signatures',[])); ins_rows('case_checklist_items',tables.get('checklist',[]),('template_id',))
+            ins_rows('parties',tables.get('parties',[]),('entity_id',)); ins_rows('events',tables.get('events',[])); ins_rows('process_events',tables.get('process_events',[]),('document_id',)); ins_rows('tasks',tables.get('tasks',[]),('assigned_user_id',)); ins_rows('case_notes',tables.get('notes',[]),('author',)); ins_rows('case_external_signatures',tables.get('external_signatures',[])); ins_rows('case_checklist_items',tables.get('checklist',[]),('template_id',))
             # structured entities: reuse by PESEL/NIP/KRS, otherwise display name
             for ce in tables.get('case_entities',[]):
                 ent=None

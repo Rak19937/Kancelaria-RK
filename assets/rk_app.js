@@ -170,7 +170,86 @@ document.addEventListener('click',e=>{
   });
 });
 
-// DEV8 PWA. Service Worker nie cache'uje danych spraw ani dokumentów.
+// DEV9 PWA. Service Worker nie cache'uje danych spraw ani dokumentów.
 if('serviceWorker' in navigator && (location.protocol==='https:' || location.hostname==='localhost' || location.hostname==='127.0.0.1')){
   window.addEventListener('load',()=>navigator.serviceWorker.register('/service-worker.js',{scope:'/'}).catch(()=>{}));
 }
+
+// =========================================================
+// DEV9 — prostsza obsługa, progressive disclosure i zegar.
+// =========================================================
+(() => {
+  'use strict';
+
+  // Aktywny zegar na ekranie głównym — czas lokalny komputera użytkownika.
+  const clock = document.querySelector('[data-live-clock]');
+  const clockDate = document.getElementById('liveClockDate');
+  if (clock) {
+    const tick = () => {
+      const now = new Date();
+      clock.textContent = new Intl.DateTimeFormat('pl-PL', {
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+      }).format(now);
+      if (clockDate) {
+        clockDate.textContent = new Intl.DateTimeFormat('pl-PL', {
+          weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
+        }).format(now);
+      }
+    };
+    tick();
+    setInterval(tick, 1000);
+  }
+
+  // Jeden przycisk „Dodaj” może otworzyć schowany formularz bez przewijania chaosu.
+  document.addEventListener('click', e => {
+    const btn = e.target.closest('[data-open-details]');
+    if (!btn) return;
+    const id = btn.dataset.openDetails;
+    const panel = id ? document.getElementById(id) : null;
+    if (!panel || panel.tagName !== 'DETAILS') return;
+    e.preventDefault();
+    panel.open = true;
+    panel.scrollIntoView({behavior: 'smooth', block: 'start'});
+    setTimeout(() => {
+      const target = panel.querySelector('input:not([type="hidden"]),select,textarea');
+      target?.focus({preventScroll: true});
+    }, 250);
+  });
+
+  // Jeśli użytkownik wszedł linkiem do sekcji schowanej w <details>, pokaż ją.
+  const openHashTarget = () => {
+    if (!location.hash) return;
+    const el = document.getElementById(location.hash.slice(1));
+    if (!el) return;
+    if (el.tagName === 'DETAILS') el.open = true;
+    let parent = el.closest('details');
+    while (parent) {
+      parent.open = true;
+      parent = parent.parentElement?.closest('details');
+    }
+  };
+  openHashTarget();
+  window.addEventListener('hashchange', openHashTarget);
+
+  // Tryb kompaktowy jest preferencją interfejsu i nie zmienia danych spraw.
+  const compactBtn = document.querySelector('[data-compact-toggle]');
+  const compactKey = 'rk_ui_compact';
+  const applyCompact = () => {
+    const on = localStorage.getItem(compactKey) === '1';
+    document.body.classList.toggle('rk-compact', on);
+    if (compactBtn) compactBtn.textContent = on ? '↔ Widok wygodny' : '↔ Tryb kompaktowy';
+  };
+  applyCompact();
+  compactBtn?.addEventListener('click', () => {
+    localStorage.setItem(compactKey, document.body.classList.contains('rk-compact') ? '0' : '1');
+    applyCompact();
+  });
+
+  // Po otwarciu modułu zamień etykietę „Otwórz” na czytelne „Zwiń”.
+  document.querySelectorAll('.module-card').forEach(module => {
+    const label = module.querySelector('.module-open-label');
+    const update = () => { if (label) label.textContent = module.open ? 'Zwiń' : 'Otwórz'; };
+    update();
+    module.addEventListener('toggle', update);
+  });
+})();

@@ -1,4 +1,4 @@
-RK KANCELARIA 0.2.0-dev7 — WORKFLOW & TRUE PORTABLE
+RK KANCELARIA 0.2.0-dev9 — UX & DESIGN REFRESH / TRUE PORTABLE
 
 CEL
 Gotowy build działa na Windows x64 bez zainstalowanego Pythona, pip i bibliotek.
@@ -41,3 +41,12 @@ DEV8 — OFFICE SUITE & CLOUD FOUNDATION
 - Projekty pism: szablony z polami sprawy, historia wersji i przywracanie.
 - Recovery: 30 kopii, pełny integrity_check, pełny snapshot baza+dokumenty+projekty.
 - PWA + Cloud Bridge: bezpieczne, wersjonowane snapshoty z blokadą konfliktu; opcjonalny backend PostgreSQL.
+
+
+DEV9 — UX & DESIGN REFRESH
+- treść przed formularzem i uproszczone ekrany,
+- aktywny zegar na pulpicie,
+- jasny przedmiot sprawy na pierwszym planie,
+- status wykonania z datą i autorem,
+- oddzielna Historia procesu, Historia sprawy i Historia zmian,
+- prostszy sidebar, onboarding, tryb kompaktowy i lepsza responsywność.

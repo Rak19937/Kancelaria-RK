@@ -1,0 +1,28 @@
+RK KANCELARIA 0.2.0-dev9 — TESTY
+
+1. PYTHON
+- py_compile: app.py, desktop.py, rk_paths.py, rk_sync.py, rk_cloud.py, rk_cloud_server.py, RK_KANCELARIA_DESKTOP.pyw — OK
+- TEST_TRUE_PORTABLE_PATHS.py — OK
+- RK_KANCELARIA_DESKTOP.pyw --self-test — SELFTEST OK (lokalne środowisko Linux nie ma PySide6; Windows GitHub Actions instaluje je podczas builda)
+
+2. TEST HTTP NA CZYSTEJ BAZIE
+- setup + sesja — OK
+- onboarding — HTTP 200
+- pulpit — HTTP 200, aktywny zegar obecny
+- lista spraw — HTTP 200
+- karta sprawy — HTTP 200
+- historia procesu/sprawy/zmian — HTTP 200
+- zadania — HTTP 200, formularz dodawania schowany
+- dokumenty, projekty pism, kartoteka, checklisty, historia, backupy, wyszukiwarka — HTTP 200
+- oznaczanie zadania jako wykonane — OK; zapis completed_at/completed_by
+- oznaczanie „następnego ruchu” jako wykonany — OK; zapis w audycie
+- dodanie zdarzenia procesowego — OK
+- eksport pakietu sprawy zawiera process_events — OK
+- Service Worker używa cache rk-kancelaria-static-dev9 — OK
+
+3. TEST MIGRACJI NA KOPII PRAWDZIWYCH DANYCH UŻYTKOWNIKA
+Przed: 11 spraw / 7 zadań / 18 dokumentów / 5 zdarzeń / 2 użytkowników.
+Po:    11 spraw / 7 zadań / 18 dokumentów / 5 zdarzeń / 2 użytkowników.
+PRAGMA user_version = 240.
+PRAGMA integrity_check = ok.
+Wynik: brak utraty kontrolowanych rekordów.
