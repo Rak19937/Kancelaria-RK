@@ -1,0 +1,93 @@
+name: Build RK KANCELARIA Windows Portable
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Pobierz kod
+        uses: actions/checkout@v4
+
+      - name: Python 3.13 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: 'x64'
+          cache: 'pip'
+
+      - name: Aktualizuj pip
+        shell: pwsh
+        run: python -m pip install --upgrade pip wheel setuptools
+
+      - name: Zainstaluj zaleznosci RK KANCELARIA
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements_desktop.txt
+          python -m pip install "pyinstaller>=6.10,<7"
+
+      - name: Test zrodel przed buildem
+        shell: pwsh
+        run: |
+          python -m py_compile app.py desktop.py rk_paths.py rk_sync.py RK_KANCELARIA_DESKTOP.pyw
+          python TEST_TRUE_PORTABLE_PATHS.py
+          python RK_KANCELARIA_DESKTOP.pyw --self-test
+
+      - name: Zbuduj prawdziwe EXE na Windows
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean RK_KANCELARIA_PORTABLE.spec
+
+      - name: Dodaj znacznik Portable i katalog danych
+        shell: pwsh
+        run: |
+          $out = "dist\RK KANCELARIA PORTABLE"
+          if (!(Test-Path $out)) { throw "Brak katalogu wynikowego: $out" }
+          New-Item -ItemType Directory -Force -Path "$out\Data" | Out-Null
+          Set-Content -Path "$out\portable.flag" -Value "RK KANCELARIA PORTABLE" -Encoding ascii
+          Copy-Item -Force README_TRUE_PORTABLE.txt "$out\README_TRUE_PORTABLE.txt"
+          Copy-Item -Force SYNCHRONIZUJ.bat "$out\SYNCHRONIZUJ.bat"
+          Copy-Item -Force SYNCHRONIZUJ.vbs "$out\SYNCHRONIZUJ.vbs"
+
+      - name: Self-test gotowego EXE
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "dist\RK KANCELARIA PORTABLE\RK KANCELARIA.exe"
+          $p = Start-Process -FilePath $exe -ArgumentList "--self-test" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Self-test EXE zakonczyl sie kodem $($p.ExitCode)" }
+
+      - name: Sprawdz strukture paczki
+        shell: pwsh
+        run: |
+          $out = "dist\RK KANCELARIA PORTABLE"
+          $must = @(
+            "$out\RK KANCELARIA.exe",
+            "$out\_internal",
+            "$out\portable.flag",
+            "$out\Data"
+          )
+          foreach ($p in $must) {
+            if (!(Test-Path $p)) { throw "Brakuje: $p" }
+          }
+          Get-ChildItem $out | Format-Table Name, Length, Mode
+
+      - name: Spakuj finalny Portable ZIP
+        shell: pwsh
+        run: |
+          $zip = "RK_KANCELARIA_WINDOWS_PORTABLE.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "dist\RK KANCELARIA PORTABLE\*" -DestinationPath $zip -CompressionLevel Optimal
+
+      - name: Udostepnij gotowa paczke
+        uses: actions/upload-artifact@v4
+        with:
+          name: RK-KANCELARIA-WINDOWS-PORTABLE
+          path: RK_KANCELARIA_WINDOWS_PORTABLE.zip
+          if-no-files-found: error
+          retention-days: 30

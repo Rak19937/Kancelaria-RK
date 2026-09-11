@@ -1,0 +1,18 @@
+RK KANCELARIA 0.14.0 PERFORMANCE — analiza źródeł spowolnień
+
+W 0.13.2 znaleziono kilka niezależnych źródeł opóźnień:
+1. Tryb Desktop wymuszał --disable-gpu, więc całe okno Edge App było renderowane programowo.
+2. Każda odpowiedź HTML zawierała ponownie ok. 15,7 KB CSS oraz ok. 3 KB JavaScriptu.
+3. Część reguł CSS po kolejnych patchach miała podwójne klamry i była ignorowana przez silnik CSS.
+4. Weryfikacja sesji aktualizowała last_seen w SQLite praktycznie przy każdym żądaniu.
+5. Wyświetlanie dodatkowych sygnatur wykonywało zapytanie/nowe połączenie SQLite osobno dla wielu rekordów (problem N+1).
+6. Karta sprawy pobierała ten sam rekord sprawy w dwóch osobnych połączeniach i wykonywała wiele dodatkowych odczytów sygnatur przy budowaniu listy powiązań.
+7. Dashboard liczył statusy osobnymi zapytaniami i używał kosztownego skorelowanego podzapytania do wykrywania nieaktywnych spraw.
+8. Autosave mógł uruchamiać kolejne żądanie, zanim poprzedni zapis się zakończył.
+
+0.14 usuwa te wąskie gardła bez zmiany formatu bazy i bez wycinania funkcji.
+
+Diagnostyka:
+- błędy: Dane/rk_kancelaria_bledy.log
+- operacje > 750 ms: Dane/rk_kancelaria_wolne_operacje.log
+- gdy sterownik GPU powoduje problemy, uruchom „RK KANCELARIA DESKTOP - TRYB ZGODNOSCI.bat”.

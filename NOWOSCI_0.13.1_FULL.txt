@@ -1,0 +1,44 @@
+RK KANCELARIA 0.13.1 FULL
+==========================
+
+1. PEŁNY OCR
+- jeden skrypt INSTALUJ_OCR_FULL.bat instaluje/naprawia Tesseract na Windows przez winget,
+- modele językowe polski + angielski są dołączone do paczki RK KANCELARIA,
+- modele są kopiowane do stałego katalogu danych użytkownika,
+- program nie wymaga ręcznej konfiguracji PATH ani TESSDATA_PREFIX,
+- panel Bezpieczeństwo ma przycisk „Zainstaluj / napraw silnik OCR”,
+- OCR działa w tle: duży skan nie blokuje głównego okna,
+- status „kolejka” oznacza, że dokument czeka na indeksowanie,
+- istniejące dokumenty można dodać do kolejki przez „Przebuduj indeks + OCR”.
+
+2. PODGLĄD SKANÓW BEZ OCR
+- PDF bez warstwy tekstowej jest pokazywany strona po stronie jako lekki obraz PNG,
+- podgląd działa nawet zanim OCR się zakończy albo gdy silnik OCR jest niedostępny,
+- pełny plik nadal można pobrać.
+
+3. PROJEKTY PISM
+- osobna zakładka „Projekty pism”,
+- projekt może być przypisany do sprawy lub niezależny,
+- tytuł, rodzaj, status, termin, treść robocza, notatki i opcjonalny plik,
+- statusy: Roboczy / Do weryfikacji / Do podpisu / Gotowy / Złożony / Archiwalny,
+- edycja i archiwizacja projektu,
+- pobieranie pliku projektu,
+- „Dodaj do dokumentów sprawy” tworzy z projektu zwykły dokument sprawy,
+- na karcie aktywnej sprawy dostępny jest szybki przycisk „+ Projekt pisma”,
+- projekty są uwzględniane w globalnej wyszukiwarce,
+- eksport/import .rkcase.zip przenosi także projekty pism i ich pliki.
+
+4. STABILNOŚĆ
+- indeksowanie i OCR nowych dokumentów działa w osobnym wątku,
+- masowe „Przebuduj indeks + OCR” tylko kolejkuje pracę, zamiast blokować interfejs,
+- importowane dokumenty również są indeksowane w tle,
+- podgląd PDF nie korzysta z ciężkiego pluginu PDF WebView2.
+
+DANE
+Aktualizacja rozszerza tę samą bazę w %LOCALAPPDATA%\\RK_KANCELARIA\\Dane.
+Nie usuwa i nie zastępuje istniejących spraw, kont ani dokumentów.
+
+5. PULPIT A PROJEKTY PISM
+- Pulpit ostrzega o projektach ze statusem „Do podpisu”,
+- projekty z terminem w ciągu 3 dni pojawiają się w powiadomieniach,
+- powiadomienia prowadzą do powiązanej sprawy.

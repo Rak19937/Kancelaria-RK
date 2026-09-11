@@ -1,0 +1,15 @@
+RK KANCELARIA 0.12.3 — poprawka skrótu
+
+Kod 0x80070005 oznacza Access Denied: Windows blokuje automatyczny zapis do folderu Pulpit.
+Nie jest to błąd grafiki/ikonki.
+
+W 0.12.3 skrót jest najpierw tworzony w folderze programu. Jeśli Windows pozwala,
+jest następnie kopiowany automatycznie na Pulpit. Jeśli Windows blokuje zapis,
+folder programu otworzy się i należy ręcznie przeciągnąć plik:
+
+  RK KANCELARIA.lnk
+
+na Pulpit.
+
+Skrót ma już ustawioną ikonę RK i prawidłowy cel uruchamiania aplikacji.
+Kod samej aplikacji app.py pozostaje z linii 0.12.

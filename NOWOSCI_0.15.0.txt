@@ -1,0 +1,59 @@
+RK KANCELARIA 0.15.0 — STABLE DESKTOP / MERGE
+================================================
+
+0.15 scala najlepsze elementy czterech ostatnich paczek 0.14 bez cofania funkcji.
+Bazą jest gałąź DESKTOP_DOCUMENTS z najpełniejszym recovery i obsługą dokumentów.
+
+1. DESKTOP
+- własne okno PySide6 / Qt WebEngine; Edge/Chrome nie są domyślnym launcherem,
+- brak konsoli przy zwykłym uruchomieniu przez pythonw,
+- niezależny Runtime w %LOCALAPPDATA%\RK_KANCELARIA\Runtime\venv,
+- aktualizacja/przeniesienie folderu programu nie usuwa bibliotek Desktop,
+- domyślnie GPU włączone; osobny TRYB BEZPIECZNY wyłącza GPU,
+- self-test korzysta wyłącznie z tymczasowej bazy SQLite i nie dotyka danych użytkownika,
+- instalator naprawiony: nie wymaga/testuje niepotrzebnego Pillow.
+
+2. DOKUMENTY
+- PDF renderowany stabilnie strona-po-stronie przez PyMuPDF, nawigacja i zoom,
+- JPG/PNG/GIF/WEBP/BMP/TIFF w podglądzie,
+- DOCX/TXT/RTF/CSV/MD jako lekki podgląd tekstowy,
+- XLSX/XLSM jako podgląd wartości komórek,
+- otwieranie dokumentu w programie domyślnym i otwieranie folderu w Desktop,
+- czytelny ekran brakującego/uszkodzonego pliku,
+- ponowne wskazanie pliku (relink/relocate) bez utraty rekordu sprawy,
+- zapis plików przez bezpieczną ścieżkę i atomic replace,
+- limit pojedynczego żądania 256 MB z czytelnym błędem.
+
+3. STABILNOŚĆ / DANE
+- krótkie transakcyjne połączenia SQLite, WAL i busy_timeout,
+- backup przy zamykaniu (retencja 10),
+- backup dzienny (retencja 20),
+- backup przed aktualizacją,
+- GUI przywracania backupu i bezpieczne odtworzenie przy następnym starcie,
+- automatyczne recovery brakującej/uszkodzonej bazy z najnowszej poprawnej kopii,
+- uszkodzona baza zachowywana w katalogu recovery,
+- program nie tworzy po cichu pustej bazy, gdy katalog danych wygląda na wcześniej używany,
+- rotacyjny log błędów,
+- końcowy autosave przed zamknięciem Desktop.
+
+4. WYDAJNOŚĆ Z GAŁĘZI PERFORMANCE
+- CSS i JS wyjęte z ogromnego HTML do cache'owanych assets/rk_app.css i assets/rk_app.js,
+- poprawiony CSS (w tym odziedziczone niedomknięte @media i błędne podwójne klamry),
+- autosave z debounce 1,25 s, bez równoległych zapisów tego samego formularza,
+- krótki cache sesji i rzadsze aktualizowanie last_seen,
+- usunięcie części zapytań N+1 dla sygnatur zewnętrznych,
+- szybsze widoki: Pulpit, Sprawy, Sprawa, Zadania, Dokumenty, Powiadomienia,
+- dodatkowe indeksy SQLite pod statusy/terminy/dokumenty,
+- content-visibility dla długich list,
+- osobny log operacji HTTP wolniejszych niż 750 ms.
+
+5. CZYTELNIEJSZY / ŁATWIEJSZY DO UTRZYMANIA KOD
+- warstwa stylów i wspólny JS są osobnymi plikami zamiast siedzieć w app.py,
+- launcher Desktop, instalator i tryb safe-GPU mają rozdzielone odpowiedzialności,
+- zachowano jeden stabilny backend i jedną bazę zamiast mnożyć konkurencyjne wersje launchera,
+- dodano dokument POROWNANIE_4_PACZEK_0.14_DO_0.15.txt opisujący źródło zmian.
+
+UWAGA TECHNICZNA:
+Qt WebEngine jest osadzonym silnikiem renderującym wewnątrz aplikacji. 0.15 nie otwiera
+Edge/Chrome jako osobnej przeglądarki. Całkowite usunięcie technologii webowej wymagałoby
+przepisania całego frontendu na natywne widgety Qt i nie jest częścią tej stabilizacyjnej wersji.

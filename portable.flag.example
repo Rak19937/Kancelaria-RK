@@ -1,0 +1,3 @@
+RK KANCELARIA 0.2.0-dev2
+Skopiuj ten plik jako portable.flag obok app.py, aby dane były przechowywane w podfolderze Data.
+Synchronizacja Installed <-> Portable jest obsługiwana przez rk_sync.py / SYNCHRONIZUJ.bat.

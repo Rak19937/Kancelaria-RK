@@ -1,0 +1,10 @@
+AKTUALIZACJA RK KANCELARIA 0.12.11 -> 0.12.12
+
+1. Nie usuwaj katalogu danych RK KANCELARIA.
+2. 0.12.12 korzysta z tego samego stałego katalogu danych.
+3. Przy pierwszym uruchomieniu do tabeli dokumentów zostaną dodane wyłącznie pola stanu OCR.
+4. Stare dokumenty pozostają bez zmian.
+5. Aby OCR-ować wcześniej dodane skany, wejdź jako administrator:
+   Bezpieczeństwo -> Przebuduj indeks + OCR.
+
+Wymagania OCR opisuje OCR_INSTRUKCJA.txt.

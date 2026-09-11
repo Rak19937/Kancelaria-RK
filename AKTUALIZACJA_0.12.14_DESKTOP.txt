@@ -1,0 +1,19 @@
+RK KANCELARIA 0.12.15 DESKTOP
+
+Ta wersja NIE zmienia katalogu danych ani bazy SQLite.
+Korzysta z tego samego katalogu Dane co 0.12.13.
+
+NOWE:
+- własne okno aplikacji przez pywebview / Edge WebView2,
+- brak zewnętrznej przeglądarki,
+- kliknięcie X wykonuje końcowy autosave i zatrzymuje lokalny backend,
+- okno startuje zmaksymalizowane,
+- wolny port wybierany jest automatycznie,
+- tryb przeglądarkowy pozostaje jako awaryjny.
+
+PIERWSZE URUCHOMIENIE:
+1. Uruchom INSTALUJ_TRYB_DESKTOP.bat (raz).
+2. Uruchamiaj RK KANCELARIA DESKTOP.bat.
+
+Jeżeli tryb Desktop nie wystartuje, log znajduje się w katalogu Dane jako:
+rk_kancelaria_desktop.log

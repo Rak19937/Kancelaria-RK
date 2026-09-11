@@ -1,0 +1,16 @@
+RK KANCELARIA 0.13.1 — OCR
+
+Najprościej: uruchom INSTALUJ_OCR_FULL.bat.
+
+Windows:
+1. Skrypt sprawdza Tesseract.
+2. Jeśli silnika brak, instaluje Tesseract 5.x przez Windows Package Manager (winget).
+3. Modele pol.traineddata i eng.traineddata są już w paczce programu i są kopiowane do katalogu danych RK KANCELARIA.
+4. PyMuPDF/PyPDF są doinstalowywane, jeśli ich brakuje.
+5. Po instalacji uruchom SPRAWDZ_OCR.bat.
+
+W aplikacji administrator może wejść w Bezpieczeństwo i użyć „Zainstaluj / napraw silnik OCR”.
+
+Duże skany są indeksowane w tle. Podczas oczekiwania dokument ma stan `kolejka`. Już istniejące dokumenty można ponownie przetworzyć przez „Przebuduj indeks + OCR”.
+
+Podgląd skanowanego PDF nie wymaga OCR: jeśli tekst nie jest jeszcze dostępny, RK KANCELARIA renderuje pojedynczą stronę jako obraz we własnym oknie.

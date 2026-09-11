@@ -1,0 +1,13 @@
+RK KANCELARIA 0.12.9 — etykiety sygnatur przed numerami
+
+Zmiana wyłącznie sposobu wyświetlania.
+
+Przykłady:
+- Sygnatura sądowa: III Nsm 284/25
+- Sygnatura prokuratorska: 4142-0.Ds.123.2026
+- Sygnatura MOPS: MOPS.421.52.2026
+- Sygnatura wewnętrzna: RK/ALI/001/26
+
+Jeżeli brak sygnatury sądowej, jako główna używana jest pierwsza dodatkowa sygnatura organu, wraz z wpisaną nazwą pola. Sygnatura wewnętrzna zawsze pozostaje widoczna osobno.
+
+Brak zmian w strukturze bazy danych.

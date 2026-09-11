@@ -1,0 +1,45 @@
+RK KANCELARIA 0.14.0 — TESTY REGRESJI / STABILNOŚCI
+
+Wykonane testy automatyczne na kodzie finalnym:
+
+1. Kompilacja składni:
+   app.py, desktop.py, ocr_setup.py, utworz_skrot.py, RK_KANCELARIA_DESKTOP.pyw — OK.
+
+2. Podgląd dokumentów przez lokalny backend:
+   - PDF + render strony PNG — OK
+   - PNG — OK
+   - DOCX z polskimi znakami/spacjami w nazwie — OK
+   - XLSX — OK
+   - uszkodzony PDF — czytelny komunikat, bez crasha — OK
+   - format nieobsługiwany — czytelny fallback — OK
+   - pobieranie pliku — OK
+   - brakujący plik + ponowne wskazanie — OK
+   - indeks pełnotekstowy po ponownym podpięciu — OK
+
+3. Regresja głównych ekranów:
+   Pulpit, sprawy, sprawy zamknięte, karta/edycja sprawy, zadania, dokumenty,
+   Projekty pism, kartoteka podmiotów, checklisty, historia, audyt, backupy,
+   bezpieczeństwo, tagi, wyszukiwanie, import i eksport — odpowiedzi HTTP 200 — OK.
+
+4. Eksport/import pełnego pakietu sprawy:
+   sprawa + dokument fizyczny + Projekt pisma — eksport, import i zgodność pliku — OK.
+
+5. Backup/recovery:
+   - zwykły backup przy zamykaniu + quick_check SQLite — OK
+   - zaszyfrowany backup RKENC1 + recovery uszkodzonej bazy — OK
+   - uszkodzona baza zachowana w katalogu recovery — OK
+   - ochrona przed cichym utworzeniem pustej bazy w wcześniej używanym katalogu — OK
+
+6. Aktualizacja z 0.13.2 do 0.14.0:
+   zachowanie danych testowych + backup przed migracją + quick_check — OK.
+
+7. Sytuacje brzegowe:
+   - błędny ZIP importu — czytelny komunikat — OK
+   - upload ponad limit bezpieczeństwa — HTTP 413 bez wczytywania treści — OK
+   - żądanie „Zamknij program” — sygnał dla wrappera Desktop — OK.
+
+UWAGA DOTYCZĄCA GUI WINDOWS:
+Środowisko budowania/testów nie jest komputerem Windows z uruchomionym Qt WebEngine.
+Warstwa Desktop została sprawdzona składniowo i logicznie, a backend uruchamiany przez nią
+przeszedł testy, ale ostateczne zachowanie natywnego okna Windows (sterownik GPU, konkretna
+wersja PySide6/Windows) wymaga krótkiego testu na docelowym komputerze.

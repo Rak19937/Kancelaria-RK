@@ -1,0 +1,16 @@
+RK KANCELARIA 0.12.13 — HOTFIX „No item with that key”
+
+Przyczyna:
+Eksperymentalna wersja 0.13 tworzyła tabelę audit_log z kolumnami actor i details.
+Stabilna gałąź 0.12.11/0.12.12 używa author i description. Ponieważ katalog danych
+jest wspólny między wersjami, po powrocie z 0.13 sprawy posiadające wpisy historii
+mogły kończyć się błędem „No item with that key”.
+
+Naprawa:
+- automatyczne dodanie brakujących kolumn author/description,
+- zachowanie i migracja starych danych: actor -> author, details -> description,
+- usunięcie starych triggerów audytu z 0.13, aby nie tworzyły podwójnych wpisów,
+- zgodnościowe zabezpieczenie odczytu historii i relacji,
+- lokalny log wyjątków: rk_kancelaria_bledy.log w katalogu Dane.
+
+Dane użytkownika, dokumenty i konta nie są kasowane.

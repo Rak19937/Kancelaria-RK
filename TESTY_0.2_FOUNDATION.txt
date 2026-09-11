@@ -1,0 +1,34 @@
+RK KANCELARIA 0.2.0-dev1 — TESTY FOUNDATION
+==============================================
+Data testów: 2026-09-09
+
+[OK] py_compile: rk_paths.py
+[OK] py_compile: app.py
+[OK] py_compile: desktop.py
+[OK] py_compile: install_desktop.py
+[OK] py_compile: DIAGNOSTYKA_0.2.py
+[OK] py_compile: RK_KANCELARIA_DESKTOP.pyw
+
+[OK] tryb Installed — domyślna ścieżka danych zachowana
+[OK] portable.flag / RK_KANCELARIA_MODE=portable — dane kierowane do Data obok programu
+[OK] SPRAWNIK_DATA_DIR — najwyższy priorytet
+[OK] nowa baza 0.2 jest pusta; prywatne dane demo nie są już automatycznie wstawiane
+[OK] PRAGMA user_version = 200
+[OK] SQLite zapis/odczyt z polskimi znakami
+[OK] dokument w katalogu zarządzanym — stan OK
+[OK] próba path traversal przez stored_name ../evil.txt — odrzucona
+[OK] backup przy zamykaniu — utworzony i quick_check OK
+[OK] restore backupu — przywraca poprzedni stan izolowanej bazy
+[OK] migracja testowa 0.15.2 -> 0.2 — liczba rekordów zachowana
+[OK] migracja testowa 0.15.2 -> 0.2 — dokument i polskie znaki zachowane
+[OK] desktop.py --self-test — SELFTEST OK (backend HTTP)
+
+OGRANICZENIE ŚRODOWISKA TESTOWEGO
+---------------------------------
+Środowisko budowania nie jest Windowsem i nie ma PySide6, dlatego nie uruchomiono
+fizycznego okna Qt WebEngine. Ten element nadal wymaga testu na Windows.
+
+WAŻNE
+-----
+Testy używały wyłącznie izolowanych katalogów danych. Nie korzystano z realnej
+bazy użytkownika z %LOCALAPPDATA%\RK_KANCELARIA\Dane.

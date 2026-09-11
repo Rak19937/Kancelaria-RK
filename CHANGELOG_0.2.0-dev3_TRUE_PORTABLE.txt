@@ -1,0 +1,11 @@
+RK KANCELARIA 0.2.0-dev3 — TRUE PORTABLE
+
+Zmiany techniczne:
+- przygotowany build PyInstaller ONEDIR dla Windows x64;
+- poprawiono wykrywanie katalogu danych w trybie sys.frozen;
+- portable.flag jest czytany obok RK KANCELARIA.exe, nie z _internal;
+- Data znajduje się obok EXE;
+- zasoby aplikacji pozostają w _internal/assets;
+- jeden EXE obsługuje również --sync-gui i --safe-gpu;
+- dodano automatyczny builder ZBUDUJ_PRAWDZIWE_PORTABLE.bat;
+- brak zależności od Pythona na komputerze docelowym.

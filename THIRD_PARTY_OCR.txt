@@ -1,0 +1,17 @@
+RK KANCELARIA 0.13.1 — składniki OCR
+
+Silnik OCR: Tesseract OCR 5.x
+Projekt: https://github.com/tesseract-ocr/tesseract
+Licencja: Apache License 2.0
+
+Modele językowe w paczce:
+- pol.traineddata
+- eng.traineddata
+Źródło: tesseract-ocr/tessdata_fast
+https://github.com/tesseract-ocr/tessdata_fast
+Licencja: Apache License 2.0
+
+Na Windows silnik wykonywalny nie jest przepakowywany jako własny EXE RK KANCELARIA.
+INSTALUJ_OCR_FULL.bat korzysta z Windows Package Manager (winget), aby zainstalować
+pakiet Tesseract z jego źródła. Modele polski/angielski są dostarczone w paczce
+RK KANCELARIA i kopiowane do katalogu danych użytkownika.

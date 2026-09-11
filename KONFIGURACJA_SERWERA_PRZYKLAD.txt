@@ -1,0 +1,12 @@
+RK KANCELARIA 0.8 — przykład Windows (CMD):
+
+set SPRAWNIK_HOST=0.0.0.0
+set SPRAWNIK_PORT=8765
+set SPRAWNIK_DATA_DIR=D:\RKKancelariaData
+set SPRAWNIK_OPEN_BROWSER=0
+set SPRAWNIK_AUTO_SHUTDOWN=0
+set RK_SESSION_HOURS=12
+start_server_windows.bat
+
+Po pierwszym uruchomieniu otwórz aplikację w przeglądarce i utwórz konto administratora.
+Następne konta tworzy administrator z zakładki „Użytkownicy”.

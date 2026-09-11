@@ -1,0 +1,21 @@
+RK KANCELARIA 0.15.1 — TEST HOTFIXU
+====================================
+
+Wykonane kontrole w środowisku budowania:
+[OK] kompilacja składni app.py
+[OK] kompilacja składni desktop.py
+[OK] kompilacja składni install_desktop.py
+[OK] kompilacja składni ocr_setup.py
+[OK] kompilacja składni utworz_skrot.py
+[OK] kompilacja składni RK_KANCELARIA_DESKTOP.pyw
+[OK] desktop.py --self-test -> SELFTEST OK
+[OK] instalator zawiera Python 3.14
+[OK] instalator ma fallback py -3
+[OK] instalator może użyć istniejącego Runtime
+[OK] launcher weryfikuje PySide6 / Qt WebEngine przed startem
+[OK] launcher uruchamia automatyczną naprawę niepełnego Runtime
+[OK] requirements_desktop wymaga PySide6 >= 6.10.1
+
+Ograniczenie testu:
+Środowisko budowania nie jest Windowsem i nie ma PySide6, dlatego samo natywne okno Qt musi zostać
+ostatecznie uruchomione na Windows. Backendowy self-test przeszedł poprawnie.

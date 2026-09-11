@@ -1,0 +1,23 @@
+RK KANCELARIA 0.13.1 FULL — aktualizacja z 0.13.0
+================================================
+
+1. Nie usuwaj katalogu danych:
+   %LOCALAPPDATA%\RK_KANCELARIA\Dane
+
+2. Rozpakuj nową wersję programu do nowego folderu.
+
+3. Jednorazowo uruchom:
+   INSTALUJ_PELNA_WERSJE.bat
+   Skrypt instaluje biblioteki Desktop/PDF oraz przygotowuje pełny OCR.
+
+4. Uruchamiaj program przez:
+   RK KANCELARIA DESKTOP.bat
+
+Baza danych, konta, sprawy i dokumenty pozostają w stałym katalogu Dane.
+Przy uruchomieniu program tylko dodaje brakującą tabelę Projektów pism i inne
+brakujące elementy schematu. Nie tworzy nowej bazy, jeśli stała baza już istnieje.
+
+OCR:
+- modele polski + angielski są w paczce,
+- na Windows silnik Tesseract jest instalowany przez winget, jeśli go nie ma,
+- istniejące skany można skierować do OCR z panelu Bezpieczeństwo.
