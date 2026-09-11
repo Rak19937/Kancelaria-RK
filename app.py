@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RK KANCELARIA 0.2.0-dev2 — FOUNDATION.
+"""RK KANCELARIA 0.2.0-dev5 — DASHBOARD REFRESH.
 
 Rozwój stabilnej 0.15.2: centralne ścieżki i fundament trybu Installed/Portable.
 Funkcje kancelaryjne, dokumenty, backup/recovery i Desktop pozostają zgodne z 0.15.2.
@@ -48,7 +48,7 @@ from rk_paths import resolve_runtime_paths
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.2.0-dev3"
+VERSION = "0.2.0-dev5"
 SCHEMA_VERSION = 210
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
@@ -2605,12 +2605,27 @@ class Handler(BaseHTTPRequestHandler):
         return self.users_page(f"Konto „{u['username']}” zostało usunięte. Wszystkie dane i historyczne informacje o autorach zostały zachowane.")
 
     def dashboard(self):
-        today = date.today().isoformat()
+        today_obj = date.today()
+        today = today_obj.isoformat()
+        week_end = date.fromordinal(today_obj.toordinal()+7).isoformat()
         u=current_request_user(); uid=u['id'] if u else None
         backup_when,backup_path=ensure_daily_backup()
         notifications_html=self.dashboard_notifications()
+        weekdays=['poniedziałek','wtorek','środa','czwartek','piątek','sobota','niedziela']
+        months=['stycznia','lutego','marca','kwietnia','maja','czerwca','lipca','sierpnia','września','października','listopada','grudnia']
+        today_label=f"{weekdays[today_obj.weekday()]}, {today_obj.day} {months[today_obj.month-1]} {today_obj.year}"
+        display_name=(u['author_name'] or u['username'] or 'Użytkowniku').strip() if u else 'Użytkowniku'
+        first_name=display_name.split()[0] if display_name else 'Użytkowniku'
         with db() as con:
             status_counts = {r['status']: r['cnt'] for r in con.execute("SELECT status,COUNT(*) cnt FROM cases GROUP BY status").fetchall()}; counts = {st: status_counts.get(st,0) for st in STATUS_LABELS}
+            task_stats=con.execute("""SELECT
+                SUM(CASE WHEN t.due_date=? THEN 1 ELSE 0 END) due_today,
+                SUM(CASE WHEN t.due_date<>'' AND t.due_date<? THEN 1 ELSE 0 END) overdue,
+                SUM(CASE WHEN t.due_date>? AND t.due_date<=? THEN 1 ELSE 0 END) next7,
+                SUM(CASE WHEN t.priority='high' THEN 1 ELSE 0 END) high_priority
+                FROM tasks t JOIN cases c ON c.id=t.case_id
+                WHERE t.status='open' AND c.status<>'closed'""",(today,today,today,week_end)).fetchone()
+            due_today=int(task_stats['due_today'] or 0); overdue_count=int(task_stats['overdue'] or 0); next7_count=int(task_stats['next7'] or 0); high_count=int(task_stats['high_priority'] or 0)
             dated = con.execute("""SELECT t.*,c.title case_title,c.signature,c.internal_signature FROM tasks t JOIN cases c ON c.id=t.case_id WHERE t.status='open' AND c.status<>'closed' AND t.due_date<>'' ORDER BY t.due_date,CASE t.priority WHEN 'high' THEN 0 ELSE 1 END,t.id LIMIT 15""").fetchall()
             undated = con.execute("""SELECT t.*,c.title case_title,c.signature,c.internal_signature FROM tasks t JOIN cases c ON c.id=t.case_id WHERE t.status='open' AND c.status<>'closed' AND t.due_date='' ORDER BY CASE t.priority WHEN 'high' THEN 0 ELSE 1 END,t.id LIMIT 10""").fetchall()
             upcoming = con.execute("SELECT * FROM cases WHERE status<>'closed' AND next_date<>'' AND next_date>=? ORDER BY next_date LIMIT 8", (today,)).fetchall()
@@ -2622,7 +2637,7 @@ class Handler(BaseHTTPRequestHandler):
         def case_mini(r, extra=''):
             sig=primary_signature_fast(r['id'],r['signature'],sig_map)
             return f"<div class='dash-case'><a href='/case/{r['id']}'>{esc(sig if sig!='Bez sygnatury' else r['title'])}</a><div class='small muted'>{esc(r['title'])}</div>{extra}</div>"
-        pinned_html=''.join(case_mini(r, f"<div class='small'>{fmt_date(r['next_date'])} · {esc(r['next_step'])}</div>" if r['next_date'] or r['next_step'] else '') for r in pinned) or '<div class="empty">Brak przypiętych spraw. Otwórz sprawę i kliknij ☆ Przypnij.</div>'
+        pinned_html=''.join(case_mini(r, f"<div class='small dash-case-next'>{fmt_date(r['next_date'])} · {esc(r['next_step'])}</div>" if r['next_date'] or r['next_step'] else '') for r in pinned) or '<div class="empty">Brak przypiętych spraw. Otwórz sprawę i kliknij ☆ Przypnij.</div>'
         recent_cases_html=''.join(case_mini(r, f"<div class='small muted'>otwierano: {esc((r['opened_at'] or '')[:16])}</div>") for r in recent_cases) or '<div class="empty">Brak ostatnio otwieranych spraw.</div>'
         dated_parts=[]
         for r in dated:
@@ -2630,7 +2645,15 @@ class Handler(BaseHTTPRequestHandler):
             cls = 'priority-high' if r['priority']=='high' else ''
             prio = 'Wysoki' if r['priority']=='high' else 'Normalny'
             label = primary_signature_fast(r['case_id'], r['signature'], sig_map)
-            dated_parts.append(f"<tr><td class='nowrap'><b>{fmt_date(r['due_date'])}</b></td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td><b class='{cls}'>{esc(r['title'])}</b>{dep}</td><td>{prio}</td></tr>")
+            if r['due_date'] < today:
+                due_chip="<span class='due-chip danger'>po terminie</span>"
+            elif r['due_date'] == today:
+                due_chip="<span class='due-chip today'>dzisiaj</span>"
+            elif r['due_date'] <= week_end:
+                due_chip="<span class='due-chip soon'>7 dni</span>"
+            else:
+                due_chip=''
+            dated_parts.append(f"<tr><td class='nowrap'><b>{fmt_date(r['due_date'])}</b>{due_chip}</td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td><b class='{cls}'>{esc(r['title'])}</b>{dep}</td><td>{prio}</td></tr>")
         dated_rows=''.join(dated_parts) or '<tr><td colspan=4>Brak czynności z przypisaną datą.</td></tr>'
         undated_parts=[]
         for r in undated:
@@ -2650,20 +2673,35 @@ class Handler(BaseHTTPRequestHandler):
             recent_parts.append(f"<div class='event'><div class='event-date'>{fmt_date(r['event_date'])} · {esc(r['event_type'])}</div><div class='event-title'><a class='case-link' href='/case/{r['case_id']}'>{esc(r['title'])}</a></div><div class='event-desc'>{esc(r['case_title'])}</div>{author}</div>")
         recent_html=''.join(recent_parts) or '<div class="empty">Brak zdarzeń.</div>'
         body=f"""
-        <div class="topbar"><div><h1>Pulpit</h1><div class="sub">Najbliższe czynności, przypięte i ostatnio otwierane sprawy.</div></div><form class="searchbar" action="/search"><input name="q" data-global-search placeholder="Szukaj: klient, tag, dowolna sygnatura…"><button class="btn primary">Szukaj</button></form></div>
-        <div class="card" style="margin-bottom:16px"><div class="section-head"><div><h2>Powiadomienia</h2><div class="small muted">Terminy, zaległości, brak aktywności oraz dokumenty do podpisu.</div></div></div><div class="notification-list">{notifications_html}</div></div>
-        <div class="grid">
-          <div class="card span3"><div class="metric-label">W toku</div><div class="metric">{counts['active']}</div></div>
-          <div class="card span3"><div class="metric-label">Oczekiwanie</div><div class="metric">{counts['waiting']}</div></div>
-          <div class="card span3"><div class="metric-label">Do wykonania</div><div class="metric">{counts['todo']}</div></div>
-          <div class="card span3"><div class="metric-label">W zawieszeniu</div><div class="metric">{counts['suspended']}</div></div>
-          <div class="card span6"><div class='section-head'><h2>⭐ Przypięte sprawy</h2><a class='btn small' href='/cases'>Wszystkie</a></div><div class='dash-cases'>{pinned_html}</div></div>
-          <div class="card span6"><h2>Ostatnio otwierane</h2><div class='dash-cases'>{recent_cases_html}</div></div>
-          <div class="card span12"><div class="section-head"><h2>Najbliższe czynności</h2><a class="btn small" href="/tasks">Wszystkie zadania</a></div><table><tr><th>Data</th><th>Sprawa</th><th>Czynność</th><th>Priorytet</th></tr>{dated_rows}</table></div>
-          <div class="card span7"><h2>Do zaplanowania / bez daty</h2><table><tr><th>Sprawa</th><th>Czynność</th><th>Priorytet</th></tr>{undated_rows}</table></div>
-          <div class="card span5"><h2>Najbliższe terminy spraw</h2><table><tr><th>Data</th><th>Sprawa</th><th>Następny krok</th></tr>{upcoming_rows}</table></div>
-          <div class="card span12"><h2>Ostatnie zdarzenia</h2><div class="timeline">{recent_html}</div></div>
-          <div class="card span12"><div class='section-head'><div><h2>Kopia bezpieczeństwa</h2><div class='small muted'>Automatyczna kopia SQLite raz dziennie; przechowywane jest 20 ostatnich kopii.</div></div><a class='btn small' href='/backups'>Kopie</a></div><div class='backup-ok'>Ostatnia kopia: {esc(backup_when)}</div></div>
+        <section class="dashboard-hero">
+          <div class="dashboard-hero-copy">
+            <div class="dashboard-eyebrow">{esc(today_label)}</div>
+            <h1>Dzień dobry, {esc(first_name)}</h1>
+            <div class="dashboard-lead">Tu masz najważniejsze sprawy, terminy i czynności wymagające uwagi.</div>
+            <div class="status-strip">
+              <span><b>{counts['active']}</b> w toku</span><span><b>{counts['waiting']}</b> oczekuje</span><span><b>{counts['todo']}</b> do wykonania</span><span><b>{counts['suspended']}</b> zawieszonych</span>
+            </div>
+          </div>
+          <div class="dashboard-hero-tools">
+            <form class="searchbar dashboard-search" action="/search"><input name="q" data-global-search placeholder="Szukaj klienta, sygnatury, tagu…"><button class="btn primary">Szukaj</button></form>
+            <div class="quick-actions"><a class="btn primary" href="/case/new">+ Nowa sprawa</a><a class="btn" href="/tasks">Zadania</a><a class="btn" href="/documents">Dokumenty</a><a class="btn" href="/draft/new">+ Projekt pisma</a></div>
+          </div>
+        </section>
+        <div class="grid dashboard-metrics">
+          <div class="card span3 metric-card metric-today"><div class="metric-kicker">DZISIAJ</div><div class="metric">{due_today}</div><div class="metric-label">czynności z terminem na dziś</div></div>
+          <div class="card span3 metric-card metric-week"><div class="metric-kicker">7 DNI</div><div class="metric">{next7_count}</div><div class="metric-label">czynności w najbliższym tygodniu</div></div>
+          <div class="card span3 metric-card {'metric-danger' if overdue_count else 'metric-ok'}"><div class="metric-kicker">PO TERMINIE</div><div class="metric">{overdue_count}</div><div class="metric-label">otwartych zaległych czynności</div></div>
+          <div class="card span3 metric-card metric-priority"><div class="metric-kicker">PRIORYTET</div><div class="metric">{high_count}</div><div class="metric-label">zadań oznaczonych jako wysokie</div></div>
+        </div>
+        <div class="card attention-card"><div class="section-head"><div><div class="section-kicker">CENTRUM UWAGI</div><h2>Wymaga uwagi</h2><div class="small muted">Terminy, zaległości, brak aktywności i dokumenty do podpisu.</div></div><a class="btn small" href="/tasks">Przejdź do zadań</a></div><div class="notification-list">{notifications_html}</div></div>
+        <div class="grid dashboard-body-grid">
+          <div class="card span6"><div class='section-head'><div><div class='section-kicker'>NA WIERZCHU</div><h2>⭐ Przypięte sprawy</h2></div><a class='btn small' href='/cases'>Wszystkie</a></div><div class='dash-cases'>{pinned_html}</div></div>
+          <div class="card span6"><div class='section-head'><div><div class='section-kicker'>SZYBKI POWRÓT</div><h2>Ostatnio otwierane</h2></div><a class='btn small' href='/cases'>Lista spraw</a></div><div class='dash-cases'>{recent_cases_html}</div></div>
+          <div class="card span12"><div class="section-head"><div><div class='section-kicker'>TERMINARZ</div><h2>Najbliższe czynności</h2></div><a class="btn small" href="/tasks">Wszystkie zadania</a></div><div class='table-scroll'><table><tr><th>Data</th><th>Sprawa</th><th>Czynność</th><th>Priorytet</th></tr>{dated_rows}</table></div></div>
+          <div class="card span7"><div class='section-kicker'>DO UŁOŻENIA</div><h2>Do zaplanowania / bez daty</h2><div class='table-scroll'><table><tr><th>Sprawa</th><th>Czynność</th><th>Priorytet</th></tr>{undated_rows}</table></div></div>
+          <div class="card span5"><div class='section-kicker'>KALENDARZ SPRAW</div><h2>Najbliższe terminy spraw</h2><div class='table-scroll'><table><tr><th>Data</th><th>Sprawa</th><th>Następny krok</th></tr>{upcoming_rows}</table></div></div>
+          <div class="card span12"><div class='section-kicker'>AKTYWNOŚĆ</div><h2>Ostatnie zdarzenia</h2><div class="timeline">{recent_html}</div></div>
+          <div class="card span12 backup-card"><div class='section-head'><div><div class='section-kicker'>BEZPIECZEŃSTWO DANYCH</div><h2>Kopia bezpieczeństwa</h2><div class='small muted'>Automatyczna kopia SQLite raz dziennie; przechowywane jest 20 ostatnich kopii.</div></div><a class='btn small' href='/backups'>Kopie</a></div><div class='backup-ok'>✓ Ostatnia kopia: {esc(backup_when)}</div></div>
         </div>"""
         self.send_html(layout("Pulpit", body, "dashboard"))
 
