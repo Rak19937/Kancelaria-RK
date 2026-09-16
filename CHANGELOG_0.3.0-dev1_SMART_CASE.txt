@@ -1,0 +1,28 @@
+RK KANCELARIA 0.3.0-dev1 — SMART CASE & LAW
+
+NAJWAŻNIEJSZE
+- nowy domyślny „Widok prosty” sprawy: sygnatura → strony → nazwa sprawy,
+- zachowany pełny „Widok zaawansowany” DEV9,
+- automatyczny opis sprawy, opis aktualnego etapu i „co teraz”,
+- automatyczne tagi wynikające z danych sprawy, bez nadpisywania tagów ręcznych,
+- globalna linia czasu: proces, czynności, dokumenty, zadania, notatki i alerty,
+- moduł „Co z czego wynika” z relacjami ręcznymi i bezpiecznymi relacjami automatycznymi,
+- kalendarz kancelarii: rozprawy, posiedzenia, mediacje, terminy, zadania, monity i alerty,
+- typ alertu „Monit” oraz priorytety normal/high/critical,
+- centrum uwagi na pulpicie uwzględnia alerty,
+- biblioteka prawa: KPC, KPK, KPA, PPSA + możliwość dodania dowolnego aktu ELI,
+- pobieranie/aktualizacja tekstów z oficjalnego ELI; ostatnia lokalna wersja nie jest kasowana przy błędzie sieci,
+- przepisy można przypinać do sprawy także przed pobraniem pełnego aktu,
+- wykrywanie WYŁĄCZNIE jawnych terminów zapisanych w treści dokumentu,
+- termin z dokumentu jest tylko sugestią i wymaga zatwierdzenia użytkownika,
+- brak domyślnego „14 dni” lub innego okresu wynikającego wyłącznie z rodzaju pisma.
+
+BEZPIECZEŃSTWO DANYCH
+- migracja jest addytywna (CREATE/ALTER),
+- nie zmienia istniejących spraw, zadań, dokumentów ani historii,
+- schema 240 (DEV9) → 300,
+- test migracji zachował identyczną liczbę istniejących spraw, zadań, dokumentów i zdarzeń.
+
+PRAWO / TERMINY
+Biblioteka prawa jest pomocą warsztatową, nie autonomicznym systemem podejmującym decyzje prawne.
+Program nie tworzy terminu wyłącznie na podstawie typu dokumentu. Użytkownik zatwierdza sugestię i odpowiada za weryfikację właściwej podstawy prawnej oraz sposobu liczenia terminu.

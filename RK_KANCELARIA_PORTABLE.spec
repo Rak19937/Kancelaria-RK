@@ -23,6 +23,7 @@ a = Analysis(
     binaries=[],
     datas=datas,
     hiddenimports=[
+        'rk_smart',
         'rk_cloud',
         'PySide6.QtWebEngineCore',
         'PySide6.QtWebEngineWidgets',

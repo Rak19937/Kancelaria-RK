@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RK KANCELARIA 0.2.0-dev9 — UX & DESIGN REFRESH.
+"""RK KANCELARIA 0.3.0-dev1 — SMART CASE & LAW.
 
-Rozwój stabilnej 0.15.2: centralne ścieżki i fundament trybu Installed/Portable.
-Funkcje kancelaryjne, dokumenty, backup/recovery i Desktop pozostają zgodne z 0.15.2.
+Czytelny widok sprawy dla laika, globalna linia czasu, kalendarz i alerty,
+relacje „co z czego wynika”, generowane podsumowania oraz lokalna biblioteka prawa.
+Dane i funkcje DEV9 pozostają zgodne w widoku zaawansowanym.
 """
 from __future__ import annotations
 
 import base64
+import calendar as pycalendar
 import contextlib
 import hmac
 import html
@@ -44,12 +46,18 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from http.cookies import SimpleCookie
 
 from rk_paths import resolve_runtime_paths, installed_data_dir
+from rk_smart import (
+    ALERT_PRIORITIES, ALERT_TYPES, LAW_REGISTRY, RELATION_TYPES as SMART_RELATION_TYPES,
+    add_custom_eli_act, auto_create_structural_links, build_unified_timeline,
+    derive_case_auto_tags, ensure_smart_schema, extract_explicit_deadline_suggestions,
+    generate_case_summary, search_law, update_law_from_eli, upcoming_alerts,
+)
 
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.2.0-dev9"
-SCHEMA_VERSION = 240
+VERSION = "0.3.0-dev1"
+SCHEMA_VERSION = 300
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
 APP_MODE = RUNTIME_PATHS.mode
@@ -1268,8 +1276,11 @@ def init_db() -> None:
         con.execute("CREATE INDEX IF NOT EXISTS idx_events_date_case ON events(event_date,case_id)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_docs_status_case ON documents(doc_status,case_id)")
 
-        # Od 0.2 schema ma jawny numer wersji. To przygotowuje bezpieczne migracje
-        # bez zgadywania na podstawie obecności pojedynczych kolumn.
+        # Warstwa 0.3: czytelny widok sprawy, alerty, relacje i lokalna biblioteka prawa.
+        # CREATE IF NOT EXISTS + INSERT OR IGNORE zachowują pełną zgodność z danymi DEV9.
+        ensure_smart_schema(con)
+
+        # Jawny numer wersji schematu przygotowuje bezpieczne migracje.
         con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
         # 0.15.x automatycznie wstawiała do każdej pustej instalacji prywatny zestaw
@@ -2447,6 +2458,7 @@ def layout(title: str, body: str, active: str = "") -> str:
         ("PRACA", [
             ("/", "⌂", "Pulpit", "dashboard"),
             ("/today", "◷", "Dzisiaj", "today"),
+            ("/calendar", "▦", "Kalendarz", "calendar"),
             ("/cases", "§", "Sprawy", "cases"),
             ("/cases?mine=1", "◎", "Moje sprawy", "my_cases"),
             ("/tasks", "✓", "Zadania", "tasks"),
@@ -2460,6 +2472,7 @@ def layout(title: str, body: str, active: str = "") -> str:
             ("/views", "☆", "Moje widoki", "views"),
             ("/draft/templates", "▣", "Szablony pism", "draft_templates"),
             ("/tags", "#", "Tagi", "tags"),
+            ("/law", "¶", "Prawo", "law"),
             ("/search", "⌕", "Wyszukiwarka", "search"),
         ]),
         ("SYSTEM", [
@@ -2962,14 +2975,14 @@ class Handler(BaseHTTPRequestHandler):
         return bytes(data)
 
     def mutation_case_id(self,path,fields):
-        m=re.fullmatch(r"/case/(\d+)/(?:update|delete|party|event|task|document|relation|external-signature|note|next-action|process-event|next-action/complete)",path)
+        m=re.fullmatch(r"/case/(\d+)/(?:update|delete|party|event|task|document|relation|external-signature|note|next-action|process-event|next-action/complete|smart-link|law-link)",path)
         if m: return int(m.group(1))
-        if path in {'/task/create','/deadline/create','/quick/event','/quick/note','/quick/document'}:
+        if path in {'/task/create','/deadline/create','/quick/event','/quick/note','/quick/document','/alert/create'}:
             try: return int(fields.get('case_id','0') or 0) or None
             except (TypeError,ValueError): return None
-        mapping=[('party','parties','case_id'),('event','events','case_id'),('process-event','process_events','case_id'),('task','tasks','case_id'),('document','documents','case_id'),('external-signature','case_external_signatures','case_id'),('note','case_notes','case_id'),('case-entity','case_entities','case_id'),('checklist/item','case_checklist_items','case_id')]
+        mapping=[('party','parties','case_id'),('event','events','case_id'),('process-event','process_events','case_id'),('task','tasks','case_id'),('document','documents','case_id'),('external-signature','case_external_signatures','case_id'),('note','case_notes','case_id'),('case-entity','case_entities','case_id'),('checklist/item','case_checklist_items','case_id'),('smart-link','smart_links','case_id'),('alert','alerts','case_id'),('law-case-link','law_case_links','case_id'),('deadline-suggestion','deadline_suggestions','case_id')]
         for prefix,table,col in mapping:
-            mm=re.fullmatch(rf"/{re.escape(prefix)}/(\d+)/(?:update|delete|toggle)",path)
+            mm=re.fullmatch(rf"/{re.escape(prefix)}/(\d+)/(?:update|delete|toggle|accept)",path)
             if mm:
                 with db() as con:
                     r=con.execute(f"SELECT {col} cid FROM {table} WHERE id=?",(int(mm.group(1)),)).fetchone()
@@ -3006,6 +3019,9 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"/admin/user/\d+/edit", path): return self.user_edit_page(int(path.split('/')[3]))
             if path == "/": return self.dashboard()
             if path == "/today": return self.today_page(qs)
+            if path == "/calendar": return self.calendar_page(qs)
+            if path == "/law": return self.law_page(qs)
+            if re.fullmatch(r"/law/[A-Za-z0-9_-]+", path): return self.law_page(qs, path.split("/")[2].upper())
             if path == "/quick-add": return self.quick_add_page(qs)
             if path == "/deadline": return self.deadline_page(qs)
             if path == "/cases": return self.cases(qs, closed_only=False)
@@ -3027,7 +3043,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/backups": return self.backups_page()
             if re.fullmatch(r"/case/\d+/history", path): return self.case_history_page(int(path.split("/")[2]))
             if re.fullmatch(r"/process-event/\d+/edit", path): return self.process_event_edit(int(path.split("/")[2]))
-            if re.fullmatch(r"/case/\d+", path): return self.case_view(int(path.split("/")[-1]))
+            if re.fullmatch(r"/case/\d+", path): return self.case_view(int(path.split("/")[-1]), qs)
             if re.fullmatch(r"/case/\d+/edit", path): return self.case_edit(int(path.split("/")[-2]))
             if re.fullmatch(r"/case/\d+/export", path): return self.case_export_page(int(path.split("/")[-2]))
             if re.fullmatch(r"/case/\d+/export/pdf", path): return self.case_export_pdf(int(path.split("/")[-3]), qs, None)
@@ -3137,6 +3153,17 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"/draft/\d+/update", path): return self.draft_update(int(path.split("/")[2]), fields, files)
             if re.fullmatch(r"/draft/\d+/archive", path): return self.draft_archive(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/draft/\d+/to-document", path): return self.draft_to_document(int(path.split("/")[2]), fields)
+            if path == "/alert/create": return self.alert_create(fields)
+            if re.fullmatch(r"/alert/\d+/toggle", path): return self.alert_toggle(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/alert/\d+/delete", path): return self.alert_delete(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/case/\d+/smart-link", path): return self.smart_link_add(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/smart-link/\d+/delete", path): return self.smart_link_delete(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/law/[A-Za-z0-9_-]+/update", path): return self.law_update(path.split("/")[2].upper(), fields)
+            if path == "/law/add-eli": return self.law_add_eli(fields)
+            if re.fullmatch(r"/case/\d+/law-link", path): return self.case_law_link_add(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/law-case-link/\d+/delete", path): return self.case_law_link_delete(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/document/\d+/suggest-deadlines", path): return self.document_deadline_suggest(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/deadline-suggestion/\d+/accept", path): return self.deadline_suggestion_accept(int(path.split("/")[2]), fields)
             if path == "/case/create": return self.case_create(fields)
             if path == "/task/create": return self.task_add_global(fields)
             if path == "/view/save": return self.saved_view_save(fields)
@@ -3925,7 +3952,395 @@ class Handler(BaseHTTPRequestHandler):
             audit(con,cid,'case',cid,'Utworzono sprawę',f.get('title','').strip(),author)
         self.redirect(f'/case/{cid}')
 
-    def case_view(self, cid):
+    def _smart_label_map(self, con, cid):
+        out = {}
+        for r in con.execute("SELECT id,title FROM documents WHERE case_id=? ORDER BY id", (cid,)).fetchall():
+            out[("document", r['id'])] = f"Dokument: {r['title']}"
+        for r in con.execute("SELECT id,title FROM tasks WHERE case_id=? ORDER BY id", (cid,)).fetchall():
+            out[("task", r['id'])] = f"Zadanie: {r['title']}"
+        for r in con.execute("SELECT id,title FROM process_events WHERE case_id=? ORDER BY id", (cid,)).fetchall():
+            out[("process_event", r['id'])] = f"Proces: {r['title']}"
+        for r in con.execute("SELECT id,title FROM events WHERE case_id=? ORDER BY id", (cid,)).fetchall():
+            out[("event", r['id'])] = f"Czynność: {r['title']}"
+        for r in con.execute("SELECT id,title FROM alerts WHERE case_id=? ORDER BY id", (cid,)).fetchall():
+            out[("alert", r['id'])] = f"Alert: {r['title']}"
+        return out
+
+    def case_view(self, cid, qs=None):
+        qs = qs or {}
+        mode = (qs.get('mode') or ['simple'])[0].strip().lower()
+        if mode == 'advanced':
+            return self.case_view_advanced(cid)
+        return self.case_view_simple(cid, qs)
+
+    def case_view_simple(self, cid, qs=None):
+        qs = qs or {}
+        u = current_request_user()
+        uid = u['id'] if u else None
+        with db() as con:
+            c = con.execute("SELECT * FROM cases WHERE id=?", (cid,)).fetchone()
+            if not c:
+                return self.send_error(404)
+            if uid:
+                con.execute("INSERT INTO user_case_recent(user_id,case_id,opened_at) VALUES(?,?,CURRENT_TIMESTAMP) ON CONFLICT(user_id,case_id) DO UPDATE SET opened_at=CURRENT_TIMESTAMP", (uid, cid))
+            derive_case_auto_tags(con, cid)
+            auto_create_structural_links(con, cid)
+            summary = generate_case_summary(con, cid)
+            parties = con.execute("SELECT role,name FROM parties WHERE case_id=? ORDER BY id", (cid,)).fetchall()
+            structured = con.execute("SELECT ce.role,e.display_name name FROM case_entities ce JOIN entities e ON e.id=ce.entity_id WHERE ce.case_id=? ORDER BY ce.id", (cid,)).fetchall()
+            shown_parties = structured or parties
+            auto_tags = con.execute("SELECT tag,reason FROM case_auto_tags WHERE case_id=? ORDER BY tag COLLATE NOCASE", (cid,)).fetchall()
+            manual_tags = con.execute("SELECT t.name FROM case_tags ct JOIN tags t ON t.id=ct.tag_id WHERE ct.case_id=? ORDER BY t.name COLLATE NOCASE", (cid,)).fetchall()
+            timeline = build_unified_timeline(con, cid, 80)
+            links = con.execute("SELECT * FROM smart_links WHERE case_id=? ORDER BY auto_created,id DESC", (cid,)).fetchall()
+            labels = self._smart_label_map(con, cid)
+            alerts = con.execute("SELECT * FROM alerts WHERE case_id=? AND status='open' ORDER BY alert_date,id LIMIT 12", (cid,)).fetchall()
+            suggestions = con.execute("SELECT ds.*,d.title document_title FROM deadline_suggestions ds LEFT JOIN documents d ON d.id=ds.document_id WHERE ds.case_id=? AND ds.status='open' ORDER BY ds.id DESC", (cid,)).fetchall()
+            docs = con.execute("SELECT id,title,doc_type,received_date,delivered_date,extracted_text FROM documents WHERE case_id=? ORDER BY id DESC LIMIT 12", (cid,)).fetchall()
+            law_links = con.execute("""SELECT lcl.id,a.code,a.short_title,COALESCE(la.article_key,lcl.article_key_text) article_key,la.heading,lcl.note
+                                     FROM law_case_links lcl JOIN law_acts a ON a.id=lcl.act_id
+                                     LEFT JOIN law_articles la ON la.id=lcl.article_id WHERE lcl.case_id=? ORDER BY a.code,la.sort_order""", (cid,)).fetchall()
+            law_acts = con.execute("SELECT id,code,short_title FROM law_acts ORDER BY code").fetchall()
+            readonly = bool(c['status'] == 'closed' and not int(c['closed_edit_unlocked'] or 0))
+        shown_sig, sig_kind = display_case_signature(cid, c['signature'], c['internal_signature'])
+        primary = shown_sig if shown_sig != 'Bez sygnatury' else (c['internal_signature'] or 'Bez sygnatury')
+        party_html = ''.join(
+            f"<span class='case-party'><b>{esc(r['role'])}</b>{': ' if r['role'] else ''}{esc(r['name'])}</span>"
+            for r in shown_parties
+        ) or "<span class='muted'>Nie dodano stron</span>"
+        tags_html = ''.join(f"<span class='smart-tag auto' title='{esc(r['reason'])}'>{esc(r['tag'])}</span>" for r in auto_tags)
+        tags_html += ''.join(f"<span class='smart-tag'>{esc(r['name'])}</span>" for r in manual_tags)
+        if not tags_html:
+            tags_html = "<span class='muted'>Brak tagów</span>"
+        nearest = []
+        if c['next_date']:
+            nearest.append((c['next_date'], 'Najbliższa data', c['next_step'] or c['title'], 'case'))
+        for a in alerts:
+            nearest.append((a['alert_date'], a['alert_type'], a['title'], 'alert'))
+        nearest = sorted(nearest, key=lambda x: x[0])[:6]
+        nearest_html = ''.join(
+            f"<div class='smart-date-row {'urgent' if d and d <= date.today().isoformat() else ''}'><span>{fmt_date(d)}</span><div><b>{esc(kind)}</b><small>{esc(title)}</small></div></div>"
+            for d, kind, title, _ in nearest
+        ) or "<div class='empty'>Brak najbliższych terminów i alertów.</div>"
+        timeline_parts = []
+        for x in timeline:
+            desc = f"<p>{esc(x['description'])}</p>" if x['description'] else ''
+            timeline_parts.append(
+                f"<div class='unified-item kind-{esc(x['source_type'])}'><div class='unified-date'>{fmt_date(x['date'])}</div><div class='unified-dot'></div><div class='unified-body'><div class='unified-meta'>{esc(x['kind'])} · {esc(x['type'])}</div><b>{esc(x['title'])}</b>{desc}</div></div>"
+            )
+        timeline_html = ''.join(timeline_parts) or "<div class='empty'>Brak zdarzeń na osi czasu.</div>"
+        relation_rows = []
+        for r in links:
+            sl = labels.get((r['source_type'], r['source_id']), f"{r['source_type']} #{r['source_id']}")
+            tl = labels.get((r['target_type'], r['target_id']), f"{r['target_type']} #{r['target_id']}")
+            auto = "<span class='mini-badge'>AUTO</span>" if r['auto_created'] else ''
+            delete = '' if readonly else f"<form method='post' action='/smart-link/{r['id']}/delete' class='inline'><input type='hidden' name='return_to' value='/case/{cid}#relations'><button class='btn small danger'>×</button></form>"
+            note = f"<small>{esc(r['note'])}</small>" if r['note'] else ''
+            relation_rows.append(f"<div class='smart-relation'><span>{esc(sl)}</span><b>{esc(r['relation_type'])}</b><span>{esc(tl)}</span>{auto}{delete}{note}</div>")
+        relations_html = ''.join(relation_rows) or "<div class='empty'>Brak logicznych powiązań. Możesz je dodać ręcznie; program automatyzuje tylko jednoznaczne związki.</div>"
+        item_opts = ''.join(
+            f"<option value='{esc(t)}:{i}'>{esc(label)}</option>"
+            for (t, i), label in sorted(labels.items(), key=lambda z: z[1].lower())
+        )
+        relation_type_opts = ''.join(f"<option>{esc(x)}</option>" for x in SMART_RELATION_TYPES)
+        suggestions_parts = []
+        for sg in suggestions:
+            suggestions_parts.append(
+                f"<div class='deadline-suggestion'><b>{esc(sg['suggested_title'])}</b><p>„{esc(sg['source_text'])}”</p><div class='small'>Baza: {fmt_date(sg['base_date'])} · {sg['days']} dni · {esc(sg['confidence'])}</div><form method='post' action='/deadline-suggestion/{sg['id']}/accept'><input type='hidden' name='return_to' value='/case/{cid}#deadlines'><button class='btn primary small'>Zatwierdź i utwórz termin</button></form></div>"
+            )
+        suggestions_html = ''.join(suggestions_parts) or "<div class='empty'>Brak jawnych terminów oczekujących na zatwierdzenie.</div>"
+        doc_scan = ''.join(
+            f"<form method='post' action='/document/{d['id']}/suggest-deadlines' class='doc-scan-row'><input type='hidden' name='return_to' value='/case/{cid}#deadlines'><span><b>{esc(d['title'])}</b><small>{esc(d['doc_type'])} · doręczenie: {fmt_date(d['delivered_date'])}</small></span><button class='btn small'>Sprawdź jawny termin</button></form>"
+            for d in docs
+        )
+        law_parts = []
+        for r in law_links:
+            article = f" · art. {esc(r['article_key'])}" if r['article_key'] else ''
+            delete = '' if readonly else f"<form method='post' action='/law-case-link/{r['id']}/delete' class='inline'><input type='hidden' name='return_to' value='/case/{cid}#law'><button class='btn small danger'>×</button></form>"
+            law_parts.append(f"<div class='law-link'><a href='/law/{esc(r['code'])}?q={quote(str(r['article_key'] or ''))}'><b>{esc(r['code'])}{article}</b></a><span>{esc(r['short_title'])}</span>{delete}</div>")
+        law_html = ''.join(law_parts) or "<div class='empty'>Nie przypięto jeszcze przepisów do tej sprawy.</div>"
+        law_act_opts = ''.join(f"<option value='{esc(r['code'])}'>{esc(r['code'])} — {esc(r['short_title'])}</option>" for r in law_acts)
+        alert_type_opts = ''.join(f"<option>{esc(x)}</option>" for x in ALERT_TYPES)
+        alert_priority_opts = ''.join(f"<option value='{x}'>{'Krytyczny' if x == 'critical' else 'Wysoki' if x == 'high' else 'Normalny'}</option>" for x in ALERT_PRIORITIES)
+        readonly_note = "<div class='readonly-banner'>Sprawa zakończona — widok tylko do odczytu.</div>" if readonly else ''
+        relation_form = ''
+        law_form = ''
+        alert_form = ''
+        if not readonly:
+            relation_form = f"""<details class='smart-add'><summary>+ Dodaj powiązanie</summary><form method='post' action='/case/{cid}/smart-link' class='form-grid'><div><label>Z czego</label><select name='source' required><option value=''>— wybierz —</option>{item_opts}</select></div><div><label>Relacja</label><select name='relation_type'>{relation_type_opts}</select></div><div><label>Co wynika / z czym związane</label><select name='target' required><option value=''>— wybierz —</option>{item_opts}</select></div><div><label>Notatka</label><input name='note'></div><div class='full'><button class='btn primary'>Dodaj relację</button></div></form></details>"""
+            law_form = f"""<details><summary>+ Przypnij przepis</summary><form method='post' action='/case/{cid}/law-link' class='form-grid'><div><label>Akt</label><select name='code'>{law_act_opts}</select></div><div><label>Artykuł</label><input name='article_key' placeholder='np. 317'></div><div class='full'><label>Notatka</label><input name='note'></div><div class='full'><button class='btn primary'>Przypnij</button></div></form></details>"""
+            alert_form = f"""<form method='post' action='/alert/create' class='form-grid'><input type='hidden' name='case_id' value='{cid}'><input type='hidden' name='return_to' value='/case/{cid}'><div><label>Data</label><input type='date' name='alert_date' required></div><div><label>Rodzaj</label><select name='alert_type'>{alert_type_opts}</select></div><div class='full'><label>Nazwa</label><input name='title' required></div><div><label>Priorytet</label><select name='priority'>{alert_priority_opts}</select></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><button class='btn primary'>Dodaj alert</button></div></form>"""
+        body = f"""{readonly_note}<div class='case-mode-switch'><a class='btn primary' href='/case/{cid}?mode=simple'>Widok prosty</a><a class='btn' href='/case/{cid}?mode=advanced'>Widok zaawansowany</a><a class='btn' href='/case/{cid}/edit'>Edytuj</a></div>
+        <section class='smart-case-hero'>
+          <div class='case-signature-label'>{esc(sig_kind or 'Sygnatura')}</div><h1>{esc(primary)}</h1>
+          <div class='case-parties'>{party_html}</div>
+          <h2>{esc(c['title'])}</h2><div class='case-subject'>{esc(c['subject']) or 'Brak opisu przedmiotu sprawy'}</div>
+          <div class='smart-tags'>{tags_html}</div>
+        </section>
+        <div class='smart-summary-grid'>
+          <div class='card smart-summary-card'><div class='section-kicker'>O CZYM JEST SPRAWA</div><p>{esc(summary['description'])}</p></div>
+          <div class='card smart-summary-card'><div class='section-kicker'>AKTUALNY ETAP</div><p>{esc(summary['stage'])}</p></div>
+          <div class='card smart-summary-card'><div class='section-kicker'>CO TERAZ</div><p>{esc(summary['next'])}</p></div>
+          <div class='card smart-summary-card'><div class='section-kicker'>NAJBLIŻSZE</div>{nearest_html}<a class='smart-more' href='/calendar?case_id={cid}'>Otwórz kalendarz →</a></div>
+        </div>
+        <div class='smart-case-layout'>
+          <section class='card smart-main'><div class='section-head'><div><div class='section-kicker'>GLOBALNA LINIA CZASU</div><h2>Co wydarzyło się w sprawie</h2></div><a class='btn small' href='/case/{cid}?mode=advanced#documents'>Szczegóły</a></div><div class='unified-timeline'>{timeline_html}</div></section>
+          <aside class='smart-side'>
+            <section class='card' id='relations'><h2>Co z czego wynika</h2><div class='small muted'>Relacje ręczne oraz jednoznaczne powiązania odczytane z danych.</div>{relations_html}{relation_form}</section>
+            <section class='card' id='deadlines'><h2>Terminy z dokumentów</h2><div class='notice subtle'><b>Bez automatycznego zgadywania.</b> Program tworzy tylko sugestię, gdy w treści widzi jawny termin. Użytkownik zawsze zatwierdza.</div>{suggestions_html}<details><summary>Sprawdź dokumenty</summary>{doc_scan or '<div class="empty">Brak dokumentów.</div>'}</details></section>
+            <section class='card' id='law'><div class='section-head'><h2>Podstawy prawne</h2><a class='btn small' href='/law?case_id={cid}'>Biblioteka</a></div>{law_html}{law_form}</section>
+            <section class='card'><h2>Nowy alert / monit</h2>{alert_form or '<div class="empty">Sprawa tylko do odczytu.</div>'}</section>
+          </aside>
+        </div>"""
+        self.send_html(layout(primary, body, 'cases'))
+
+    def calendar_page(self, qs):
+        raw = (qs.get('month') or [date.today().strftime('%Y-%m')])[0]
+        try:
+            first = datetime.strptime(raw, '%Y-%m').date().replace(day=1)
+        except ValueError:
+            first = date.today().replace(day=1)
+        prev = (first - timedelta(days=1)).replace(day=1)
+        nxt = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+        days_in = pycalendar.monthrange(first.year, first.month)[1]
+        last = first.replace(day=days_in)
+        start = first - timedelta(days=first.weekday())
+        end = last + timedelta(days=(6 - last.weekday()))
+        case_filter = 0
+        try:
+            case_filter = int((qs.get('case_id') or ['0'])[0] or 0)
+        except ValueError:
+            pass
+        with db() as con:
+            params = [start.isoformat(), end.isoformat()] + ([case_filter] if case_filter else [])
+            alerts = con.execute(
+                f"SELECT a.*,c.title case_title,c.signature,c.internal_signature FROM alerts a LEFT JOIN cases c ON c.id=a.case_id WHERE a.status='open' AND a.alert_date BETWEEN ? AND ?{' AND a.case_id=?' if case_filter else ''}", params
+            ).fetchall()
+            tasks = con.execute(
+                f"SELECT t.*,c.title case_title,c.signature,c.internal_signature FROM tasks t JOIN cases c ON c.id=t.case_id WHERE t.status<>'done' AND t.due_date BETWEEN ? AND ?{' AND t.case_id=?' if case_filter else ''}", params
+            ).fetchall()
+            process = con.execute(
+                f"SELECT p.*,c.title case_title,c.signature,c.internal_signature FROM process_events p JOIN cases c ON c.id=p.case_id WHERE (p.event_date BETWEEN ? AND ? OR p.next_date BETWEEN ? AND ?){' AND p.case_id=?' if case_filter else ''}",
+                [start.isoformat(),end.isoformat(),start.isoformat(),end.isoformat()] + ([case_filter] if case_filter else [])
+            ).fetchall()
+            work_events = con.execute(
+                f"SELECT e.*,c.title case_title,c.signature,c.internal_signature FROM events e JOIN cases c ON c.id=e.case_id WHERE e.event_date BETWEEN ? AND ?{' AND e.case_id=?' if case_filter else ''}", params
+            ).fetchall()
+            case_dates = con.execute(
+                f"SELECT id,next_date,title,signature,internal_signature,next_step FROM cases WHERE next_date BETWEEN ? AND ?{' AND id=?' if case_filter else ''}", params
+            ).fetchall()
+            cases = con.execute("SELECT id,title,signature,internal_signature FROM cases WHERE status<>'closed' ORDER BY signature='',signature,title").fetchall()
+        bydate = {}
+        def add_item(d, kind, title, cid=0, priority='normal'):
+            if d:
+                bydate.setdefault(d, []).append((kind, title, cid, priority))
+        for r in alerts:
+            add_item(r['alert_date'], r['alert_type'], r['title'], r['case_id'] or 0, r['priority'])
+        for r in tasks:
+            add_item(r['due_date'], 'Zadanie', r['title'], r['case_id'], r['priority'])
+        for r in process:
+            if r['event_date']:
+                add_item(r['event_date'], r['event_type'] or 'Proces', r['title'], r['case_id'], 'normal')
+            if r['next_date'] and r['next_date'] != r['event_date']:
+                add_item(r['next_date'], 'Następny termin', r['title'], r['case_id'], 'high')
+        for r in work_events:
+            add_item(r['event_date'], r['event_type'] or 'Czynność', r['title'], r['case_id'], 'normal')
+        for r in case_dates:
+            add_item(r['next_date'], 'Najbliższa data', r['next_step'] or r['title'], r['id'], 'high')
+        cells = []
+        cur = start
+        while cur <= end:
+            items = bydate.get(cur.isoformat(), [])
+            event_parts = []
+            for kind, title, cid, pr in items[:5]:
+                content = f"<b>{esc(kind)}</b><span>{esc(title)}</span>"
+                event_parts.append(f"<a class='calendar-event p-{esc(pr)}' href='/case/{cid}'>{content}</a>" if cid else f"<div class='calendar-event p-{esc(pr)}'>{content}</div>")
+            more = f"<div class='small muted'>+{len(items)-5} więcej</div>" if len(items) > 5 else ''
+            cls = ' outside' if cur.month != first.month else ''
+            cls += ' today' if cur == date.today() else ''
+            cells.append(f"<div class='calendar-day{cls}'><div class='calendar-day-num'>{cur.day}</div>{''.join(event_parts)}{more}</div>")
+            cur += timedelta(days=1)
+        case_opts = '<option value="">Wszystkie sprawy</option>' + ''.join(
+            f"<option value='{r['id']}' {'selected' if case_filter == r['id'] else ''}>{esc((r['signature'] or r['internal_signature'] or 'Bez sygnatury') + ' — ' + r['title'])}</option>" for r in cases
+        )
+        type_opts = ''.join(f"<option>{esc(x)}</option>" for x in ALERT_TYPES)
+        prio_opts = ''.join(f"<option value='{x}'>{esc(x)}</option>" for x in ALERT_PRIORITIES)
+        cf = f"&case_id={case_filter}" if case_filter else ''
+        body = f"""<div class='topbar'><div><h1>Kalendarz kancelarii</h1><div class='sub'>Rozprawy, terminy, zadania, monity i alerty w jednym miejscu.</div></div><div><a class='btn' href='/calendar?month={prev.strftime('%Y-%m')}{cf}'>←</a> <b class='calendar-month-title'>{first.strftime('%m.%Y')}</b> <a class='btn' href='/calendar?month={nxt.strftime('%Y-%m')}{cf}'>→</a></div></div>
+        <div class='card'><form method='get' action='/calendar' class='form-grid compact-form'><input type='hidden' name='month' value='{first.strftime('%Y-%m')}'><div class='full'><label>Filtr sprawy</label><select name='case_id' onchange='this.form.submit()'>{case_opts}</select></div></form></div>
+        <div class='calendar-weekdays'>{''.join(f'<div>{x}</div>' for x in ['Pon','Wt','Śr','Czw','Pt','Sob','Niedz'])}</div><div class='calendar-grid'>{''.join(cells)}</div>
+        <div class='card'><h2>Dodaj alert / monit</h2><form method='post' action='/alert/create' class='form-grid'><input type='hidden' name='return_to' value='/calendar?month={first.strftime('%Y-%m')}'><div><label>Sprawa</label><select name='case_id'>{case_opts}</select></div><div><label>Data *</label><input type='date' name='alert_date' required></div><div><label>Rodzaj</label><select name='alert_type'>{type_opts}</select></div><div><label>Priorytet</label><select name='priority'>{prio_opts}</select></div><div class='full'><label>Nazwa *</label><input name='title' required></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj alert</button></div></form></div>"""
+        self.send_html(layout('Kalendarz', body, 'calendar'))
+
+    def law_page(self, qs, code=''):
+        code = (code or (qs.get('code') or [''])[0]).upper().strip()
+        q = (qs.get('q') or [''])[0].strip()
+        case_id = 0
+        try:
+            case_id = int((qs.get('case_id') or ['0'])[0] or 0)
+        except ValueError:
+            pass
+        with db() as con:
+            acts = con.execute("SELECT a.*,(SELECT COUNT(*) FROM law_articles la WHERE la.act_id=a.id) article_count FROM law_acts a ORDER BY a.code").fetchall()
+            results = search_law(con, q, code, 120) if (q or code) else []
+        cards = ''.join(
+            f"<div class='law-card'><div><b>{esc(a['code'])}</b><h3>{esc(a['short_title'])}</h3><div class='small muted'>{esc(a['display_address'])} · lokalnie: {a['article_count']} art. · sprawdzono: {esc(a['last_checked_at'] or 'nigdy')}</div></div><div><a class='btn small' href='/law/{esc(a['code'])}'>Otwórz</a> <form method='post' action='/law/{esc(a['code'])}/update' class='inline'><input type='hidden' name='return_to' value='/law/{esc(a['code'])}'><button class='btn small'>Aktualizuj z ELI</button></form></div></div>" for a in acts
+        )
+        result_parts = []
+        for r in results:
+            link_form = ''
+            if case_id:
+                link_form = f"<form method='post' action='/case/{case_id}/law-link' class='inline'><input type='hidden' name='code' value='{esc(r['code'])}'><input type='hidden' name='article_key' value='{esc(r['article_key'])}'><input type='hidden' name='return_to' value='/law/{esc(r['code'])}?q={quote(q)}&case_id={case_id}'><button class='btn small primary'>Przypnij do sprawy</button></form>"
+            result_parts.append(f"<article class='law-article'><div class='section-head'><div><span class='smart-tag'>{esc(r['code'])}</span><h3>{esc(r['heading'])}</h3></div>{link_form}</div><pre>{esc(r['body'])}</pre></article>")
+        result_html = ''.join(result_parts) or ("<div class='empty'>Brak wyników. Jeśli akt ma 0 artykułów lokalnie, użyj „Aktualizuj z ELI”.</div>" if (q or code) else '')
+        body = f"""<div class='topbar'><div><h1>Biblioteka prawa</h1><div class='sub'>Lokalne teksty pomocnicze z oficjalnego ELI. Aktualność zawsze można sprawdzić jednym kliknięciem.</div></div></div>
+        <div class='notice'><b>Ważne:</b> biblioteka nie ustala sama skutków procesowych ani terminów. Przepisy są materiałem pomocniczym; aktualność i właściwą podstawę prawną weryfikuje użytkownik.</div>
+        <div class='law-grid'>{cards}</div>
+        <div class='card'><form method='get' action='/law/{esc(code)}' class='form-grid'><input type='hidden' name='case_id' value='{case_id or ''}'><div class='full'><label>Szukaj w {esc(code or 'wszystkich aktach')}</label><input name='q' value='{esc(q)}' placeholder='np. 317 albo rygor natychmiastowej wykonalności'></div><div class='full'><button class='btn primary'>Szukaj</button></div></form></div>{result_html}
+        <details class='card'><summary>+ Dodaj inny akt z ELI</summary><form method='post' action='/law/add-eli' class='form-grid'><div><label>Kod roboczy</label><input name='code' placeholder='np. UKSC' required></div><div><label>Rok Dz.U.</label><input type='number' name='year' required></div><div><label>Pozycja</label><input type='number' name='position' required></div><div class='full'><label>Nazwa</label><input name='short_title' required></div><div class='full'><button class='btn primary'>Pobierz z ELI</button></div></form></details>"""
+        self.send_html(layout('Prawo', body, 'law'))
+
+    def alert_create(self, f):
+        title = (f.get('title') or '').strip()
+        d = (f.get('alert_date') or '').strip()
+        if not title or not d:
+            return self.redirect(f.get('return_to') or '/calendar')
+        try:
+            cid = int(f.get('case_id') or 0) or None
+        except ValueError:
+            cid = None
+        try:
+            assigned = int(f.get('assigned_user_id') or 0) or None
+        except ValueError:
+            assigned = None
+        a = self.current_author(f)
+        typ = (f.get('alert_type') or 'Inne').strip()
+        pr = (f.get('priority') or 'normal').strip()
+        if typ not in ALERT_TYPES:
+            typ = 'Inne'
+        if pr not in ALERT_PRIORITIES:
+            pr = 'normal'
+        with db() as con:
+            cur = con.execute("INSERT INTO alerts(case_id,alert_date,alert_type,title,description,priority,status,assigned_user_id,created_by) VALUES(?,?,?,?,?,?,'open',?,?)", (cid, d, typ, title, (f.get('description') or '').strip(), pr, assigned, a))
+            if cid:
+                audit(con, cid, 'alert', cur.lastrowid, 'Dodano alert', f"{typ}: {_change_value(title)}\nData: {_change_value(d)}", a)
+        target = (f.get('return_to') or '/calendar').strip()
+        self.redirect(target if target.startswith('/') else '/calendar')
+
+    def alert_toggle(self, aid, f):
+        with db() as con:
+            r = con.execute("SELECT * FROM alerts WHERE id=?", (aid,)).fetchone()
+            if not r:
+                return self.send_error(404)
+            status = 'done' if r['status'] == 'open' else 'open'
+            con.execute("UPDATE alerts SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (status, aid))
+        self.redirect(f.get('return_to') or '/calendar')
+
+    def alert_delete(self, aid, f):
+        with db() as con:
+            con.execute("DELETE FROM alerts WHERE id=?", (aid,))
+        self.redirect(f.get('return_to') or '/calendar')
+
+    def smart_link_add(self, cid, f):
+        def parse_item(v):
+            t, raw = (v or '').split(':', 1)
+            return t, int(raw)
+        try:
+            st, si = parse_item(f.get('source'))
+            tt, ti = parse_item(f.get('target'))
+        except Exception:
+            return self.redirect(f'/case/{cid}#relations')
+        if st == tt and si == ti:
+            return self.redirect(f'/case/{cid}#relations')
+        rel = (f.get('relation_type') or 'powiązane z').strip()
+        rel = rel if rel in SMART_RELATION_TYPES else 'powiązane z'
+        with db() as con:
+            con.execute("INSERT OR IGNORE INTO smart_links(case_id,source_type,source_id,target_type,target_id,relation_type,note,auto_created,created_by) VALUES(?,?,?,?,?,?,?,?,?)", (cid, st, si, tt, ti, rel, (f.get('note') or '').strip(), 0, self.current_author(f)))
+        self.redirect(f'/case/{cid}#relations')
+
+    def smart_link_delete(self, lid, f):
+        with db() as con:
+            r = con.execute("SELECT case_id FROM smart_links WHERE id=?", (lid,)).fetchone()
+            con.execute("DELETE FROM smart_links WHERE id=?", (lid,))
+        self.redirect(f.get('return_to') or (f"/case/{r['case_id']}#relations" if r else '/cases'))
+
+    def law_update(self, code, f):
+        try:
+            with db() as con:
+                update_law_from_eli(con, code)
+        except Exception as exc:
+            return self.send_html(layout('Aktualizacja prawa', f"<div class='card friendly-error'><h1>Nie udało się zaktualizować {esc(code)}</h1><p>{esc(exc)}</p><p>Dotychczasowa lokalna wersja nie została usunięta.</p><a class='btn' href='/law/{esc(code)}'>Wróć</a></div>", 'law'), 502)
+        target = (f.get('return_to') or f'/law/{code}').strip()
+        self.redirect(target if target.startswith('/') else f'/law/{code}')
+
+    def law_add_eli(self, f):
+        try:
+            code = (f.get('code') or '').strip().upper()
+            year = int(f.get('year') or 0)
+            pos = int(f.get('position') or 0)
+            with db() as con:
+                add_custom_eli_act(con, code, year, pos, (f.get('short_title') or '').strip(), self.current_author(f))
+        except Exception as exc:
+            return self.send_html(layout('Dodawanie aktu', f"<div class='card friendly-error'><h1>Nie udało się pobrać aktu</h1><p>{esc(exc)}</p><a class='btn' href='/law'>Wróć</a></div>", 'law'), 502)
+        self.redirect(f'/law/{code}')
+
+    def case_law_link_add(self, cid, f):
+        code = (f.get('code') or '').strip().upper()
+        key = (f.get('article_key') or '').strip().replace('art.', '').replace('Art.', '').strip().rstrip('.')
+        with db() as con:
+            act = con.execute("SELECT id FROM law_acts WHERE code=?", (code,)).fetchone()
+            if not act:
+                return self.redirect(f'/case/{cid}#law')
+            article = con.execute("SELECT id FROM law_articles WHERE act_id=? AND article_key=?", (act['id'], key)).fetchone() if key else None
+            con.execute("INSERT OR IGNORE INTO law_case_links(case_id,act_id,article_id,article_key_text,note,created_by) VALUES(?,?,?,?,?,?)", (cid, act['id'], article['id'] if article else None, key, (f.get('note') or '').strip(), self.current_author(f)))
+        target = f.get('return_to') or f'/case/{cid}#law'
+        self.redirect(target if target.startswith('/') else f'/case/{cid}#law')
+
+    def case_law_link_delete(self, lid, f):
+        with db() as con:
+            r = con.execute("SELECT case_id FROM law_case_links WHERE id=?", (lid,)).fetchone()
+            con.execute("DELETE FROM law_case_links WHERE id=?", (lid,))
+        self.redirect(f.get('return_to') or (f"/case/{r['case_id']}#law" if r else '/cases'))
+
+    def document_deadline_suggest(self, did, f):
+        with db() as con:
+            d = con.execute("SELECT * FROM documents WHERE id=?", (did,)).fetchone()
+            if not d:
+                return self.send_error(404)
+            cid = d['case_id']
+            text = str(row_get(d, 'extracted_text', '') or '')
+        target = f.get('return_to') or f'/case/{cid}#deadlines'
+        if not text:
+            enqueue_document_index(did)
+            return self.send_html(layout('Analiza terminu', f"<div class='card'><h1>Dokument jest indeksowany</h1><p>Najpierw program musi odczytać tekst dokumentu. Nie utworzono żadnego terminu automatycznie.</p><a class='btn primary' href='{esc(target)}'>Wróć do sprawy</a></div>", 'cases'))
+        with db() as con:
+            found = extract_explicit_deadline_suggestions(con, did)
+        if not found:
+            return self.send_html(layout('Analiza terminu', f"<div class='card'><h1>Nie wykryto jawnego terminu</h1><p>Program nie znalazł w odczytanej treści sformułowania typu „w terminie X dni”. Nie utworzono terminu i nie zastosowano żadnego domyślnego okresu.</p><a class='btn primary' href='{esc(target)}'>Wróć</a></div>", 'cases'))
+        self.redirect(target)
+
+    def deadline_suggestion_accept(self, sid, f):
+        with db() as con:
+            sg = con.execute("SELECT * FROM deadline_suggestions WHERE id=? AND status='open'", (sid,)).fetchone()
+            if not sg:
+                return self.send_error(404)
+            if not sg['base_date'] or sg['days'] is None:
+                return self.send_html(layout('Termin wymaga danych', "<div class='card'><h1>Brakuje daty początkowej</h1><p>Uzupełnij datę doręczenia/wpływu dokumentu przed utworzeniem terminu.</p></div>", 'cases'), 400)
+            try:
+                due, rule_label = calculate_deadline(sg['base_date'], int(sg['days']), sg['rule'])
+            except ValueError as exc:
+                return self.send_html(layout('Termin', f"<div class='card'><p>{esc(exc)}</p></div>", 'cases'), 400)
+            a = self.current_author(f)
+            source = f"Jawny termin z dokumentu: {sg['source_text']} — zatwierdzony przez użytkownika"
+            cur = con.execute("""INSERT INTO tasks(case_id,title,due_date,status,priority,depends_on,notes,created_by,updated_by,deadline_base_date,deadline_days,deadline_rule,deadline_source,deadline_manual)
+                               VALUES(?,?,?,'open','high','',?,?,?,?,?,?,?,0)""", (sg['case_id'], sg['suggested_title'], due, source, a, a, sg['base_date'], sg['days'], rule_label, source))
+            con.execute("UPDATE deadline_suggestions SET status='accepted' WHERE id=?", (sid,))
+            con.execute("INSERT OR IGNORE INTO smart_links(case_id,source_type,source_id,target_type,target_id,relation_type,note,auto_created,created_by) VALUES(?,?,?,?,?,'uruchamia termin',?,0,?)", (sg['case_id'], 'document', sg['document_id'], 'task', cur.lastrowid, 'Termin zatwierdzony przez użytkownika', a))
+            audit(con, sg['case_id'], 'task', cur.lastrowid, 'Zatwierdzono sugestię terminu', f"Źródło: {_change_value(sg['source_text'])}\nTermin: {_change_value(due)}", a)
+        target = f.get('return_to') or f"/case/{sg['case_id']}#deadlines"
+        self.redirect(target if target.startswith('/') else f"/case/{sg['case_id']}#deadlines")
+
+    def case_view_advanced(self, cid):
         u=current_request_user(); uid=u['id'] if u else None
         with db() as con:
             c=con.execute("SELECT * FROM cases WHERE id=?",(cid,)).fetchone()
@@ -5884,12 +6299,17 @@ class Handler(BaseHTTPRequestHandler):
                 GROUP BY c.id
                 HAVING datetime(COALESCE(MAX(a.created_at),c.updated_at,c.created_at)) < datetime('now','-30 days')
                 ORDER BY last_activity LIMIT 15""").fetchall()
+            smart_alerts=con.execute("SELECT a.*,c.title case_title FROM alerts a LEFT JOIN cases c ON c.id=a.case_id WHERE a.status='open' AND a.alert_date<=? ORDER BY a.alert_date,CASE a.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 ELSE 2 END LIMIT 20",(soon,)).fetchall()
         for r in overdue: notices.append(('danger',f"Zadanie po terminie: {r['title']}",r['case_id'],f"termin {fmt_date(r['due_date'])}"))
         for r in due: notices.append(('',f"Termin w ciągu 3 dni: {r['title']}",r['case_id'],fmt_date(r['due_date'])))
         for r in sign: notices.append(('',f"Dokument do podpisu: {r['title']}",r['case_id'],r['original_name'] or r['doc_type']))
         for r in draft_sign: notices.append(('',f"Projekt pisma do podpisu: {r['title']}",r['case_id'],r['doc_type'] or 'Projekt pisma'))
         for r in draft_due: notices.append(('',f"Termin projektu pisma: {r['title']}",r['case_id'],fmt_date(r['due_date'])))
         for r in stale: notices.append(('',f"Brak aktywności od ponad 30 dni: {r['title']}",r['id'],str(r['last_activity'])[:10]))
+        for r in smart_alerts:
+            if r['case_id']:
+                cls='danger' if r['priority']=='critical' or r['alert_date']<today_s else ''
+                notices.append((cls,f"{r['alert_type']}: {r['title']}",r['case_id'],fmt_date(r['alert_date'])))
         if not notices: return "<div class='notification ok'><b>Brak pilnych powiadomień.</b></div>"
         return ''.join(f"<div class='notification {cls}'><a class='case-link' href='/case/{cid}'><b>{esc(title)}</b></a><div class='small muted'>{esc(desc)}</div></div>" for cls,title,cid,desc in notices[:30])
 
