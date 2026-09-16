@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RK KANCELARIA 0.3.0-dev2 — USABILITY & LINKED WORKFLOW.
+"""RK KANCELARIA 0.3.0-dev3 — CASE WORKSPACE.
 
 Czytelny widok sprawy dla laika, globalna linia czasu, kalendarz i alerty,
 relacje „co z czego wynika”, generowane podsumowania oraz lokalna biblioteka prawa.
@@ -37,6 +37,7 @@ import ctypes
 from ctypes import wintypes
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from http import HTTPStatus
@@ -57,8 +58,8 @@ from rk_smart import (
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.3.0-dev2"
-SCHEMA_VERSION = 310
+VERSION = "0.3.0-dev3"
+SCHEMA_VERSION = 320
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
 APP_MODE = RUNTIME_PATHS.mode
@@ -1496,6 +1497,34 @@ def fmt_date(s: str) -> str:
         return esc(s)
 
 
+def money_to_cents(value) -> int:
+    """Kwoty przechowujemy jako całkowitą liczbę groszy, bez błędów float."""
+    raw = str(value or '').strip().replace('\u00a0', '').replace(' ', '').replace(',', '.')
+    if not raw:
+        return 0
+    try:
+        amount = Decimal(raw).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        return 0
+    return int(amount * 100)
+
+
+def fmt_money(cents, currency: str = 'PLN') -> str:
+    try:
+        amount = Decimal(int(cents or 0)) / Decimal(100)
+    except (TypeError, ValueError, InvalidOperation):
+        amount = Decimal(0)
+    rendered = f"{amount:,.2f}".replace(',', ' ').replace('.', ',')
+    return f"{rendered} {esc(currency or 'PLN')}"
+
+
+def money_input(cents) -> str:
+    try:
+        return f"{Decimal(int(cents or 0)) / Decimal(100):.2f}"
+    except (TypeError, ValueError, InvalidOperation):
+        return '0.00'
+
+
 
 def _easter_sunday(year: int) -> date:
     """Meeus/Jones/Butcher algorithm for Gregorian Easter."""
@@ -1770,6 +1799,27 @@ def save_draft_version(con: sqlite3.Connection, project_id: int, author: str, ch
                 version_stored=''
     cur=con.execute("INSERT INTO draft_versions(project_id,version_no,title,doc_type,status,due_date,content,notes,stored_name,original_name,change_note,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (project_id,n,d['title'],d['doc_type'],d['status'],d['due_date'],d['content'],d['notes'],version_stored,d['original_name'],change_note,author))
+    return cur.lastrowid
+
+
+def save_document_file_version(con: sqlite3.Connection, document_id: int, author: str) -> int | None:
+    """Zachowaj poprzedni plik przed podmianą; metadane nie wskazują na usunięty plik."""
+    d=con.execute('SELECT * FROM documents WHERE id=?',(document_id,)).fetchone()
+    if not d or not d['stored_name']:
+        return None
+    src=FILES_DIR/f"sprawa_{d['case_id']}"/d['stored_name']
+    if not src.is_file():
+        return None
+    n=int(con.execute('SELECT COALESCE(MAX(version_no),0)+1 FROM document_versions WHERE document_id=?',(document_id,)).fetchone()[0])
+    version_dir=FILES_DIR/f"sprawa_{d['case_id']}"/f"wersje_dokumentu_{document_id}"
+    version_dir.mkdir(parents=True,exist_ok=True)
+    original=safe_filename(d['original_name'] or src.name)
+    vname=f"v{n:03d}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"
+    dst=version_dir/vname
+    shutil.copy2(src,dst)
+    stored=f"wersje_dokumentu_{document_id}/{vname}"
+    cur=con.execute("""INSERT INTO document_versions(document_id,version_no,stored_name,original_name,file_hash,title,description,created_by)
+                       VALUES(?,?,?,?,?,?,?,?)""",(document_id,n,stored,d['original_name'],d['file_hash'],d['title'],d['description'],author))
     return cur.lastrowid
 
 
@@ -2289,6 +2339,12 @@ def export_case_package(case_id: int) -> tuple[bytes,str]:
         tables['checklist']=[dict(x) for x in con.execute('SELECT * FROM case_checklist_items WHERE case_id=? ORDER BY sort_order,id',(case_id,))]
         tables['writing_projects']=[dict(x) for x in con.execute('SELECT * FROM writing_projects WHERE case_id=? ORDER BY id',(case_id,))]
         tables['draft_versions']=[dict(x) for x in con.execute('SELECT dv.* FROM draft_versions dv JOIN writing_projects w ON w.id=dv.project_id WHERE w.case_id=? ORDER BY dv.project_id,dv.version_no',(case_id,))]
+        tables['strategy']=[dict(x) for x in con.execute('SELECT * FROM case_strategy WHERE case_id=?',(case_id,))]
+        tables['assertions']=[dict(x) for x in con.execute('SELECT * FROM case_assertions WHERE case_id=? ORDER BY id',(case_id,))]
+        tables['evidence']=[dict(x) for x in con.execute('SELECT e.* FROM case_evidence e JOIN case_assertions a ON a.id=e.assertion_id WHERE a.case_id=? ORDER BY e.id',(case_id,))]
+        tables['claims']=[dict(x) for x in con.execute('SELECT * FROM case_claims WHERE case_id=? ORDER BY id',(case_id,))]
+        tables['document_events']=[dict(x) for x in con.execute('SELECT * FROM document_events WHERE case_id=? ORDER BY id',(case_id,))]
+        tables['document_versions']=[dict(x) for x in con.execute('SELECT dv.* FROM document_versions dv JOIN documents d ON d.id=dv.document_id WHERE d.case_id=? ORDER BY dv.document_id,dv.version_no',(case_id,))]
         # Powiązania są eksportowane jako odwołania do sygnatur/nazw drugiej sprawy.
         # Przy imporcie odtwarzamy je tylko wtedy, gdy druga sprawa już istnieje w docelowej bazie.
         rels=[]
@@ -2306,7 +2362,7 @@ def export_case_package(case_id: int) -> tuple[bytes,str]:
                 rels.append({'direction':'in','relation_type':x['relation_type'],'note':x['note'],
                              'other_signature':x['source_signature'],'other_internal_signature':x['source_internal'],'other_title':x['source_title']})
         tables['relations']=rels
-        manifest={'format':'RK-KANCELARIA-CASE','version':3,'exported_at':datetime.now().isoformat(timespec='seconds'),'case':dict(c),'tables':tables}
+        manifest={'format':'RK-KANCELARIA-CASE','version':4,'exported_at':datetime.now().isoformat(timespec='seconds'),'case':dict(c),'tables':tables}
     out=io.BytesIO()
     with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
         z.writestr('case.json',json.dumps(manifest,ensure_ascii=False,indent=2))
@@ -2322,6 +2378,10 @@ def export_case_package(case_id: int) -> tuple[bytes,str]:
             if v.get('stored_name'):
                 fp=DRAFTS_DIR/v['stored_name']
                 if fp.is_file(): z.write(fp,f"draft_versions/{v['project_id']}/{v['id']}/{safe_filename(v.get('original_name') or fp.name)}")
+        for v in tables.get('document_versions',[]):
+            if v.get('stored_name'):
+                fp=FILES_DIR/f"sprawa_{case_id}"/v['stored_name']
+                if fp.is_file(): z.write(fp,f"document_versions/{v['document_id']}/{v['id']}/{safe_filename(v.get('original_name') or fp.name)}")
     sig=(c['internal_signature'] or c['signature'] or str(case_id)).replace('/','_').replace('\\','_')
     return out.getvalue(),f"RK_sprawa_{safe_filename(sig)}.rkcase.zip"
 
@@ -2855,7 +2915,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_asset(self, name: str):
         safe = Path(name).name
-        path = BASE_DIR / 'assets' / safe
+        # CSS/JS są utrzymywane w jednym źródle w katalogu aplikacji; katalog
+        # assets pozostaje fallbackiem dla buildów i starszych paczek.
+        root_candidate = BASE_DIR / safe
+        path = root_candidate if safe in {'rk_app.css','rk_app.js'} and root_candidate.is_file() else BASE_DIR / 'assets' / safe
         if not path.is_file():
             return self.send_error(404)
         data = path.read_bytes()
@@ -2988,12 +3051,27 @@ class Handler(BaseHTTPRequestHandler):
         return bytes(data)
 
     def mutation_case_id(self,path,fields):
-        m=re.fullmatch(r"/case/(\d+)/(?:update|delete|party|event|task|document|relation|external-signature|note|next-action|process-event|next-action/complete|smart-link|law-link)",path)
+        m=re.fullmatch(r"/case/(\d+)/(?:update|delete|party|event|task|document|relation|external-signature|note|next-action|process-event|next-action/complete|smart-link|law-link|strategy|assertion|claim|document-event)",path)
         if m: return int(m.group(1))
         if path in {'/task/create','/deadline/create','/quick/event','/quick/note','/quick/document','/alert/create'}:
             try: return int(fields.get('case_id','0') or 0) or None
             except (TypeError,ValueError): return None
-        mapping=[('party','parties','case_id'),('event','events','case_id'),('process-event','process_events','case_id'),('task','tasks','case_id'),('document','documents','case_id'),('external-signature','case_external_signatures','case_id'),('note','case_notes','case_id'),('case-entity','case_entities','case_id'),('checklist/item','case_checklist_items','case_id'),('smart-link','smart_links','case_id'),('alert','alerts','case_id'),('law-case-link','law_case_links','case_id'),('deadline-suggestion','deadline_suggestions','case_id')]
+        mm=re.fullmatch(r"/assertion/(\d+)/evidence",path)
+        if mm:
+            with db() as con:
+                r=con.execute('SELECT case_id cid FROM case_assertions WHERE id=?',(int(mm.group(1)),)).fetchone()
+            return int(r['cid']) if r else None
+        mm=re.fullmatch(r"/evidence/(\d+)/delete",path)
+        if mm:
+            with db() as con:
+                r=con.execute('SELECT a.case_id cid FROM case_evidence e JOIN case_assertions a ON a.id=e.assertion_id WHERE e.id=?',(int(mm.group(1)),)).fetchone()
+            return int(r['cid']) if r else None
+        mm=re.fullmatch(r"/document/(\d+)/version/(\d+)/restore",path)
+        if mm:
+            with db() as con:
+                r=con.execute('SELECT case_id cid FROM documents WHERE id=?',(int(mm.group(1)),)).fetchone()
+            return int(r['cid']) if r else None
+        mapping=[('party','parties','case_id'),('event','events','case_id'),('process-event','process_events','case_id'),('task','tasks','case_id'),('document','documents','case_id'),('external-signature','case_external_signatures','case_id'),('note','case_notes','case_id'),('case-entity','case_entities','case_id'),('checklist/item','case_checklist_items','case_id'),('smart-link','smart_links','case_id'),('alert','alerts','case_id'),('law-case-link','law_case_links','case_id'),('deadline-suggestion','deadline_suggestions','case_id'),('assertion','case_assertions','case_id'),('claim','case_claims','case_id'),('document-event','document_events','case_id')]
         for prefix,table,col in mapping:
             mm=re.fullmatch(rf"/{re.escape(prefix)}/(\d+)/(?:update|delete|toggle|accept)",path)
             if mm:
@@ -3147,6 +3225,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/backup/encrypted": return self.encrypted_backup(fields)
             if path == "/backup/manual": return self.manual_backup_now(fields)
             if path == "/recovery/check": return self.recovery_check(fields)
+            if path == "/recovery/test-restore": return self.recovery_test_restore(fields)
             if path == "/recovery/snapshot-import": return self.full_snapshot_import(fields, files)
             if path == "/cloud/config": return self.cloud_config_update(fields)
             if path == "/cloud/check": return self.cloud_check(fields)
@@ -3174,6 +3253,17 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"/law/[A-Za-z0-9_-]+/update", path): return self.law_update(path.split("/")[2].upper(), fields)
             if path == "/law/add-eli": return self.law_add_eli(fields)
             if re.fullmatch(r"/case/\d+/law-link", path): return self.case_law_link_add(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/case/\d+/strategy", path): return self.case_strategy_update(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/case/\d+/assertion", path): return self.case_assertion_add(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/assertion/\d+/update", path): return self.case_assertion_update(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/assertion/\d+/delete", path): return self.case_assertion_delete(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/assertion/\d+/evidence", path): return self.case_evidence_add(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/evidence/\d+/delete", path): return self.case_evidence_delete(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/case/\d+/claim", path): return self.case_claim_add(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/claim/\d+/update", path): return self.case_claim_update(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/claim/\d+/delete", path): return self.case_claim_delete(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/case/\d+/document-event", path): return self.document_event_add(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/document-event/\d+/delete", path): return self.document_event_delete(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/law-case-link/\d+/delete", path): return self.case_law_link_delete(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/document/\d+/suggest-deadlines", path): return self.document_deadline_suggest(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/deadline-suggestion/\d+/accept", path): return self.deadline_suggestion_accept(int(path.split("/")[2]), fields)
@@ -3208,6 +3298,7 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"/process-event/\d+/delete", path): return self.process_event_delete(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/task/\d+/update", path): return self.task_update(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/document/\d+/update", path): return self.document_update(int(path.split("/")[2]), fields, files)
+            if re.fullmatch(r"/document/\d+/version/\d+/restore", path): return self.document_version_restore(int(path.split("/")[2]),int(path.split("/")[4]),fields)
             if re.fullmatch(r"/relation/\d+/update", path): return self.relation_update(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/external-signature/\d+/update", path): return self.external_signature_update(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/task/\d+/toggle", path): return self.task_toggle(int(path.split("/")[2]), fields)
@@ -3982,12 +4073,414 @@ class Handler(BaseHTTPRequestHandler):
             out[("alert", r['id'])] = f"Alert: {r['title']}"
         return out
 
+    @staticmethod
+    def _case_tab_url(cid: int, tab: str) -> str:
+        return f"/case/{cid}?tab={quote(tab)}"
+
+    def case_strategy_update(self, cid, f):
+        fields = (
+            'main_goal','minimum_variant','opponent_position','our_arguments',
+            'opponent_arguments','response_arguments','risks','hearing_plan',
+            'motions_to_make','witness_questions','settlement_position','watchouts',
+        )
+        values = [(f.get(name) or '').strip() for name in fields]
+        author = self.current_author(f)
+        with db() as con:
+            if not con.execute('SELECT 1 FROM cases WHERE id=?',(cid,)).fetchone():
+                return self.send_error(404)
+            old = con.execute('SELECT * FROM case_strategy WHERE case_id=?',(cid,)).fetchone()
+            con.execute(
+                f"""INSERT INTO case_strategy(case_id,{','.join(fields)},updated_by,updated_at)
+                    VALUES(?,{','.join('?' for _ in fields)},?,CURRENT_TIMESTAMP)
+                    ON CONFLICT(case_id) DO UPDATE SET
+                    {','.join(name+'=excluded.'+name for name in fields)},updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP""",
+                (cid,*values,author),
+            )
+            changed = describe_changes(old,dict(zip(fields,values)),{
+                'main_goal':'Cel główny','minimum_variant':'Wariant minimum','opponent_position':'Stanowisko przeciwnika',
+                'our_arguments':'Nasze argumenty','opponent_arguments':'Argumenty przeciwnika','response_arguments':'Odpowiedź',
+                'risks':'Ryzyka','hearing_plan':'Plan rozprawy','motions_to_make':'Wnioski do zgłoszenia',
+                'witness_questions':'Pytania do świadków','settlement_position':'Stanowisko ugodowe','watchouts':'Czego pilnować',
+            },compact_fields=set(fields)) if old else 'Utworzono strategię sprawy'
+            audit(con,cid,'case_strategy',cid,'Zapisano strategię sprawy',changed,author)
+        self.redirect(self._case_tab_url(cid,'strategy'))
+
+    def case_assertion_add(self, cid, f):
+        statement = (f.get('statement') or '').strip()
+        if not statement:
+            return self.redirect(self._case_tab_url(cid,'evidence'))
+        side = (f.get('side') or 'nasze').strip()
+        status = (f.get('status') or 'do udowodnienia').strip()
+        author = self.current_author(f)
+        with db() as con:
+            cur=con.execute("""INSERT INTO case_assertions(case_id,statement,side,status,legal_significance,notes,sort_order,created_by,updated_by)
+                               VALUES(?,?,?,?,?,?,?,?,?)""",
+                            (cid,statement,side,status,(f.get('legal_significance') or '').strip(),
+                             (f.get('notes') or '').strip(),int(f.get('sort_order') or 0),author,author))
+            audit(con,cid,'assertion',cur.lastrowid,'Dodano twierdzenie',statement,author)
+        self.redirect(self._case_tab_url(cid,'evidence'))
+
+    def case_assertion_update(self, assertion_id, f):
+        author=self.current_author(f)
+        with db() as con:
+            old=con.execute('SELECT * FROM case_assertions WHERE id=?',(assertion_id,)).fetchone()
+            if not old: return self.send_error(404)
+            new={'statement':(f.get('statement') or '').strip(),'side':(f.get('side') or 'nasze').strip(),
+                 'status':(f.get('status') or 'do udowodnienia').strip(),
+                 'legal_significance':(f.get('legal_significance') or '').strip(),'notes':(f.get('notes') or '').strip()}
+            con.execute("""UPDATE case_assertions SET statement=?,side=?,status=?,legal_significance=?,notes=?,updated_by=?,updated_at=CURRENT_TIMESTAMP
+                           WHERE id=?""",(*new.values(),author,assertion_id))
+            details=describe_changes(old,new,{'statement':'Twierdzenie','side':'Strona','status':'Status','legal_significance':'Znaczenie prawne','notes':'Notatki'},compact_fields={'statement','legal_significance','notes'})
+            if details: audit(con,old['case_id'],'assertion',assertion_id,'Zmieniono twierdzenie',details,author)
+            cid=old['case_id']
+        self.redirect(self._case_tab_url(cid,'evidence'))
+
+    def case_assertion_delete(self, assertion_id, f):
+        author=self.current_author(f)
+        with db() as con:
+            row=con.execute('SELECT * FROM case_assertions WHERE id=?',(assertion_id,)).fetchone()
+            if not row: return self.send_error(404)
+            con.execute('UPDATE case_assertions SET is_archived=1,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',(author,assertion_id))
+            audit(con,row['case_id'],'assertion',assertion_id,'Zarchiwizowano twierdzenie',row['statement'],author)
+            cid=row['case_id']
+        self.redirect(self._case_tab_url(cid,'evidence'))
+
+    def case_evidence_add(self, assertion_id, f):
+        title=(f.get('title') or '').strip()
+        if not title: return self.send_error(400,'Dowód wymaga nazwy.')
+        author=self.current_author(f)
+        try: document_id=int(f.get('document_id') or 0) or None
+        except ValueError: document_id=None
+        with db() as con:
+            assertion=con.execute('SELECT * FROM case_assertions WHERE id=? AND is_archived=0',(assertion_id,)).fetchone()
+            if not assertion: return self.send_error(404)
+            if document_id and not con.execute('SELECT 1 FROM documents WHERE id=? AND case_id=?',(document_id,assertion['case_id'])).fetchone():
+                document_id=None
+            cur=con.execute("""INSERT INTO case_evidence(assertion_id,evidence_type,title,status,document_id,source_reference,notes,created_by)
+                               VALUES(?,?,?,?,?,?,?,?)""",
+                            (assertion_id,(f.get('evidence_type') or 'Dokument').strip(),title,
+                             (f.get('status') or 'do przeprowadzenia').strip(),document_id,
+                             (f.get('source_reference') or '').strip(),(f.get('notes') or '').strip(),author))
+            audit(con,assertion['case_id'],'evidence',cur.lastrowid,'Dodano dowód',title,author)
+            cid=assertion['case_id']
+        self.redirect(self._case_tab_url(cid,'evidence'))
+
+    def case_evidence_delete(self, evidence_id, f):
+        author=self.current_author(f)
+        with db() as con:
+            row=con.execute("""SELECT e.*,a.case_id FROM case_evidence e JOIN case_assertions a ON a.id=e.assertion_id WHERE e.id=?""",(evidence_id,)).fetchone()
+            if not row: return self.send_error(404)
+            con.execute('UPDATE case_evidence SET is_archived=1 WHERE id=?',(evidence_id,))
+            audit(con,row['case_id'],'evidence',evidence_id,'Zarchiwizowano dowód',row['title'],author)
+            cid=row['case_id']
+        self.redirect(self._case_tab_url(cid,'evidence'))
+
+    @staticmethod
+    def _claim_values(f):
+        return {
+            'claim_type':(f.get('claim_type') or 'Roszczenie główne').strip(),
+            'title':(f.get('title') or '').strip(),
+            'principal_cents':money_to_cents(f.get('principal')),
+            'interest_cents':money_to_cents(f.get('interest')),
+            'costs_cents':money_to_cents(f.get('costs')),
+            'paid_cents':money_to_cents(f.get('paid')),
+            'awarded_cents':money_to_cents(f.get('awarded')),
+            'settlement_cents':money_to_cents(f.get('settlement')),
+            'currency':(f.get('currency') or 'PLN').strip().upper()[:8],
+            'status':(f.get('status') or 'dochodzone').strip(),
+            'notes':(f.get('notes') or '').strip(),
+        }
+
+    def case_claim_add(self, cid, f):
+        new=self._claim_values(f)
+        if not new['title']: return self.redirect(self._case_tab_url(cid,'finances'))
+        author=self.current_author(f)
+        with db() as con:
+            cols=list(new)
+            cur=con.execute(f"INSERT INTO case_claims(case_id,{','.join(cols)},created_by,updated_by) VALUES(?,{','.join('?' for _ in cols)},?,?)",(cid,*[new[x] for x in cols],author,author))
+            audit(con,cid,'claim',cur.lastrowid,'Dodano pozycję roszczenia',new['title'],author)
+        self.redirect(self._case_tab_url(cid,'finances'))
+
+    def case_claim_update(self, claim_id, f):
+        new=self._claim_values(f); author=self.current_author(f)
+        with db() as con:
+            old=con.execute('SELECT * FROM case_claims WHERE id=?',(claim_id,)).fetchone()
+            if not old: return self.send_error(404)
+            cols=list(new)
+            con.execute(f"UPDATE case_claims SET {','.join(x+'=?' for x in cols)},updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(*[new[x] for x in cols],author,claim_id))
+            audit(con,old['case_id'],'claim',claim_id,'Zmieniono pozycję roszczenia',new['title'],author)
+            cid=old['case_id']
+        self.redirect(self._case_tab_url(cid,'finances'))
+
+    def case_claim_delete(self, claim_id, f):
+        author=self.current_author(f)
+        with db() as con:
+            row=con.execute('SELECT * FROM case_claims WHERE id=?',(claim_id,)).fetchone()
+            if not row: return self.send_error(404)
+            con.execute("UPDATE case_claims SET status='archiwalne',updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(author,claim_id))
+            audit(con,row['case_id'],'claim',claim_id,'Zarchiwizowano pozycję roszczenia',row['title'],author)
+            cid=row['case_id']
+        self.redirect(self._case_tab_url(cid,'finances'))
+
+    def document_event_add(self, cid, f):
+        title=(f.get('title') or '').strip()
+        try: document_id=int(f.get('document_id') or 0)
+        except ValueError: document_id=0
+        if not title or not document_id: return self.redirect(self._case_tab_url(cid,'history'))
+        author=self.current_author(f)
+        with db() as con:
+            if not con.execute('SELECT 1 FROM documents WHERE id=? AND case_id=?',(document_id,cid)).fetchone():
+                return self.send_error(400,'Dokument nie należy do tej sprawy.')
+            cur=con.execute("""INSERT INTO document_events(document_id,case_id,event_date,event_type,title,description,created_by)
+                               VALUES(?,?,?,?,?,?,?)""",(document_id,cid,(f.get('event_date') or '').strip(),
+                               (f.get('event_type') or 'Dotyczy').strip(),title,(f.get('description') or '').strip(),author))
+            audit(con,cid,'document_event',cur.lastrowid,'Dodano zdarzenie wynikające z dokumentu',title,author)
+        self.redirect(self._case_tab_url(cid,'history'))
+
+    def document_event_delete(self, event_id, f):
+        author=self.current_author(f)
+        with db() as con:
+            row=con.execute('SELECT * FROM document_events WHERE id=?',(event_id,)).fetchone()
+            if not row: return self.send_error(404)
+            con.execute('UPDATE document_events SET is_archived=1 WHERE id=?',(event_id,))
+            audit(con,row['case_id'],'document_event',event_id,'Zarchiwizowano zdarzenie dokumentu',row['title'],author)
+            cid=row['case_id']
+        self.redirect(self._case_tab_url(cid,'history'))
+
     def case_view(self, cid, qs=None):
         qs = qs or {}
         mode = (qs.get('mode') or ['simple'])[0].strip().lower()
         if mode == 'advanced':
             return self.case_view_advanced(cid)
-        return self.case_view_simple(cid, qs)
+        if mode == 'legacy':
+            return self.case_view_simple(cid, qs)
+        return self.case_workspace(cid, qs)
+
+
+    def case_workspace(self, cid, qs=None):
+        """Zakładkowy warsztat sprawy: jeden nagłówek, jeden kontekst pracy naraz."""
+        qs = qs or {}
+        valid_tabs = ('dashboard','history','documents','tasks','deadlines','evidence','strategy','hearing','finances','people','notes')
+        user = current_request_user(); uid = user['id'] if user else None
+        requested = (qs.get('tab') or [''])[0].strip().lower()
+        with db() as con:
+            c=con.execute('SELECT * FROM cases WHERE id=?',(cid,)).fetchone()
+            if not c: return self.send_error(404)
+            if uid:
+                con.execute("""INSERT INTO user_case_recent(user_id,case_id,opened_at) VALUES(?,?,CURRENT_TIMESTAMP)
+                               ON CONFLICT(user_id,case_id) DO UPDATE SET opened_at=CURRENT_TIMESTAMP""",(uid,cid))
+            if requested in valid_tabs:
+                tab=requested
+                if uid:
+                    con.execute("""INSERT INTO user_case_view_preferences(user_id,case_id,last_tab,updated_at)
+                                   VALUES(?,?,?,CURRENT_TIMESTAMP)
+                                   ON CONFLICT(user_id,case_id) DO UPDATE SET last_tab=excluded.last_tab,updated_at=CURRENT_TIMESTAMP""",(uid,cid,tab))
+            else:
+                pref=con.execute('SELECT last_tab FROM user_case_view_preferences WHERE user_id=? AND case_id=?',(uid,cid)).fetchone() if uid else None
+                tab=(pref['last_tab'] if pref and pref['last_tab'] in valid_tabs else 'dashboard')
+            derive_case_auto_tags(con,cid)
+            summary=generate_case_summary(con,cid)
+            parties=con.execute('SELECT * FROM parties WHERE case_id=? ORDER BY id',(cid,)).fetchall()
+            entities=con.execute("""SELECT ce.*,e.display_name,e.pesel,e.nip,e.krs FROM case_entities ce
+                                    JOIN entities e ON e.id=ce.entity_id WHERE ce.case_id=? ORDER BY ce.id""",(cid,)).fetchall()
+            all_entities=con.execute('SELECT id,display_name,pesel,nip FROM entities ORDER BY display_name COLLATE NOCASE').fetchall()
+            auto_tags=con.execute('SELECT tag,reason FROM case_auto_tags WHERE case_id=? ORDER BY tag',(cid,)).fetchall()
+            manual_tags=con.execute("""SELECT t.name FROM case_tags ct JOIN tags t ON t.id=ct.tag_id
+                                       WHERE ct.case_id=? ORDER BY t.name""",(cid,)).fetchall()
+            timeline=build_unified_timeline(con,cid,250)
+            tasks=con.execute("""SELECT t.*,u.author_name assigned_name,u.function assigned_function FROM tasks t
+                                 LEFT JOIN users u ON u.id=t.assigned_user_id WHERE t.case_id=?
+                                 ORDER BY t.status,CASE WHEN t.due_date='' THEN 1 ELSE 0 END,t.due_date,t.id""",(cid,)).fetchall()
+            alerts=con.execute("SELECT * FROM alerts WHERE case_id=? AND status='open' ORDER BY alert_date,id",(cid,)).fetchall()
+            docs=con.execute("""SELECT * FROM documents WHERE case_id=?
+                                ORDER BY COALESCE(NULLIF(delivered_date,''),NULLIF(received_date,''),NULLIF(doc_date,''),created_at) DESC,id DESC""",(cid,)).fetchall()
+            doc_events=con.execute("""SELECT de.*,d.title document_title FROM document_events de JOIN documents d ON d.id=de.document_id
+                                      WHERE de.case_id=? AND de.is_archived=0 ORDER BY de.event_date DESC,de.id DESC""",(cid,)).fetchall()
+            strategy=con.execute('SELECT * FROM case_strategy WHERE case_id=?',(cid,)).fetchone()
+            assertions=con.execute('SELECT * FROM case_assertions WHERE case_id=? AND is_archived=0 ORDER BY sort_order,id',(cid,)).fetchall()
+            evidence=con.execute("""SELECT e.*,d.title document_title FROM case_evidence e LEFT JOIN documents d ON d.id=e.document_id
+                                    JOIN case_assertions a ON a.id=e.assertion_id WHERE a.case_id=? AND e.is_archived=0 ORDER BY e.id""",(cid,)).fetchall()
+            claims=con.execute("SELECT * FROM case_claims WHERE case_id=? AND status<>'archiwalne' ORDER BY id",(cid,)).fetchall()
+            notes=con.execute('SELECT * FROM case_notes WHERE case_id=? ORDER BY created_at DESC,id DESC',(cid,)).fetchall()
+            process_events=con.execute("""SELECT * FROM process_events WHERE case_id=?
+                                         ORDER BY COALESCE(NULLIF(event_date,''),'0000-00-00') DESC,id DESC""",(cid,)).fetchall()
+            law_links=con.execute("""SELECT a.code,COALESCE(la.article_key,lcl.article_key_text) article_key,lcl.note
+                                     FROM law_case_links lcl JOIN law_acts a ON a.id=lcl.act_id
+                                     LEFT JOIN law_articles la ON la.id=lcl.article_id WHERE lcl.case_id=?
+                                     ORDER BY a.code,la.sort_order""",(cid,)).fetchall()
+            suggestions=con.execute("""SELECT ds.*,d.title document_title FROM deadline_suggestions ds LEFT JOIN documents d ON d.id=ds.document_id
+                                       WHERE ds.case_id=? AND ds.status='open' ORDER BY ds.id DESC""",(cid,)).fetchall()
+            users=con.execute('SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name').fetchall()
+            readonly=bool(c['status']=='closed' and not int(c['closed_edit_unlocked'] or 0))
+
+        shown_sig,sig_kind=display_case_signature(cid,c['signature'],c['internal_signature'])
+        primary=shown_sig if shown_sig!='Bez sygnatury' else (c['internal_signature'] or 'Bez sygnatury')
+        shown_people=entities or parties
+        party_line=' · '.join(f"{x['role']}: {x['display_name'] if 'display_name' in x.keys() else x['name']}" for x in shown_people) or 'Nie dodano stron'
+        tags=''.join(f"<span class='smart-tag auto' title='{esc(x['reason'])}'>{esc(x['tag'])}</span>" for x in auto_tags)
+        tags+=''.join(f"<span class='smart-tag'>{esc(x['name'])}</span>" for x in manual_tags)
+        open_tasks=[x for x in tasks if x['status']!='done']
+        next_task=next((x for x in open_tasks if x['due_date']),open_tasks[0] if open_tasks else None)
+        last_item=timeline[0] if timeline else None
+        next_dates=[]
+        for x in open_tasks:
+            if x['due_date']: next_dates.append((x['due_date'],row_get(x,'task_type','Zadanie'),x['title']))
+        for x in alerts: next_dates.append((x['alert_date'],x['alert_type'],x['title']))
+        if c['next_date']: next_dates.append((c['next_date'],'Następna czynność',c['next_step'] or c['title']))
+        next_dates=sorted({(d,k,t) for d,k,t in next_dates if d})
+        next_date=next_dates[0] if next_dates else None
+
+        tab_meta=[
+            ('dashboard','Pulpit',''),('history','Historia',str(len(timeline))),('documents','Dokumenty',str(len(docs))),
+            ('tasks','Zadania',str(len(open_tasks))),('deadlines','Terminy',str(len(next_dates))),
+            ('evidence','Dowody',str(len(assertions))),('strategy','Strategia',''),('hearing','Rozprawa',''),
+            ('finances','Finanse',str(len(claims))),('people','Osoby',str(len(shown_people))),('notes','Notatki',str(len(notes))),
+        ]
+        tab_nav=''.join(f"<a class='case-tab {'active' if tab==key else ''}' href='/case/{cid}?tab={key}'>{label}{f'<span>{count}</span>' if count else ''}</a>" for key,label,count in tab_meta)
+        header=f"""<div class='case-workspace-sticky' id='rkCaseContext'>
+          <div class='case-workspace-head'><div class='case-workspace-identity'><div class='case-workspace-sig'>{esc(primary)}</div>
+          <div class='case-workspace-parties'>{esc(party_line)}</div><h1>{esc(c['title'])}</h1></div>
+          <div class='case-workspace-actions'>{badge(c['status'])}<a class='btn small' href='/case/{cid}/edit'>Edytuj</a><a class='btn small' href='/case/{cid}/export'>Eksport</a><a class='btn small' href='/case/{cid}?mode=advanced'>Widok techniczny</a></div></div>
+          <div class='case-workspace-meta'><span>{esc(c['court']) or 'Sąd/organ: —'}</span><span>{esc(c['category']) or 'Kategoria: —'}</span><div class='smart-tags'>{tags}</div></div>
+          <nav class='case-tabs'>{tab_nav}</nav></div>"""
+        readonly_html="<div class='readonly-banner'>Sprawa zakończona — widok tylko do odczytu.</div>" if readonly else ''
+        ro_disabled=' disabled' if readonly else ''
+
+        if tab=='dashboard':
+            alert_count=len(alerts)+len(suggestions)
+            risk=(strategy['risks'] if strategy else '') or 'Nie wpisano ryzyk.'
+            content=f"""<section class='case-tab-content'><div class='workspace-kpi-grid'>
+              <div class='workspace-kpi'><span>Stan sprawy</span><b>{esc(summary['stage'])}</b><small>{esc(summary['description'])}</small></div>
+              <div class='workspace-kpi'><span>Następny termin</span><b>{fmt_date(next_date[0]) if next_date else 'Brak'}</b><small>{esc((next_date[1]+' · '+next_date[2]) if next_date else 'Nie wskazano daty')}</small></div>
+              <div class='workspace-kpi'><span>Najbliższe zadanie</span><b>{esc(next_task['title']) if next_task else 'Brak'}</b><small>{fmt_date(next_task['due_date']) if next_task else 'Wszystko wykonane'}</small></div>
+              <div class='workspace-kpi'><span>Alerty</span><b>{alert_count}</b><small>{'Wymagają sprawdzenia' if alert_count else 'Brak otwartych alertów'}</small></div>
+            </div><div class='grid'>
+              <div class='card span7'><div class='section-kicker'>CO TERAZ</div><h2>{esc(c['next_step']) or esc(summary['next'])}</h2><p class='muted'>{('Termin: '+fmt_date(c['next_date'])) if c['next_date'] else 'Bez wskazanej daty.'}</p>
+              {'' if readonly else f'''<form method="post" action="/case/{cid}/next-action" class="form-grid"><input type="hidden" name="return_to" value="/case/{cid}?tab=dashboard"><div class="full"><label>Następny ruch</label><input name="next_step" value="{esc(c['next_step'])}"></div><div><label>Termin</label><input type="date" name="next_date" value="{esc(c['next_date'])}"></div><div><label>Czekamy na</label><input name="waiting_for" value="{esc(c['waiting_for'])}"></div><div class="full"><button class="btn primary">Zapisz</button></div></form>'''}</div>
+              <div class='card span5'><div class='section-kicker'>RYZYKA</div><h2>Na co uważać</h2><div class='workspace-pre'>{esc(risk)}</div><a class='btn small' href='/case/{cid}?tab=strategy'>Otwórz strategię</a></div>
+              <div class='card span12'><div class='section-head'><div><div class='section-kicker'>OSTATNIE</div><h2>{esc(last_item['title']) if last_item else 'Brak historii'}</h2></div><a class='btn small' href='/case/{cid}?tab=history'>Pełna historia</a></div><p class='muted'>{fmt_date(last_item['date']) if last_item else ''} {esc(last_item['description']) if last_item else 'Dodaj pierwszą czynność lub dokument.'}</p></div>
+            </div></section>"""
+
+        elif tab=='history':
+            grouped={}
+            for item in timeline: grouped.setdefault(item.get('date') or '',[]).append(item)
+            timeline_parts=[]
+            for d in sorted(grouped,reverse=True):
+                rows=[]
+                for x in grouped[d]:
+                    href=f"/document/{x['source_id']}/open" if x['source_type']=='document' else '#'
+                    rows.append(f"<a class='timeline-clean-row' href='{href}'><span class='timeline-clean-kind'>{esc(x['kind'])}</span><div><b>{esc(x['title'])}</b><small>{esc(x.get('description',''))}</small></div></a>")
+                timeline_parts.append(f"<div class='timeline-day'><div class='timeline-day-date'>{fmt_date(d)}</div><div class='timeline-day-items'>{''.join(rows)}</div></div>")
+            doc_opts=''.join(f"<option value='{x['id']}'>{esc(x['title'])}</option>" for x in docs if not row_get(x,'parent_document_id',None))
+            add_forms='' if readonly else f"""<div class='grid workspace-add-grid'><details class='card span6 smart-add'><summary>+ Zdarzenie kancelarii</summary><form method='post' action='/case/{cid}/event' class='form-grid'><input type='hidden' name='return_to' value='/case/{cid}?tab=history'><div><label>Data</label><input type='date' name='event_date' value='{date.today().isoformat()}'></div><div><label>Typ</label><input name='event_type' value='Czynność'></div><div class='full'><label>Tytuł</label><input name='title' required></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details>
+              <details class='card span6 smart-add'><summary>+ Zdarzenie wynikające z dokumentu</summary><form method='post' action='/case/{cid}/document-event' class='form-grid'><div class='full'><label>Dokument</label><select name='document_id' required><option value=''>— wybierz —</option>{doc_opts}</select></div><div><label>Data zdarzenia</label><input type='date' name='event_date'></div><div><label>Rodzaj</label><input name='event_type' placeholder='np. doręczenie, termin, rozprawa'></div><div class='full'><label>Co wynika z dokumentu?</label><input name='title' required></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details></div>"""
+            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Historia sprawy</h2><div class='muted'>Kilka dat z jednego dokumentu może tworzyć kilka osobnych zdarzeń.</div></div><a class='btn' href='/case/{cid}/history'>Historia procesu i zmian</a></div>{add_forms}<div class='card'><div class='timeline-clean'>{''.join(timeline_parts) or '<div class="empty">Brak historii.</div>'}</div></div></section>"
+
+        elif tab=='documents':
+            rows=[]
+            for d in docs:
+                parent=' <span class="attachment-label">załącznik</span>' if row_get(d,'parent_document_id',None) else ''
+                state=f"<span class='doc-status {'sign' if d['doc_status']=='Do podpisu' else ''}'>{esc(d['doc_status'])}</span>"
+                rows.append(f"<tr><td>{fmt_date(d['doc_date'])}<div class='small muted'>wpływ {fmt_date(d['received_date'])} · doręczenie {fmt_date(d['delivered_date'])}</div></td><td><a class='case-link' href='/document/{d['id']}/open'>{esc(d['title'])}</a>{parent}<div class='small muted'>{esc(d['doc_type'])} · {esc(d['sender'])}</div></td><td>{state}</td><td><a class='btn small' href='/document/{d['id']}/edit'>Edytuj</a></td></tr>")
+            add='' if readonly else f"""<details class='card smart-add'><summary>+ Dodaj dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid'><input type='hidden' name='return_to' value='/case/{cid}?tab=documents'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{''.join(f'<option>{esc(x)}</option>' for x in DOC_TYPES)}</select></div><div class='full'><label>Tytuł</label><input name='title' required></div><div><label>Nadawca</label><input name='sender'></div><div><label>Status</label><select name='doc_status'>{''.join(f'<option>{esc(x)}</option>' for x in DOC_STATUSES)}</select></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><label>Plik</label><input type='file' name='file'></div><div class='full'><label>Załączniki</label><input type='file' name='attachments[]' multiple></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"""
+            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Dokumenty</h2><div class='muted'>Dokumenty i załączniki wyłącznie tej sprawy.</div></div><a class='btn' href='/documents?case_id={cid}'>Widok globalny</a></div>{add}<div class='card table-scroll'><table><tr><th>Daty</th><th>Dokument</th><th>Status</th><th></th></tr>{''.join(rows) or '<tr><td colspan=4>Brak dokumentów.</td></tr>'}</table></div></section>"
+
+        elif tab=='tasks':
+            task_rows=[]
+            for t in tasks:
+                done=t['status']=='done'; assignee=esc(t['assigned_name']) if t['assigned_name'] else '—'
+                task_rows.append(f"<div class='workspace-task {'done' if done else ''}'><form method='post' action='/task/{t['id']}/toggle'><input type='hidden' name='case_id' value='{cid}'><input type='hidden' name='return_to' value='/case/{cid}?tab=tasks'><button class='task-check'>{'↩' if done else '✓'}</button></form><div><span class='mini-badge'>{esc(row_get(t,'task_type','Zadanie'))}</span> <b>{esc(t['title'])}</b><small>{fmt_date(t['due_date'])} · {assignee}{(' · '+esc(t['depends_on'])) if t['depends_on'] else ''}</small></div><a class='btn small' href='/task/{t['id']}/edit?return_to=%2Fcase%2F{cid}%3Ftab%3Dtasks'>Edytuj</a></div>")
+            user_opts='<option value="">— bez przypisania —</option>'+''.join(f"<option value='{x['id']}'>{esc(user_display_name(x))}</option>" for x in users)
+            add='' if readonly else f"""<details class='card smart-add'><summary>+ Dodaj zadanie</summary><form method='post' action='/case/{cid}/task' class='form-grid'><input type='hidden' name='return_to' value='/case/{cid}?tab=tasks'><div><label>Rodzaj</label><select name='task_type'>{''.join(f'<option>{x}</option>' for x in ['Zadanie','Monit','Termin procesowy','Płatność'])}</select></div><div><label>Termin</label><input type='date' name='due_date'></div><div class='full'><label>Co trzeba zrobić?</label><input name='title' required></div><div><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div><div class='full'><label>Zależność</label><input name='depends_on'></div><div class='full'><label>Notatka</label><textarea name='notes'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details>"""
+            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Zadania</h2><div class='muted'>Otwarte i wykonane czynności tej sprawy.</div></div></div>{add}<div class='card workspace-task-list'>{''.join(task_rows) or '<div class="empty">Brak zadań.</div>'}</div></section>"
+
+        elif tab=='deadlines':
+            deadline_rows=[]
+            seen=set()
+            for d,k,t in next_dates:
+                key=(d,t)
+                if key in seen: continue
+                seen.add(key); deadline_rows.append(f"<tr><td><b>{fmt_date(d)}</b></td><td>{esc(k)}</td><td>{esc(t)}</td></tr>")
+            suggestions_html=''.join(f"<div class='deadline-suggestion'><b>{esc(x['suggested_title'])}</b><div class='small'>{esc(x['source_text'])}</div><form method='post' action='/deadline-suggestion/{x['id']}/accept'><input type='hidden' name='return_to' value='/case/{cid}?tab=deadlines'><button class='btn primary small'>Zatwierdź</button></form></div>" for x in suggestions) or '<div class="empty">Brak sugestii.</div>'
+            doc_scan=''.join(f"<form method='post' action='/document/{d['id']}/suggest-deadlines' class='doc-scan-row'><input type='hidden' name='return_to' value='/case/{cid}?tab=deadlines'><span><b>{esc(d['title'])}</b></span><button class='btn small'>Sprawdź treść</button></form>" for d in docs if not row_get(d,'parent_document_id',None))
+            manual='' if readonly else f"""<details class='card smart-add'><summary>+ Wylicz termin procesowy</summary><form method='post' action='/deadline/create' class='form-grid'><input type='hidden' name='case_id' value='{cid}'><input type='hidden' name='return_to' value='/case/{cid}?tab=deadlines'><div class='full'><label>Czynność</label><input name='title' required></div><div><label>Data początkowa</label><input type='date' name='base_date' required></div><div><label>Liczba dni</label><input type='number' name='days' min='0' value='7' required></div><div><label>Sposób liczenia</label><select name='rule'><option value='calendar'>Kalendarzowe / procesowe</option><option value='business'>Robocze</option></select></div><div><label>Priorytet</label><select name='priority'><option value='high'>Wysoki</option><option value='normal'>Normalny</option></select></div><div class='full'><label>Podstawa / źródło</label><input name='source'></div><div class='full'><button class='btn primary'>Wylicz i dodaj</button></div></form></details>"""
+            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Terminy</h2><div class='muted'>Terminy są zawsze zatwierdzane przez użytkownika.</div></div><a class='btn' href='/calendar?case_id={cid}'>Kalendarz sprawy</a></div>{manual}<div class='grid'><div class='card span7 table-scroll'><table><tr><th>Data</th><th>Rodzaj</th><th>Czynność</th></tr>{''.join(deadline_rows) or '<tr><td colspan=3>Brak terminów.</td></tr>'}</table></div><div class='card span5'><h2>Sugestie z dokumentów</h2>{suggestions_html}<details><summary>Sprawdź dokumenty</summary>{doc_scan or '<div class="empty">Brak dokumentów.</div>'}</details></div></div></section>"
+
+        elif tab=='evidence':
+            by_assertion={x['id']:[] for x in assertions}
+            for e in evidence: by_assertion.setdefault(e['assertion_id'],[]).append(e)
+            cards=[]
+            for a in assertions:
+                ev=[]
+                for e in by_assertion.get(a['id'],[]):
+                    link=f"<a href='/document/{e['document_id']}/open'>{esc(e['document_title'])}</a>" if e['document_id'] else esc(e['source_reference'])
+                    delete='' if readonly else f"<form method='post' action='/evidence/{e['id']}/delete' onsubmit=\"return confirm('Archiwizować ten dowód?');\"><button class='btn small danger'>Archiwizuj</button></form>"
+                    ev.append(f"<div class='evidence-row'><span class='evidence-status status-{esc(e['status']).replace(' ','-')}'>{esc(e['status'])}</span><div><b>{esc(e['title'])}</b><small>{esc(e['evidence_type'])}{(' · '+link) if link else ''}</small></div>{delete}</div>")
+                doc_opts='<option value="">— bez dokumentu —</option>'+''.join(f"<option value='{d['id']}'>{esc(d['title'])}</option>" for d in docs)
+                add_e='' if readonly else f"""<details class='smart-add'><summary>+ Dodaj dowód</summary><form method='post' action='/assertion/{a['id']}/evidence' class='form-grid'><div><label>Rodzaj</label><select name='evidence_type'><option>Dokument</option><option>Zeznania świadka</option><option>Opinia biegłego</option><option>Przesłuchanie strony</option><option>Inny</option></select></div><div><label>Status</label><select name='status'><option>do przeprowadzenia</option><option>przeprowadzony</option><option>kwestionowany</option><option>pominięty</option></select></div><div class='full'><label>Nazwa dowodu</label><input name='title' required></div><div class='full'><label>Dokument w programie</label><select name='document_id'>{doc_opts}</select></div><div><label>Inne źródło</label><input name='source_reference'></div><div><label>Notatka</label><input name='notes'></div><div class='full'><button class='btn primary'>Dodaj dowód</button></div></form></details>"""
+                archive='' if readonly else f"<form method='post' action='/assertion/{a['id']}/delete' onsubmit=\"return confirm('Archiwizować twierdzenie wraz z mapą dowodów?');\"><button class='btn small danger'>Archiwizuj twierdzenie</button></form>"
+                cards.append(f"<article class='assertion-card'><div class='assertion-head'><div><span class='mini-badge'>{esc(a['side'])}</span><span class='evidence-status'>{esc(a['status'])}</span><h3>{esc(a['statement'])}</h3><small>{esc(a['legal_significance'])}</small></div>{archive}</div><div class='evidence-list'>{''.join(ev) or '<div class="empty">Brak przypisanych dowodów.</div>'}</div>{add_e}</article>")
+            add_a='' if readonly else f"""<details class='card smart-add'><summary>+ Dodaj twierdzenie</summary><form method='post' action='/case/{cid}/assertion' class='form-grid'><div><label>Strona</label><select name='side'><option value='nasze'>Nasze</option><option value='przeciwnika'>Przeciwnika</option><option value='bezsporne'>Bezsporne</option></select></div><div><label>Status</label><select name='status'><option>do udowodnienia</option><option>udowodnione</option><option>sporne</option><option>brak dowodu</option><option>dowód przeciwnika</option></select></div><div class='full'><label>Twierdzenie / fakt</label><textarea name='statement' required></textarea></div><div class='full'><label>Znaczenie prawne</label><input name='legal_significance'></div><div class='full'><button class='btn primary'>Dodaj twierdzenie</button></div></form></details>"""
+            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Mapa twierdzeń i dowodów</h2><div class='muted'>Od faktu do dowodu — od razu widać luki.</div></div></div>{add_a}<div class='assertion-grid'>{''.join(cards) or '<div class="empty">Nie dodano jeszcze twierdzeń.</div>'}</div></section>"
+
+        elif tab=='strategy':
+            def sv(name): return esc(strategy[name] if strategy else '')
+            form=f"""<form method='post' action='/case/{cid}/strategy' class='strategy-form' data-autosave='1'><div class='strategy-grid'>
+              <div class='card'><label>Cel główny</label><textarea name='main_goal'>{sv('main_goal')}</textarea></div><div class='card'><label>Wariant minimum</label><textarea name='minimum_variant'>{sv('minimum_variant')}</textarea></div>
+              <div class='card'><label>Stanowisko przeciwnika</label><textarea name='opponent_position'>{sv('opponent_position')}</textarea></div><div class='card'><label>Nasze argumenty</label><textarea name='our_arguments'>{sv('our_arguments')}</textarea></div>
+              <div class='card'><label>Argumenty przeciwnika</label><textarea name='opponent_arguments'>{sv('opponent_arguments')}</textarea></div><div class='card'><label>Nasza odpowiedź</label><textarea name='response_arguments'>{sv('response_arguments')}</textarea></div>
+              <div class='card risk-card'><label>Ryzyka</label><textarea name='risks'>{sv('risks')}</textarea></div><div class='card'><label>Plan na rozprawę</label><textarea name='hearing_plan'>{sv('hearing_plan')}</textarea></div>
+              <div class='card'><label>Wnioski do zgłoszenia</label><textarea name='motions_to_make'>{sv('motions_to_make')}</textarea></div><div class='card'><label>Pytania do świadków / stron</label><textarea name='witness_questions'>{sv('witness_questions')}</textarea></div>
+              <div class='card'><label>Stanowisko ugodowe</label><textarea name='settlement_position'>{sv('settlement_position')}</textarea></div><div class='card'><label>Czego pilnować</label><textarea name='watchouts'>{sv('watchouts')}</textarea></div>
+              <div class='full'><button class='btn primary'{ro_disabled}>Zapisz strategię</button> <a class='btn' href='/case/{cid}?tab=hearing'>Wygeneruj kartę rozprawy</a></div></div></form>"""
+            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Strategia sprawy</h2><div class='muted'>Plan pracy, nie zwykła notatka.</div></div></div>{form}</section>"
+
+        elif tab=='hearing':
+            strat=dict(strategy) if strategy else {}
+            hearing_date=''
+            hearing_title=''
+            for p in sorted(process_events,key=lambda x:x['event_date'] or '9999-99-99'):
+                low=(str(p['event_type'])+' '+str(p['title'])).lower()
+                if p['event_date'] and p['event_date']>=date.today().isoformat() and ('rozpraw' in low or 'posiedzen' in low or 'mediac' in low):
+                    hearing_date=p['event_date']; hearing_title=p['title']; break
+            claim_total=sum(int(x['principal_cents'] or 0)+int(x['interest_cents'] or 0)+int(x['costs_cents'] or 0) for x in claims)
+            key_evidence=''.join(f"<li><b>{esc(a['statement'])}</b> — {esc(a['status'])}</li>" for a in assertions[:8]) or '<li>Brak mapy dowodów.</li>'
+            law=' · '.join(f"{x['code']}{(' art. '+str(x['article_key'])) if x['article_key'] else ''}" for x in law_links) or '—'
+            def block(title,name,fallback='—'):
+                return f"<section class='hearing-block'><h3>{title}</h3><div class='workspace-pre'>{esc(strat.get(name) or fallback)}</div></section>"
+            content=f"""<section class='case-tab-content hearing-sheet'><div class='hearing-toolbar'><div><h2>Karta rozprawy</h2><div class='muted'>Jedna strona robocza generowana z danych sprawy.</div></div><button class='btn primary' type='button' onclick='window.print()'>Drukuj / PDF</button></div>
+              <div class='hearing-title'><b>{esc(primary)}</b><h1>{esc(c['title'])}</h1><p>{esc(party_line)}</p><p><b>Termin:</b> {fmt_date(hearing_date)} {esc(hearing_title)}</p></div>
+              <div class='hearing-columns'>{block('Cel główny','main_goal')}{block('Wariant minimum','minimum_variant')}{block('Plan na rozprawę','hearing_plan')}{block('Stanowisko ugodowe','settlement_position')}</div>
+              <section class='hearing-block'><h3>Żądania / roszczenia</h3><p><b>Łącznie:</b> {fmt_money(claim_total)}</p><ul>{''.join(f'<li>{esc(x["title"])} — {fmt_money(x["principal_cents"],x["currency"])}</li>' for x in claims) or '<li>Brak rejestru roszczeń.</li>'}</ul></section>
+              <section class='hearing-block'><h3>Kluczowe twierdzenia i dowody</h3><ul>{key_evidence}</ul></section>
+              <div class='hearing-columns'>{block('Wnioski do zgłoszenia','motions_to_make')}{block('Pytania do świadków / stron','witness_questions')}{block('Ryzyka','risks')}{block('Czego pilnować','watchouts')}</div>
+              <section class='hearing-block'><h3>Podstawy prawne</h3><p>{esc(law)}</p></section></section>"""
+
+        elif tab=='finances':
+            totals={k:sum(int(x[k] or 0) for x in claims) for k in ('principal_cents','interest_cents','costs_cents','paid_cents','awarded_cents','settlement_cents')}
+            rows=[]
+            for x in claims:
+                rows.append(f"<details class='claim-row'><summary><span><b>{esc(x['title'])}</b><small>{esc(x['claim_type'])} · {esc(x['status'])}</small></span><strong>{fmt_money(x['principal_cents'],x['currency'])}</strong></summary><form method='post' action='/claim/{x['id']}/update' class='form-grid'><div><label>Tytuł</label><input name='title' value='{esc(x['title'])}'></div><div><label>Rodzaj</label><input name='claim_type' value='{esc(x['claim_type'])}'></div><div><label>Kwota główna</label><input name='principal' value='{money_input(x['principal_cents'])}'></div><div><label>Odsetki</label><input name='interest' value='{money_input(x['interest_cents'])}'></div><div><label>Koszty</label><input name='costs' value='{money_input(x['costs_cents'])}'></div><div><label>Spełniono</label><input name='paid' value='{money_input(x['paid_cents'])}'></div><div><label>Zasądzono</label><input name='awarded' value='{money_input(x['awarded_cents'])}'></div><div><label>Propozycja ugodowa</label><input name='settlement' value='{money_input(x['settlement_cents'])}'></div><div><label>Waluta</label><input name='currency' value='{esc(x['currency'])}'></div><div><label>Status</label><select name='status'>{''.join(f'<option {"selected" if x["status"]==s else ""}>{s}</option>' for s in ['dochodzone','częściowo spełnione','spełnione','zasądzone','oddalone'])}</select></div><div class='full'><label>Notatka</label><textarea name='notes'>{esc(x['notes'])}</textarea></div><div class='full'><button class='btn primary'>Zapisz</button> <button class='btn danger' formaction='/claim/{x['id']}/delete' onclick=\"return confirm('Archiwizować tę pozycję?');\">Archiwizuj</button></div></form></details>")
+            add='' if readonly else f"""<details class='card smart-add'><summary>+ Dodaj roszczenie / propozycję</summary><form method='post' action='/case/{cid}/claim' class='form-grid'><div><label>Tytuł</label><input name='title' required></div><div><label>Rodzaj</label><select name='claim_type'><option>Roszczenie główne</option><option>Odsetki</option><option>Koszty</option><option>Propozycja ugodowa</option><option>Częściowe spełnienie</option></select></div><div><label>Kwota główna</label><input name='principal' inputmode='decimal'></div><div><label>Odsetki</label><input name='interest' inputmode='decimal'></div><div><label>Koszty</label><input name='costs' inputmode='decimal'></div><div><label>Spełniono</label><input name='paid' inputmode='decimal'></div><div><label>Zasądzono</label><input name='awarded' inputmode='decimal'></div><div><label>Propozycja ugodowa</label><input name='settlement' inputmode='decimal'></div><div><label>Waluta</label><input name='currency' value='PLN'></div><div><label>Status</label><select name='status'><option>dochodzone</option><option>częściowo spełnione</option><option>spełnione</option><option>zasądzone</option><option>oddalone</option></select></div><div class='full'><label>Notatka</label><textarea name='notes'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details>"""
+            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Roszczenia i finanse sprawy</h2><div class='muted'>Kwoty główne, odsetki, koszty, spełnienia, wyroki i ugody.</div></div></div><div class='workspace-kpi-grid money-grid'><div class='workspace-kpi'><span>Żądanie główne</span><b>{fmt_money(totals['principal_cents'])}</b></div><div class='workspace-kpi'><span>Odsetki i koszty</span><b>{fmt_money(totals['interest_cents']+totals['costs_cents'])}</b></div><div class='workspace-kpi'><span>Spełniono / zasądzono</span><b>{fmt_money(totals['paid_cents']+totals['awarded_cents'])}</b></div><div class='workspace-kpi'><span>Propozycje ugodowe</span><b>{fmt_money(totals['settlement_cents'])}</b></div></div>{add}<div class='claim-list'>{''.join(rows) or '<div class="empty">Brak pozycji finansowych.</div>'}</div></section>"
+
+        elif tab=='people':
+            rows=[]
+            for x in entities:
+                ids=' · '.join(v for v in (('PESEL '+x['pesel']) if x['pesel'] else '',('NIP '+x['nip']) if x['nip'] else '',('KRS '+x['krs']) if x['krs'] else '') if v)
+                rows.append(f"<tr><td><a class='case-link' href='/entity/{x['entity_id']}'>{esc(x['display_name'])}</a><div class='small muted'>{esc(ids)}</div></td><td>{esc(x['role'])}</td><td>{esc(x['notes'])}</td></tr>")
+            for x in parties:
+                rows.append(f"<tr><td><b>{esc(x['name'])}</b><div class='small muted'>wpis tylko w tej sprawie</div></td><td>{esc(x['role'])}</td><td>{esc(x['notes'])}</td></tr>")
+            entity_opts='<option value="">— wybierz z kartoteki —</option>'+''.join(f"<option value='{x['id']}'>{esc(x['display_name'])}</option>" for x in all_entities)
+            add='' if readonly else f"""<div class='grid workspace-add-grid'><details class='card span6 smart-add'><summary>+ Przypisz z kartoteki</summary><form method='post' action='/case/{cid}/entity' class='form-grid'><div class='full'><label>Osoba / podmiot</label><select name='entity_id' required>{entity_opts}</select></div><div><label>Rola</label><input name='role' value='Uczestnik'></div><div><label>Notatka</label><input name='notes'></div><div class='full'><button class='btn primary'>Przypisz</button></div></form></details><details class='card span6 smart-add'><summary>+ Szybki wpis w sprawie</summary><form method='post' action='/case/{cid}/party' class='form-grid'><div><label>Imię / nazwa</label><input name='name' required></div><div><label>Rola</label><input name='role'></div><div class='full'><label>Notatka</label><input name='notes'></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details></div>"""
+            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Osoby i podmioty</h2><div class='muted'>Wspólna kartoteka umożliwia kontrolę konfliktu interesów.</div></div><a class='btn' href='/entities'>Kartoteka</a></div>{add}<div class='card table-scroll'><table><tr><th>Osoba / podmiot</th><th>Rola</th><th>Notatka</th></tr>{''.join(rows) or '<tr><td colspan=3>Brak osób.</td></tr>'}</table></div></section>"
+
+        else:  # notes
+            note_rows=''.join(f"<article class='note-card'><div class='workspace-pre'>{esc(x['note'])}</div><small>{esc(x['created_at'])} · {esc(x['author'])}</small></article>" for x in notes) or '<div class="empty">Brak notatek.</div>'
+            add='' if readonly else f"""<div class='card'><form method='post' action='/case/{cid}/note'><label>Nowa notatka</label><textarea name='note' required></textarea><button class='btn primary'>Dodaj notatkę</button></form></div>"""
+            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Notatki</h2><div class='muted'>Chronologiczne notatki robocze sprawy.</div></div></div>{add}<div class='note-grid'>{note_rows}</div></section>"
+
+        self.send_html(layout(primary,readonly_html+header+content,'cases'))
 
 
     def case_view_simple(self, cid, qs=None):
@@ -5051,6 +5544,7 @@ class Handler(BaseHTTPRequestHandler):
             if d and case_read_only(con,d['case_id']):
                 return self.send_html(layout('Sprawa tylko do odczytu',f"<div class='readonly-banner'>Sprawa jest zakończona i zablokowana. <a class='btn' href='/case/{d['case_id']}'>Wróć</a></div>",'documents'),403)
             tasks=con.execute("SELECT id,title,due_date,status FROM tasks WHERE case_id=? ORDER BY status,CASE WHEN due_date='' THEN 1 ELSE 0 END,due_date,id",(d['case_id'],)).fetchall() if d else []
+            versions=con.execute("SELECT * FROM document_versions WHERE document_id=? ORDER BY version_no DESC",(did,)).fetchall() if d else []
         if not d: return self.send_error(404)
         opts=''.join(f"<option value='{esc(x)}' {'selected' if d['doc_type']==x else ''}>{esc(x)}</option>" for x in DOC_TYPES)
         status_opts=''.join(f"<option value='{esc(x)}' {'selected' if d['doc_status']==x else ''}>{esc(x)}</option>" for x in DOC_STATUSES)
@@ -5060,7 +5554,9 @@ class Handler(BaseHTTPRequestHandler):
             task_opts.append(f"<option value='{t['id']}' {'selected' if row_get(d,'linked_task_id',None)==t['id'] else ''}>{esc(label)}</option>")
         current=f"Aktualny plik: <b>{esc(d['original_name'])}</b>" if d['stored_name'] else "Brak podpiętego pliku."
         idx=f"Zindeksowano: {esc(d['indexed_at'])}" if d['indexed_at'] else 'Treść nie była jeszcze indeksowana.'
-        body=f'''<div class="topbar"><div><h1>Edytuj dokument</h1><div class="sub">{esc(d['signature'] or d['case_title'])}</div></div></div><div class="card"><form method="post" enctype="multipart/form-data" action="/document/{did}/update" class="form-grid" data-autosave="1"><input type="hidden" name="case_id" value="{d['case_id']}"><div><label>Data dokumentu</label><input type="date" name="doc_date" value="{esc(d['doc_date'])}"></div><div><label>Data wpływu</label><input type="date" name="received_date" value="{esc(d['received_date'])}"></div><div><label>Data doręczenia</label><input type="date" name="delivered_date" value="{esc(row_get(d,'delivered_date',''))}"></div><div><label>Rodzaj</label><select name="doc_type">{opts}</select></div><div><label>Status dokumentu</label><select name="doc_status">{status_opts}</select></div><div><label>Nadawca</label><input name="sender" value="{esc(row_get(d,'sender',''))}"></div><div><label>Autor dokumentu</label><input name="document_author" value="{esc(row_get(d,'document_author',''))}"></div><div><label>Tagi</label><input name="tags" value="{esc(row_get(d,'tags',''))}" placeholder="np. dowód, odpowiedź, pilne"></div><div class="full"><label>Powiązane zadanie / termin</label><select name="linked_task_id">{''.join(task_opts)}</select></div><div class="full"><label>Tytuł</label><input name="title" required value="{esc(d['title'])}"></div><div class="full"><label>Opis</label><textarea name="description">{esc(d['description'])}</textarea></div><div class="full"><label>Podmień / dodaj plik</label><input type="file" name="file"><div class="small muted">{current} Wybranie nowego pliku zastąpi dotychczasowy. {idx}</div><label style="font-weight:500"><input style="width:auto" type="checkbox" name="allow_duplicate" value="1"> Zezwól na identyczny plik, jeśli świadomie chcę duplikat</label></div><div class="full"><button class="btn primary">Zapisz zmiany</button> <a class="btn" href="/case/{d['case_id']}">Anuluj</a></div></form></div>'''
+        version_rows=''.join(f"<tr><td>v{x['version_no']}</td><td>{esc(str(x['created_at'])[:16])}</td><td>{esc(x['original_name'])}</td><td>{esc(x['created_by'])}</td><td><form method='post' action='/document/{did}/version/{x['id']}/restore' onsubmit=\"return confirm('Przywrócić tę wersję pliku? Bieżący plik zostanie wcześniej zachowany jako kolejna wersja.');\"><button class='btn small'>Przywróć</button></form></td></tr>" for x in versions)
+        versions_card=f"<div class='card'><h2>Historia wersji pliku</h2><p class='small muted'>Poprzedni plik jest automatycznie zachowywany przed każdą podmianą.</p><table><tr><th>Wersja</th><th>Data</th><th>Plik</th><th>Autor</th><th></th></tr>{version_rows or '<tr><td colspan=5>Brak starszych wersji.</td></tr>'}</table></div>"
+        body=f'''<div class="topbar"><div><h1>Edytuj dokument</h1><div class="sub">{esc(d['signature'] or d['case_title'])}</div></div></div><div class="card"><form method="post" enctype="multipart/form-data" action="/document/{did}/update" class="form-grid" data-autosave="1"><input type="hidden" name="case_id" value="{d['case_id']}"><input type="hidden" name="return_to" value="/case/{d['case_id']}?tab=documents"><div><label>Data dokumentu</label><input type="date" name="doc_date" value="{esc(d['doc_date'])}"></div><div><label>Data wpływu</label><input type="date" name="received_date" value="{esc(d['received_date'])}"></div><div><label>Data doręczenia</label><input type="date" name="delivered_date" value="{esc(row_get(d,'delivered_date',''))}"></div><div><label>Rodzaj</label><select name="doc_type">{opts}</select></div><div><label>Status dokumentu</label><select name="doc_status">{status_opts}</select></div><div><label>Nadawca</label><input name="sender" value="{esc(row_get(d,'sender',''))}"></div><div><label>Autor dokumentu</label><input name="document_author" value="{esc(row_get(d,'document_author',''))}"></div><div><label>Tagi</label><input name="tags" value="{esc(row_get(d,'tags',''))}" placeholder="np. dowód, odpowiedź, pilne"></div><div class="full"><label>Powiązane zadanie / termin</label><select name="linked_task_id">{''.join(task_opts)}</select></div><div class="full"><label>Tytuł</label><input name="title" required value="{esc(d['title'])}"></div><div class="full"><label>Opis</label><textarea name="description">{esc(d['description'])}</textarea></div><div class="full"><label>Podmień / dodaj plik</label><input type="file" name="file"><div class="small muted">{current} Wybranie nowego pliku automatycznie zachowa poprzednią wersję. {idx}</div><label style="font-weight:500"><input style="width:auto" type="checkbox" name="allow_duplicate" value="1"> Zezwól na identyczny plik, jeśli świadomie chcę duplikat</label></div><div class="full"><button class="btn primary">Zapisz zmiany</button> <a class="btn" href="/case/{d['case_id']}?tab=documents">Anuluj</a></div></form></div><br>{versions_card}'''
         self.send_html(layout("Edycja dokumentu",body,"documents"))
 
     def document_update(self,did,f,files):
@@ -5103,6 +5599,9 @@ class Handler(BaseHTTPRequestHandler):
             con.execute("UPDATE documents SET doc_date=?,received_date=?,delivered_date=?,doc_type=?,doc_status=?,title=?,description=?,sender=?,document_author=?,tags=?,linked_task_id=?,stored_name=?,original_name=?,updated_by=? WHERE id=?",
                         (new_values['doc_date'],new_values['received_date'],new_values['delivered_date'],new_values['doc_type'],new_values['doc_status'],new_values['title'],new_values['description'],new_values['sender'],new_values['document_author'],new_values['tags'],linked,stored,original,a,did)); cid=d['case_id']
             if newdata is not None:
+                # Zachowujemy poprzedni plik zanim bieżący rekord zacznie wskazywać
+                # nowy. Historia wersji jest częścią akt i trafia do snapshotów.
+                save_document_file_version(con,did,a)
                 con.execute("UPDATE documents SET file_hash=?,extracted_text='',indexed_at='',ocr_status='kolejka' WHERE id=?",(sha256_bytes(newdata),did))
                 if oldstored:
                     try: (FILES_DIR/f"sprawa_{cid}"/oldstored).unlink(missing_ok=True)
@@ -5117,6 +5616,26 @@ class Handler(BaseHTTPRequestHandler):
         if newdata is not None: enqueue_document_index(did)
         target=(f.get('return_to','') or '').strip()
         self.redirect(target if target.startswith('/') else f"/case/{cid}")
+
+    def document_version_restore(self,did,vid,f):
+        author=self.current_author(f)
+        with db() as con:
+            d=con.execute('SELECT * FROM documents WHERE id=?',(did,)).fetchone()
+            v=con.execute('SELECT * FROM document_versions WHERE id=? AND document_id=?',(vid,did)).fetchone()
+            if not d or not v: return self.send_error(404)
+            src=FILES_DIR/f"sprawa_{d['case_id']}"/v['stored_name']
+            if not src.is_file(): return self.send_error(404,'Nie znaleziono pliku tej wersji.')
+            save_document_file_version(con,did,author)
+            restored_name=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{safe_filename(v['original_name'] or src.name)}"
+            dst=FILES_DIR/f"sprawa_{d['case_id']}"/restored_name
+            shutil.copy2(src,dst)
+            con.execute("""UPDATE documents SET stored_name=?,original_name=?,file_hash=?,title=?,description=?,
+                           extracted_text='',indexed_at='',ocr_status='kolejka',updated_by=? WHERE id=?""",
+                        (restored_name,v['original_name'],v['file_hash'],v['title'],v['description'],author,did))
+            audit(con,d['case_id'],'document',did,'Przywrócono wersję pliku',f"Wersja v{v['version_no']}: {_change_value(v['original_name'])}",author)
+            cid=d['case_id']
+        enqueue_document_index(did)
+        self.redirect(f'/document/{did}/edit')
 
     def party_add(self,cid,f):
         a=self.current_author(f); name=f.get('name','').strip()
@@ -5741,7 +6260,7 @@ class Handler(BaseHTTPRequestHandler):
         state=(f"<span class='backup-ok'>✓ quick_check: {esc(quick_reason)}</span>" if quick_ok else f"<span class='conflict-warning'>⚠ quick_check: {esc(quick_reason)}</span>")
         body=f"""<div class='topbar'><div><h1>Recovery i integralność</h1><div class='sub'>Kontrola bazy, ręczne kopie i pełny przenośny snapshot danych.</div></div><a class='btn' href='/backups'>← Kopie bezpieczeństwa</a></div>{msg}
         <div class='grid'><div class='card span6'><h2>Stan bazy</h2><p>{state}</p><p>{last_html}</p><form method='post' action='/recovery/check'><button class='btn primary'>Uruchom pełny integrity_check</button></form><p class='small muted'>Pełny test jest dokładniejszy niż codzienny quick_check i może potrwać dłużej przy dużej bazie.</p></div>
-        <div class='card span6'><h2>Kopia ratunkowa</h2><p><b>Znalezione kopie:</b> {backups}</p><form method='post' action='/backup/manual' style='margin-bottom:8px'><button class='btn'>Wykonaj backup teraz</button></form><a class='btn primary' href='/backup/snapshot'>Pobierz pełny snapshot</a><p class='small muted'>Snapshot zawiera bazę SQLite, dokumenty i projekty pism. Nie zawiera lokalnych sesji, klucza DPAPI ani tokenu Cloud.</p><hr><form method='post' enctype='multipart/form-data' action='/recovery/snapshot-import' onsubmit="return confirm('Przygotować przywrócenie pełnego snapshotu? Bieżący stan zostanie zabezpieczony, a przełączenie nastąpi po restarcie.');"><label>Przywróć pełny snapshot</label><input type='file' name='snapshot' accept='.zip' required><button class='btn'>Zweryfikuj i przygotuj restore</button></form></div></div>
+        <div class='card span6'><h2>Kopia ratunkowa</h2><p><b>Znalezione kopie:</b> {backups}</p><form method='post' action='/backup/manual' style='margin-bottom:8px'><button class='btn'>Wykonaj backup teraz</button></form><form method='post' action='/recovery/test-restore' style='display:inline'><button class='btn'>Przetestuj odtworzenie</button></form> <a class='btn primary' href='/backup/snapshot'>Pobierz pełny snapshot</a><p class='small muted'>Test tworzy pełny snapshot, odtwarza jego bazę w katalogu tymczasowym i sprawdza obecność wszystkich plików dokumentów. Nie zmienia bieżących danych.</p><hr><form method='post' enctype='multipart/form-data' action='/recovery/snapshot-import' onsubmit="return confirm('Przygotować przywrócenie pełnego snapshotu? Bieżący stan zostanie zabezpieczony, a przełączenie nastąpi po restarcie.');"><label>Przywróć pełny snapshot</label><input type='file' name='snapshot' accept='.zip' required><button class='btn'>Zweryfikuj i przygotuj restore</button></form></div></div>
         <br><div class='card'><h2>Tryb ratunkowy</h2><p>Przy starcie RK KANCELARIA sprawdza bazę i zachowuje kopie przed operacjami przywracania/importu. Uszkodzonego pliku nie nadpisujemy „w ciemno”. Przywrócenie backupu jest planowane i wykonywane dopiero po restarcie programu.</p><p><b>Katalog Recovery:</b><br><code>{esc(str(RECOVERY_DIR))}</code></p></div>"""
         self.send_html(layout('Recovery',body,'recovery'))
 
@@ -5752,6 +6271,36 @@ class Handler(BaseHTTPRequestHandler):
             con.execute("INSERT INTO system_checks(check_type,result,details,created_by) VALUES('integrity',?,?,?)",(result,details,self.current_author(f)))
             immutable_audit(con,None,'system_check',None,'Pełna kontrola integralności SQLite',f'{result}: {details}',self.current_author(f))
         return self.recovery_page(f'Pełna kontrola zakończona: {result} — {details}')
+
+    def recovery_test_restore(self,f):
+        if not self.require_admin(): return
+        author=self.current_author(f)
+        try:
+            raw,name=create_data_snapshot_zip()
+            with zipfile.ZipFile(io.BytesIO(raw),'r') as z, tempfile.TemporaryDirectory(prefix='rk_restore_test_') as td:
+                names=set(z.namelist())
+                db_copy=Path(td)/'sprawnik.sqlite3'
+                atomic_write_bytes(db_copy,z.read('sprawnik.sqlite3'))
+                ok,details=full_sqlite_integrity(db_copy)
+                if not ok: raise RuntimeError(details)
+                test_con=sqlite3.connect(db_copy); test_con.row_factory=sqlite3.Row
+                try:
+                    counts={t:int(test_con.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0]) for t in ('cases','documents','tasks','case_assertions','case_claims')}
+                    missing=[]
+                    for d in test_con.execute("SELECT case_id,stored_name FROM documents WHERE stored_name<>''"):
+                        expected=f"dokumenty/sprawa_{d['case_id']}/{d['stored_name']}"
+                        if expected not in names: missing.append(expected)
+                finally:
+                    test_con.close()
+                if missing: raise RuntimeError(f'brakuje {len(missing)} plików dokumentów; pierwszy: {missing[0]}')
+                details=' · '.join(f'{k}: {v}' for k,v in counts.items())+f' · pliki dokumentów: komplet · {name}'
+                result='OK'
+        except Exception as exc:
+            result='BŁĄD'; details=str(exc)
+        with db() as con:
+            con.execute("INSERT INTO system_checks(check_type,result,details,created_by) VALUES('restore_test',?,?,?)",(result,details,author))
+            immutable_audit(con,None,'system_check',None,'Test odtworzenia pełnego snapshotu',f'{result}: {details}',author)
+        return self.recovery_page(f'Test odtworzenia: {result} — {details}')
 
     def manual_backup_now(self,f):
         if not self.require_admin(): return
@@ -6486,6 +7035,7 @@ class Handler(BaseHTTPRequestHandler):
                     con.execute('INSERT INTO case_relations(source_case_id,target_case_id,relation_type,note,created_by,updated_by) VALUES(?,?,?,?,?,?)',
                                 (source,target,rel.get('relation_type','powiązana'),rel.get('note',''),a,a))
             # documents and physical files
+            doc_id_map={}
             for d in tables.get('documents',[]):
                 oldid=d.get('id'); original=safe_filename(d.get('original_name') or d.get('stored_name') or 'dokument'); filedata=b''
                 prefix=f'files/{oldid}/'
@@ -6494,9 +7044,48 @@ class Handler(BaseHTTPRequestHandler):
                 stored=''
                 if filedata:
                     folder=FILES_DIR/f'sprawa_{cid}'; folder.mkdir(parents=True,exist_ok=True); stored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"; atomic_write_bytes(folder/stored,filedata)
-                curd=con.execute("INSERT INTO documents(case_id,doc_date,received_date,doc_type,doc_status,title,description,stored_name,original_name,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(cid,d.get('doc_date',''),d.get('received_date',''),d.get('doc_type','Inne'),d.get('doc_status','Aktywny'),d.get('title','Dokument'),d.get('description',''),stored,original if filedata else '',a,a))
+                parent_old=int(d.get('parent_document_id') or 0)
+                curd=con.execute("""INSERT INTO documents(case_id,doc_date,received_date,delivered_date,doc_type,doc_status,title,description,
+                                  sender,document_author,tags,linked_task_id,stored_name,original_name,parent_document_id,attachment_order,
+                                  created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                 (cid,d.get('doc_date',''),d.get('received_date',''),d.get('delivered_date',''),d.get('doc_type','Inne'),
+                                  d.get('doc_status','Aktywny'),d.get('title','Dokument'),d.get('description',''),d.get('sender',''),
+                                  d.get('document_author',''),d.get('tags',''),None,stored,original if filedata else '',
+                                  doc_id_map.get(parent_old),int(d.get('attachment_order') or 0),a,a))
+                if oldid is not None: doc_id_map[int(oldid)]=curd.lastrowid
                 if filedata:
                     con.execute("UPDATE documents SET file_hash=?,ocr_status='kolejka' WHERE id=?",(sha256_bytes(filedata),curd.lastrowid)); imported_index_ids.append(curd.lastrowid)
+            # Warsztat sprawy 0.3.0-dev3. Wszystkie odwołania do lokalnych ID są mapowane.
+            if tables.get('strategy'):
+                s=tables['strategy'][0]; fields=('main_goal','minimum_variant','opponent_position','our_arguments','opponent_arguments','response_arguments','risks','hearing_plan','motions_to_make','witness_questions','settlement_position','watchouts')
+                con.execute(f"INSERT INTO case_strategy(case_id,{','.join(fields)},updated_by) VALUES(?,{','.join('?' for _ in fields)},?)",(cid,*[s.get(x,'') for x in fields],a))
+            assertion_id_map={}
+            for ar in tables.get('assertions',[]):
+                curar=con.execute("""INSERT INTO case_assertions(case_id,statement,side,status,legal_significance,notes,sort_order,is_archived,created_by,updated_by)
+                                    VALUES(?,?,?,?,?,?,?,?,?,?)""",(cid,ar.get('statement',''),ar.get('side','nasze'),ar.get('status','do udowodnienia'),ar.get('legal_significance',''),ar.get('notes',''),int(ar.get('sort_order') or 0),int(ar.get('is_archived') or 0),a,a))
+                if ar.get('id') is not None: assertion_id_map[int(ar['id'])]=curar.lastrowid
+            for ev in tables.get('evidence',[]):
+                aid=assertion_id_map.get(int(ev.get('assertion_id') or 0));
+                if not aid: continue
+                did=doc_id_map.get(int(ev.get('document_id') or 0))
+                con.execute("""INSERT INTO case_evidence(assertion_id,evidence_type,title,status,document_id,source_reference,notes,is_archived,created_by)
+                               VALUES(?,?,?,?,?,?,?,?,?)""",(aid,ev.get('evidence_type','Dokument'),ev.get('title','Dowód'),ev.get('status','do przeprowadzenia'),did,ev.get('source_reference',''),ev.get('notes',''),int(ev.get('is_archived') or 0),a))
+            ins_rows('case_claims',tables.get('claims',[]))
+            for de in tables.get('document_events',[]):
+                did=doc_id_map.get(int(de.get('document_id') or 0))
+                if not did: continue
+                con.execute("""INSERT INTO document_events(document_id,case_id,event_date,event_type,title,description,is_archived,created_by)
+                               VALUES(?,?,?,?,?,?,?,?)""",(did,cid,de.get('event_date',''),de.get('event_type','Dotyczy'),de.get('title','Zdarzenie'),de.get('description',''),int(de.get('is_archived') or 0),a))
+            for dv in tables.get('document_versions',[]):
+                olddid=int(dv.get('document_id') or 0); newdid=doc_id_map.get(olddid)
+                if not newdid: continue
+                oldvid=int(dv.get('id') or 0); original=safe_filename(dv.get('original_name') or 'wersja'); vstored=''
+                prefix=f'document_versions/{olddid}/{oldvid}/'; matches=[n for n in z.namelist() if n.startswith(prefix) and not n.endswith('/')]
+                if matches:
+                    filedata=z.read(matches[0]); vdir=FILES_DIR/f'sprawa_{cid}'/f'wersje_dokumentu_{newdid}'; vdir.mkdir(parents=True,exist_ok=True)
+                    vname=f"v{int(dv.get('version_no') or 1):03d}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"; atomic_write_bytes(vdir/vname,filedata); vstored=f'wersje_dokumentu_{newdid}/{vname}'
+                con.execute("""INSERT OR IGNORE INTO document_versions(document_id,version_no,stored_name,original_name,file_hash,title,description,created_by,created_at)
+                               VALUES(?,?,?,?,?,?,?,?,COALESCE(?,CURRENT_TIMESTAMP))""",(newdid,int(dv.get('version_no') or 1),vstored,original if vstored else '',dv.get('file_hash',''),dv.get('title',''),dv.get('description',''),a,dv.get('created_at')))
             # Projekty pism + historia ich wersji. Stare ID są mapowane na nowe ID w docelowej bazie.
             draft_id_map={}
             for w in tables.get('writing_projects',[]):

@@ -7,6 +7,8 @@ icon = base / 'assets' / 'rk_kancelaria.ico'
 
 datas = [
     (str(base / 'assets'), 'assets'),
+    (str(base / 'rk_app.css'), '.'),
+    (str(base / 'rk_app.js'), '.'),
     (str(base / 'README_TRUE_PORTABLE.txt'), '.'),
 ]
 

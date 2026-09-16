@@ -235,6 +235,115 @@ def ensure_smart_schema(con: sqlite3.Connection) -> None:
             UNIQUE(document_id,source_text,suggested_title)
         );
         CREATE INDEX IF NOT EXISTS idx_deadline_suggestions_case ON deadline_suggestions(case_id,status);
+
+        CREATE TABLE IF NOT EXISTS case_strategy (
+            case_id INTEGER PRIMARY KEY REFERENCES cases(id) ON DELETE CASCADE,
+            main_goal TEXT NOT NULL DEFAULT '',
+            minimum_variant TEXT NOT NULL DEFAULT '',
+            opponent_position TEXT NOT NULL DEFAULT '',
+            our_arguments TEXT NOT NULL DEFAULT '',
+            opponent_arguments TEXT NOT NULL DEFAULT '',
+            response_arguments TEXT NOT NULL DEFAULT '',
+            risks TEXT NOT NULL DEFAULT '',
+            hearing_plan TEXT NOT NULL DEFAULT '',
+            motions_to_make TEXT NOT NULL DEFAULT '',
+            witness_questions TEXT NOT NULL DEFAULT '',
+            settlement_position TEXT NOT NULL DEFAULT '',
+            watchouts TEXT NOT NULL DEFAULT '',
+            updated_by TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS case_assertions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+            statement TEXT NOT NULL,
+            side TEXT NOT NULL DEFAULT 'nasze',
+            status TEXT NOT NULL DEFAULT 'do udowodnienia',
+            legal_significance TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT '',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            is_archived INTEGER NOT NULL DEFAULT 0,
+            created_by TEXT NOT NULL DEFAULT '',
+            updated_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_case_assertions_case ON case_assertions(case_id,sort_order,id);
+
+        CREATE TABLE IF NOT EXISTS case_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            assertion_id INTEGER NOT NULL REFERENCES case_assertions(id) ON DELETE CASCADE,
+            evidence_type TEXT NOT NULL DEFAULT 'Dokument',
+            title TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'do przeprowadzenia',
+            document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+            source_reference TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT '',
+            is_archived INTEGER NOT NULL DEFAULT 0,
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_case_evidence_assertion ON case_evidence(assertion_id,id);
+
+        CREATE TABLE IF NOT EXISTS case_claims (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+            claim_type TEXT NOT NULL DEFAULT 'Roszczenie główne',
+            title TEXT NOT NULL,
+            principal_cents INTEGER NOT NULL DEFAULT 0,
+            interest_cents INTEGER NOT NULL DEFAULT 0,
+            costs_cents INTEGER NOT NULL DEFAULT 0,
+            paid_cents INTEGER NOT NULL DEFAULT 0,
+            awarded_cents INTEGER NOT NULL DEFAULT 0,
+            settlement_cents INTEGER NOT NULL DEFAULT 0,
+            currency TEXT NOT NULL DEFAULT 'PLN',
+            status TEXT NOT NULL DEFAULT 'dochodzone',
+            notes TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT '',
+            updated_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_case_claims_case ON case_claims(case_id,status,id);
+
+        CREATE TABLE IF NOT EXISTS document_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+            event_date TEXT NOT NULL DEFAULT '',
+            event_type TEXT NOT NULL DEFAULT 'Dotyczy',
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            is_archived INTEGER NOT NULL DEFAULT 0,
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_document_events_case ON document_events(case_id,event_date,id);
+        CREATE INDEX IF NOT EXISTS idx_document_events_document ON document_events(document_id,event_date,id);
+
+        CREATE TABLE IF NOT EXISTS user_case_view_preferences (
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+            last_tab TEXT NOT NULL DEFAULT 'dashboard',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(user_id,case_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS document_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            version_no INTEGER NOT NULL,
+            stored_name TEXT NOT NULL DEFAULT '',
+            original_name TEXT NOT NULL DEFAULT '',
+            file_hash TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(document_id,version_no)
+        );
+        CREATE INDEX IF NOT EXISTS idx_document_versions_document ON document_versions(document_id,version_no DESC);
         """
     )
     # Migracja DEV10/0.3 dla baz, w których law_case_links powstało przed polem
@@ -760,6 +869,25 @@ def build_unified_timeline(con: sqlite3.Connection, case_id: int, limit: int = 1
         items.append({"date": d, "kind": "Dokument", "type": r["doc_type"], "title": r["title"],
                       "description": desc, "source_type": "document", "source_id": r["id"],
                       "attachment_count": int(r["attachment_count"] or 0)})
+
+    # Jeden dokument może opisywać kilka odrębnych faktów: datę pisma, doręczenie,
+    # posiedzenie albo termin wynikający z treści. Takie wpisy są osobnymi
+    # zdarzeniami, a nie sztucznie sprowadzoną do jednej daty metryką dokumentu.
+    for r in con.execute(
+        """SELECT de.id,de.document_id,de.event_date,de.event_type,de.title,de.description,d.title document_title
+           FROM document_events de JOIN documents d ON d.id=de.document_id
+           WHERE de.case_id=? AND de.is_archived=0""",
+        (case_id,),
+    ).fetchall():
+        d = str(r["event_date"] or "")
+        if d and d > today:
+            continue
+        desc = str(r["description"] or "").strip()
+        source = f"Dokument: {r['document_title']}"
+        desc = f"{desc} · {source}" if desc else source
+        items.append({"date": d, "kind": "Z dokumentu", "type": r["event_type"], "title": r["title"],
+                      "description": desc, "source_type": "document", "source_id": r["document_id"],
+                      "document_event_id": r["id"]})
 
     items.sort(key=lambda x: (str(x.get("date") or ""), int(x.get("source_id") or 0)), reverse=True)
     return items[:limit]

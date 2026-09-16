@@ -1,0 +1,32 @@
+RK KANCELARIA 0.3.0-dev3 — CASE WORKSPACE
+
+WIDOK SPRAWY
+- stały, kompaktowy nagłówek: sygnatura, strony, nazwa, status i podstawowe metadane,
+- zakładki zamiast jednej długiej strony,
+- zakładki: Pulpit, Historia, Dokumenty, Zadania, Terminy, Dowody, Strategia,
+  Rozprawa, Finanse, Osoby i Notatki,
+- pamiętanie ostatniej zakładki osobno dla użytkownika i sprawy,
+- dawny pełny ekran zachowany jako Widok techniczny.
+
+NOWE MODUŁY
+- Pulpit 2.0 z następną czynnością, terminem, zadaniem, alertami i ryzykami,
+- ustrukturyzowana strategia sprawy,
+- mapa twierdzeń i dowodów,
+- karta rozprawy generowana z aktualnych danych i przygotowana do druku/PDF,
+- rejestr roszczeń: kwota główna, odsetki, koszty, spełnienie, zasądzenie i ugoda,
+- wielozdarzeniowa chronologia dokumentu,
+- wspólna kartoteka osób/podmiotów dostępna bezpośrednio w zakładce sprawy.
+
+BEZPIECZEŃSTWO DANYCH
+- schema 310 -> 320; migracja wyłącznie addytywna,
+- kwoty są przechowywane jako całkowita liczba groszy,
+- usunięcie twierdzenia, dowodu, roszczenia lub zdarzenia dokumentu oznacza archiwizację,
+- podmiana pliku dokumentu automatycznie zachowuje poprzednią wersję,
+- wersję pliku można przywrócić, a stan bieżący zostaje wcześniej zachowany,
+- pełny snapshot obejmuje także wersje dokumentów i nowe moduły,
+- Recovery zawiera test odtworzenia snapshotu bez zmiany bieżących danych.
+
+ZGODNOŚĆ
+- zachowane wszystkie moduły DEV9/DEV2,
+- tryb Portable i Installed używają dotychczasowych katalogów danych,
+- import/eksport pakietu sprawy ma format v4 i przenosi dane Case Workspace.

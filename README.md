@@ -1,19 +1,16 @@
-# RK KANCELARIA 0.3.0-dev2
+# RK KANCELARIA 0.3.0-dev3
 
-**USABILITY & LINKED WORKFLOW** — dopracowanie prostego widoku, zadań, kalendarza, dokumentów i biblioteki prawa.
+**CASE WORKSPACE** — zakładkowy warsztat prowadzenia sprawy.
 
 ## Najważniejsza zmiana
-Po wejściu do sprawy domyślnie otwiera się **Widok prosty**. Pierwsze informacje to:
+Po wejściu do sprawy domyślnie otwiera się **Pulpit sprawy**. Stały nagłówek pokazuje:
 
 1. sygnatura,
 2. strony / uczestnicy,
 3. nazwa sprawy,
-4. automatyczny opis,
-5. aktualny etap,
-6. „co teraz”,
-7. najbliższe terminy i alerty.
+4. status, sąd/organ i kategorię.
 
-Pełne tabele, dokumenty, techniczna historia i dotychczasowe moduły pozostają dostępne przez **Widok zaawansowany**.
+Niżej znajduje się tylko jedna wybrana zakładka: **Pulpit, Historia, Dokumenty, Zadania, Terminy, Dowody, Strategia, Rozprawa, Finanse, Osoby albo Notatki**. Program pamięta ostatnią zakładkę osobno dla użytkownika i sprawy. Pełny dawny ekran pozostaje dostępny jako **Widok techniczny**.
 
 ## Nowe moduły 0.3
 - globalna linia czasu,
@@ -43,8 +40,18 @@ W bazie startowo rejestrowane są oficjalne źródła ELI dla KPC, KPK, KPA i PP
 - dokument główny może mieć wiele załączników, pokazywanych pod pismem,
 - biblioteka prawa najpierw pobiera bezpośredni HTML z ELI, a PDF traktuje jako fallback.
 
-## Zgodność danych
-Migracja DEV9 → 0.3 jest addytywna. Nie usuwa starych spraw, dokumentów, zadań ani historii. Numer schematu: **310**.
+## DEV3 — warsztat sprawy
+- Pulpit sprawy 2.0: stan, następny termin, najbliższe zadanie, alerty i ryzyka,
+- strategia: cel, minimum, stanowiska, argumenty, odpowiedź, ryzyka, plan rozprawy i ugoda,
+- mapa twierdzeń i dowodów ze statusem luk dowodowych,
+- karta rozprawy generowana z danych sprawy i gotowa do druku/PDF,
+- rejestr roszczeń przechowujący kwoty w groszach,
+- wiele zdarzeń wynikających z jednego dokumentu,
+- automatyczne wersjonowanie pliku przy jego podmianie,
+- test odtworzenia pełnego snapshotu wraz z kontrolą kompletności dokumentów.
 
-Dokumentacja zmian: `CHANGELOG_0.3.0-dev2_USABILITY.txt`  
-Testy: `TESTY_0.3.0-dev2.txt`
+## Zgodność danych
+Migracja DEV9/DEV2 → DEV3 jest addytywna. Nie usuwa starych spraw, dokumentów, zadań ani historii. Numer schematu: **320**.
+
+Dokumentacja zmian: `CHANGELOG_0.3.0-dev3_CASE_WORKSPACE.txt`
+Testy: `TESTY_0.3.0-dev3.txt`
