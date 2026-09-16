@@ -1,4 +1,4 @@
-RK KANCELARIA 0.3.0-dev1 — SMART CASE & LAW / TRUE PORTABLE
+RK KANCELARIA 0.3.0-dev2 — SMART CASE & LAW / TRUE PORTABLE
 
 CEL
 Gotowy build działa na Windows x64 bez zainstalowanego Pythona, pip i bibliotek.

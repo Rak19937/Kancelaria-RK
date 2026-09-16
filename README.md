@@ -1,6 +1,6 @@
-# RK KANCELARIA 0.3.0-dev1
+# RK KANCELARIA 0.3.0-dev2
 
-**SMART CASE & LAW** — rozwinięcie DEV9 bez przepisywania działającego rdzenia.
+**USABILITY & LINKED WORKFLOW** — dopracowanie prostego widoku, zadań, kalendarza, dokumentów i biblioteki prawa.
 
 ## Najważniejsza zmiana
 Po wejściu do sprawy domyślnie otwiera się **Widok prosty**. Pierwsze informacje to:
@@ -33,8 +33,18 @@ RK KANCELARIA **nie zakłada**, że każde pismo wyznacza 7, 14 lub inny termin.
 ### Biblioteka prawa
 W bazie startowo rejestrowane są oficjalne źródła ELI dla KPC, KPK, KPA i PPSA. Pełny tekst jest pobierany do lokalnej bazy przez przycisk **Aktualizuj z ELI**. W razie braku Internetu istniejąca lokalna wersja pozostaje bez zmian. Biblioteka jest pomocą warsztatową i nie zastępuje weryfikacji aktualności aktu ani doboru właściwej podstawy prawnej.
 
-## Zgodność danych
-Migracja DEV9 → 0.3 jest addytywna. Nie usuwa starych spraw, dokumentów, zadań ani historii. Numer schematu: **300**.
 
-Dokumentacja zmian: `CHANGELOG_0.3.0-dev1_SMART_CASE.txt`  
-Testy: `TESTY_0.3.0-dev1.txt`
+## DEV2 — codzienna obsługa sprawy
+- zadanie, monit, termin procesowy i płatność są jednym elementem roboczym synchronizowanym z kalendarzem,
+- zadanie można przypisać do aktywnego użytkownika,
+- wykonanie zadania jednym kliknięciem ✓ usuwa je z domyślnego widoku otwartych,
+- prosty widok sprawy pokazuje krótsze opisy i osobną listę „Do zrobienia”,
+- historia sprawy nie dubluje zadań i alertów i jest grupowana według dat,
+- dokument główny może mieć wiele załączników, pokazywanych pod pismem,
+- biblioteka prawa najpierw pobiera bezpośredni HTML z ELI, a PDF traktuje jako fallback.
+
+## Zgodność danych
+Migracja DEV9 → 0.3 jest addytywna. Nie usuwa starych spraw, dokumentów, zadań ani historii. Numer schematu: **310**.
+
+Dokumentacja zmian: `CHANGELOG_0.3.0-dev2_USABILITY.txt`  
+Testy: `TESTY_0.3.0-dev2.txt`

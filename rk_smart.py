@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import html as html_lib
+from io import BytesIO
 import json
 import re
 import sqlite3
@@ -19,6 +20,11 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from html.parser import HTMLParser
 from typing import Iterable
+
+try:
+    from pypdf import PdfReader
+except Exception:  # pragma: no cover
+    PdfReader = None
 
 
 LAW_REGISTRY = {
@@ -80,6 +86,7 @@ RELATION_TYPES = [
 
 ALERT_TYPES = ["Termin procesowy", "Rozprawa", "Posiedzenie", "Monit", "Płatność", "Mediacja", "Zadanie", "Inne"]
 ALERT_PRIORITIES = ["normal", "high", "critical"]
+ACTIONABLE_ALERT_TYPES = {"Zadanie", "Monit", "Termin procesowy", "Płatność"}
 
 
 class _PlainTextHTMLParser(HTMLParser):
@@ -150,6 +157,7 @@ def ensure_smart_schema(con: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_alerts_date_status ON alerts(status,alert_date);
         CREATE INDEX IF NOT EXISTS idx_alerts_case ON alerts(case_id,alert_date);
+        CREATE INDEX IF NOT EXISTS idx_alerts_source ON alerts(source_type,source_id);
 
         CREATE TABLE IF NOT EXISTS case_auto_tags (
             case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
@@ -269,6 +277,33 @@ def _http_text(url: str, timeout: int = 30) -> str:
         return r.read().decode(charset, "replace")
 
 
+
+def _http_bytes(url: str, timeout: int = 45) -> bytes:
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "RK-KANCELARIA/0.3 (+local legal library)",
+                 "Accept": "application/pdf, application/octet-stream, */*;q=0.5"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def _pdf_to_text(data: bytes) -> str:
+    if PdfReader is None:
+        raise RuntimeError("Brak modułu pypdf potrzebnego do odczytu tekstu PDF.")
+    try:
+        reader = PdfReader(BytesIO(data))
+        parts = [(page.extract_text() or "") for page in reader.pages]
+        text = "\n".join(parts).replace("\xa0", " ")
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        if "Art." not in text:
+            raise RuntimeError("PDF nie zawiera tekstu możliwego do odczytania.")
+        return text
+    except Exception as exc:
+        raise RuntimeError(f"Nie udało się odczytać tekstu PDF: {exc}") from exc
+
+
 def _date_sort_key(item: dict) -> tuple[str, int, int]:
     return (
         str(item.get("promulgation") or item.get("announcementDate") or ""),
@@ -332,11 +367,9 @@ def parse_articles_from_text(text: str) -> list[tuple[str, str, str]]:
     return out
 
 
-def import_law_html(con: sqlite3.Connection, code: str, html_text: str, metadata: dict | None = None) -> tuple[int, int]:
+
+def import_law_text(con: sqlite3.Connection, code: str, plain: str, metadata: dict | None = None, source_url: str = "") -> tuple[int, int]:
     code = code.upper().strip()
-    parser = _PlainTextHTMLParser()
-    parser.feed(html_text)
-    plain = parser.text()
     articles = parse_articles_from_text(plain)
     if not articles:
         raise RuntimeError("Nie udało się rozpoznać artykułów w tekście aktu.")
@@ -348,17 +381,15 @@ def import_law_html(con: sqlite3.Connection, code: str, html_text: str, metadata
     year = int(md.get("year") or act["year"] or 0)
     pos = int(md.get("pos") or md.get("position") or act["position"] or 0)
     display = str(md.get("displayAddress") or md.get("display_address") or act["display_address"] or "")
-    source_url = f"https://api.sejm.gov.pl/eli/acts/DU/{year}/{pos}/text.html" if year and pos else act["source_url"]
+    final_url = source_url or act["source_url"]
     con.execute(
         """UPDATE law_acts SET year=?,position=?,display_address=?,source_url=?,change_date=?,status=?,
            local_text=?,local_text_hash=?,last_checked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-        (year, pos, display, source_url, str(md.get("changeDate") or ""), str(md.get("status") or ""), plain, h, act["id"]),
+        (year, pos, display, final_url, str(md.get("changeDate") or ""), str(md.get("status") or ""), plain, h, act["id"]),
     )
     con.execute("DELETE FROM law_articles WHERE act_id=?", (act["id"],))
     try:
-        oldids = [r[0] for r in con.execute("SELECT article_id FROM law_fts WHERE act_code=?", (code,)).fetchall()]
-        if oldids:
-            con.execute("DELETE FROM law_fts WHERE act_code=?", (code,))
+        con.execute("DELETE FROM law_fts WHERE act_code=?", (code,))
     except sqlite3.DatabaseError:
         pass
     count = 0
@@ -368,40 +399,84 @@ def import_law_html(con: sqlite3.Connection, code: str, html_text: str, metadata
             (act["id"], key, heading, body, idx),
         )
         try:
-            con.execute(
-                "INSERT INTO law_fts(article_id,act_code,article_key,heading,body) VALUES(?,?,?,?,?)",
-                (cur.lastrowid, code, key, heading, body),
-            )
+            con.execute("INSERT INTO law_fts(article_id,act_code,article_key,heading,body) VALUES(?,?,?,?,?)",
+                        (cur.lastrowid, code, key, heading, body))
         except sqlite3.DatabaseError:
             pass
         count += 1
     return act["id"], count
 
 
+
+def import_law_html(con: sqlite3.Connection, code: str, html_text: str, metadata: dict | None = None) -> tuple[int, int]:
+    parser = _PlainTextHTMLParser()
+    parser.feed(html_text)
+    plain = parser.text()
+    md = metadata or {}
+    year = int(md.get("year") or 0)
+    pos = int(md.get("pos") or md.get("position") or 0)
+    url = f"https://api.sejm.gov.pl/eli/acts/DU/{year}/{pos}/text.html" if year and pos else ""
+    return import_law_text(con, code, plain, md, url)
+
+
 def update_law_from_eli(con: sqlite3.Connection, code: str) -> tuple[str, int]:
+    """Pobiera tekst aktu z ELI w sposób odporny na różnice metadanych API.
+
+    Najpierw próbujemy tekst HTML dla zapisanego/znalezionego roku i pozycji, bo ELI
+    potrafi udostępniać poprawny ``text.html`` mimo braku lub innego kształtu flagi
+    ``textHTML`` w metadanych. PDF jest dopiero bezpiecznym fallbackiem.
+    """
     code = code.upper().strip()
     act = con.execute("SELECT * FROM law_acts WHERE code=?", (code,)).fetchone()
     if not act:
         raise ValueError(f"Nieznany akt: {code}")
-    # Najpierw próbujemy znaleźć najnowszy tekst jednolity. Jeśli endpoint wyszukiwania
-    # jest chwilowo niedostępny albo nie zwróci kandydata, pobieramy jawnie zapisany
-    # snapshot ELI z rejestru. Nigdy nie kasujemy poprzedniej wersji przed sukcesem.
+
+    latest = {"year": act["year"], "pos": act["position"], "displayAddress": act["display_address"],
+              "title": act["title"], "status": act["status"], "changeDate": act["change_date"]}
+    # Wyszukiwanie nowszego tekstu jednolitego jest dodatkiem, a nie warunkiem działania biblioteki.
     try:
-        latest = find_latest_consolidated_act(code)
+        found = find_latest_consolidated_act(code)
+        if found:
+            latest.update(found)
     except Exception:
-        latest = {
-            "year": act["year"], "pos": act["position"],
-            "displayAddress": act["display_address"], "title": act["title"],
-            "status": act["status"], "changeDate": act["change_date"],
-        }
+        pass
+
     year = int(latest.get("year") or act["year"] or 0)
     pos = int(latest.get("pos") or latest.get("position") or act["position"] or 0)
     if not year or not pos:
         raise RuntimeError("Brak roku lub pozycji Dz.U. dla tego aktu.")
-    url = f"https://api.sejm.gov.pl/eli/acts/DU/{year}/{pos}/text.html"
-    html_text = _http_text(url)
-    _, count = import_law_html(con, code, html_text, latest)
-    return str(latest.get("displayAddress") or f"Dz.U. {year} poz. {pos}"), count
+
+    try:
+        meta = _http_json(f"https://api.sejm.gov.pl/eli/acts/DU/{year}/{pos}")
+        if isinstance(meta, dict):
+            latest = {**latest, **meta}
+    except Exception:
+        # Brak odpowiedzi metadanych nie blokuje pobrania samego tekstu.
+        pass
+
+    html_url = f"https://api.sejm.gov.pl/eli/acts/DU/{year}/{pos}/text.html"
+    pdf_url = f"https://api.sejm.gov.pl/eli/acts/DU/{year}/{pos}/text.pdf"
+    html_error = None
+    try:
+        html_text = _http_text(html_url)
+        _, count = import_law_html(con, code, html_text, latest)
+        if count:
+            return str(latest.get("displayAddress") or f"Dz.U. {year} poz. {pos}"), count
+        html_error = RuntimeError("ELI zwróciło HTML, ale nie udało się rozpoznać artykułów.")
+    except Exception as exc:
+        html_error = exc
+
+    try:
+        _, count = import_law_text(con, code, _pdf_to_text(_http_bytes(pdf_url)), latest, pdf_url)
+        if count:
+            return str(latest.get("displayAddress") or f"Dz.U. {year} poz. {pos}"), count
+    except Exception as pdf_error:
+        raise RuntimeError(
+            "Nie udało się pobrać tekstu aktu z ELI. "
+            f"HTML: {html_error}. PDF: {pdf_error}."
+        ) from pdf_error
+
+    raise RuntimeError("ELI zwróciło tekst aktu, ale nie udało się rozpoznać artykułów.")
 
 
 def add_custom_eli_act(con: sqlite3.Connection, code: str, year: int, position: int, short_title: str, created_by: str = "") -> tuple[int, int]:
@@ -411,18 +486,24 @@ def add_custom_eli_act(con: sqlite3.Connection, code: str, year: int, position: 
     meta = _http_json(f"https://api.sejm.gov.pl/eli/acts/DU/{int(year)}/{int(position)}")
     title = str(meta.get("title") or short_title).strip()
     display = str(meta.get("displayAddress") or f"Dz.U. {year} poz. {position}")
-    url = f"https://api.sejm.gov.pl/eli/acts/DU/{int(year)}/{int(position)}/text.html"
+    if meta.get("textHTML"):
+        url = f"https://api.sejm.gov.pl/eli/acts/DU/{int(year)}/{int(position)}/text.html"
+    else:
+        url = f"https://api.sejm.gov.pl/eli/acts/DU/{int(year)}/{int(position)}/text.pdf"
     con.execute(
         """INSERT INTO law_acts(code,short_title,title,publisher,year,position,display_address,source_url,status,change_date,last_checked_at)
            VALUES(?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
            ON CONFLICT(code) DO UPDATE SET short_title=excluded.short_title,title=excluded.title,year=excluded.year,
            position=excluded.position,display_address=excluded.display_address,source_url=excluded.source_url,status=excluded.status,
            change_date=excluded.change_date,last_checked_at=CURRENT_TIMESTAMP""",
-        (code, short_title.strip(), title, "DU", int(year), int(position), display, url, str(meta.get("status") or ""), str(meta.get("changeDate") or "")),
+        (code, short_title.strip(), title, "DU", int(year), int(position), display, url,
+         str(meta.get("status") or ""), str(meta.get("changeDate") or "")),
     )
-    html_text = _http_text(url)
-    return import_law_html(con, code, html_text, meta)
-
+    if meta.get("textHTML"):
+        return import_law_html(con, code, _http_text(url), meta)
+    if meta.get("textPDF"):
+        return import_law_text(con, code, _pdf_to_text(_http_bytes(url)), meta, url)
+    raise RuntimeError("ELI nie udostępnia tekstu tego aktu w HTML ani PDF.")
 
 def _safe_date(value: str) -> date | None:
     try:
@@ -510,55 +591,79 @@ def _party_sentence(parties: list[tuple[str, str]]) -> str:
     return "; ".join(shown) + (f"; +{extra} innych" if extra > 0 else "")
 
 
+
 def _detect_stage(con: sqlite3.Connection, c: sqlite3.Row) -> tuple[str, str]:
+    """Krótki, użytkowy opis etapu zamiast technicznej klasyfikacji."""
     cid = int(c["id"])
-    status = str(c["status"] or "")
-    if status == "closed":
-        return "Sprawa zakończona", "Sprawa ma status zakończonej."
+    if str(c["status"] or "") == "closed":
+        return "Zakończona", "Zakończona."
+
+    today = date.today().isoformat()
+    upcoming = con.execute(
+        """SELECT event_date,event_type,title FROM process_events
+           WHERE case_id=? AND event_date<>'' AND event_date>=?
+           ORDER BY event_date,id LIMIT 1""",
+        (cid, today),
+    ).fetchone()
+    if upcoming:
+        typ = str(upcoming["event_type"] or "").strip()
+        title = str(upcoming["title"] or "").strip()
+        low = f"{typ} {title}".lower()
+        if "rozpraw" in low:
+            return "Przed rozprawą", f"Rozprawa: {upcoming['event_date']}."
+        if "posiedzen" in low:
+            return "Przed posiedzeniem", f"Posiedzenie: {upcoming['event_date']}."
+        if "mediac" in low:
+            return "Mediacja", f"Mediacja: {upcoming['event_date']}."
+        return "W toku", f"Najbliższe wydarzenie: {upcoming['event_date']}."
+
+    next_date = str(c["next_date"] or "").strip()
+    next_step = str(c["next_step"] or "").strip()
+    if next_date and next_date >= today:
+        label = next_step or "Najbliższa czynność"
+        return "W toku", f"{label.rstrip('.')}: {next_date}."
+
     process = con.execute(
-        "SELECT * FROM process_events WHERE case_id=? ORDER BY COALESCE(NULLIF(event_date,''),'0000-00-00') DESC,id DESC LIMIT 8",
+        """SELECT event_date,event_type,title,description FROM process_events
+           WHERE case_id=? ORDER BY COALESCE(NULLIF(event_date,''),'0000-00-00') DESC,id DESC LIMIT 6""",
         (cid,),
     ).fetchall()
-    combined = " ".join((str(r["event_type"] or "") + " " + str(r["title"] or "") + " " + str(r["description"] or "")) for r in process).lower()
+    combined = " ".join(
+        (str(r["event_type"] or "") + " " + str(r["title"] or "") + " " + str(r["description"] or ""))
+        for r in process
+    ).lower()
     if "egzekuc" in combined or "komorn" in combined:
-        stage = "Egzekucja / wykonanie orzeczenia"
-    elif "apelac" in combined or "ii instanc" in combined:
-        stage = "Postępowanie odwoławcze"
-    elif "wyrok" in combined or "orzeczen" in combined:
-        stage = "Po wydaniu orzeczenia"
-    elif "biegł" in combined or "opinia" in combined:
-        stage = "Postępowanie dowodowe – opinia biegłego"
-    elif "rozpraw" in combined or "posiedzen" in combined:
-        stage = "Postępowanie przed sądem / organem"
-    elif "mediac" in combined:
-        stage = "Mediacja / próba ugodowa"
-    elif process:
-        stage = "Postępowanie w toku"
-    else:
-        stage = "Etap wstępny / brak opisanej historii procesowej"
-    waiting = str(c["waiting_for"] or "").strip()
-    summary = stage + "."
-    if waiting:
-        summary += f" Aktualnie oczekujemy na: {waiting}."
+        return "Egzekucja", "Egzekucja."
+    if "apelac" in combined or "ii instanc" in combined:
+        return "II instancja", "II instancja."
+    if "wyrok" in combined or "orzeczen" in combined:
+        return "Po orzeczeniu", "Po orzeczeniu."
+    if "biegł" in combined or "opinia" in combined:
+        return "Dowody", "Postępowanie dowodowe."
+    if "mediac" in combined:
+        return "Mediacja", "Mediacja / próba ugodowa."
     if process:
-        last = process[0]
-        if str(last["title"] or "").strip():
-            summary += f" Ostatnie zdarzenie procesowe: {str(last['title']).strip()}."
-    return stage, summary
+        return "W toku", "W toku."
+    if con.execute("SELECT 1 FROM documents WHERE case_id=? LIMIT 1", (cid,)).fetchone():
+        return "W toku", "W toku."
+    return "Start", "Początek sprawy."
 
 
 def generate_case_summary(con: sqlite3.Connection, case_id: int, force: bool = False) -> dict[str, str]:
+    """Generuje krótkie teksty do prostego widoku sprawy."""
     c = con.execute("SELECT * FROM cases WHERE id=?", (case_id,)).fetchone()
     if not c:
         raise ValueError("Nie znaleziono sprawy")
-    parties = case_parties(con, case_id)
     process_count = con.execute("SELECT COUNT(*) FROM process_events WHERE case_id=?", (case_id,)).fetchone()[0]
     docs_count = con.execute("SELECT COUNT(*) FROM documents WHERE case_id=?", (case_id,)).fetchone()[0]
     tasks_open = con.execute("SELECT COUNT(*) FROM tasks WHERE case_id=? AND status<>'done'", (case_id,)).fetchone()[0]
-    latest_doc = con.execute("SELECT title FROM documents WHERE case_id=? ORDER BY COALESCE(NULLIF(received_date,''),NULLIF(doc_date,''),created_at) DESC,id DESC LIMIT 1", (case_id,)).fetchone()
+    latest_doc = con.execute(
+        """SELECT title FROM documents WHERE case_id=? AND COALESCE(parent_document_id,0)=0
+           ORDER BY COALESCE(NULLIF(received_date,''),NULLIF(doc_date,''),created_at) DESC,id DESC LIMIT 1""",
+        (case_id,),
+    ).fetchone()
     fp_obj = {
         "case": {k: str(c[k] or "") for k in ("signature", "internal_signature", "title", "category", "subject", "status", "next_step", "next_date", "waiting_for", "updated_at")},
-        "parties": parties,
         "process_count": process_count,
         "docs_count": docs_count,
         "tasks_open": tasks_open,
@@ -569,44 +674,36 @@ def generate_case_summary(con: sqlite3.Connection, case_id: int, force: bool = F
     if cached and cached["fingerprint"] == fingerprint and not force:
         return {"description": cached["description"], "stage": cached["stage_summary"], "next": cached["next_action_summary"]}
 
-    subject = str(c["subject"] or c["title"] or "").strip()
-    category = str(c["category"] or "").strip()
-    party_text = _party_sentence(parties)
-    desc_parts = []
-    if subject:
-        desc_parts.append(f"Sprawa dotyczy: {subject.rstrip('.')}.")
-    if category:
-        desc_parts.append(f"Kategoria: {category}.")
-    if party_text:
-        desc_parts.append(f"Strony / uczestnicy: {party_text}.")
-    if str(c["court"] or "").strip():
-        court = str(c["court"]).strip()
-        dep = str(c["department"] or "").strip()
-        desc_parts.append(f"Sprawa jest prowadzona przed: {court}{(' · ' + dep) if dep else ''}.")
-    if not desc_parts:
-        desc_parts.append("Brak wystarczających danych do wygenerowania opisu sprawy.")
+    description = str(c["subject"] or c["title"] or "").strip().rstrip(".")
+    description = (description + ".") if description else "Brak krótkiego opisu sprawy."
     _, stage_summary = _detect_stage(con, c)
 
+    next_parts: list[str] = []
     next_step = str(c["next_step"] or "").strip()
     next_date = str(c["next_date"] or "").strip()
+    if next_step and next_date:
+        next_parts.append(f"{next_step.rstrip('.')} — {next_date}.")
+    elif next_step:
+        next_parts.append(f"{next_step.rstrip('.')}.")
+    elif next_date:
+        next_parts.append(f"Najbliższa data — {next_date}.")
+
     earliest_task = con.execute(
-        "SELECT title,due_date FROM tasks WHERE case_id=? AND status<>'done' ORDER BY due_date='',due_date,id LIMIT 1",
+        """SELECT title,due_date FROM tasks
+           WHERE case_id=? AND status<>'done'
+           ORDER BY CASE WHEN due_date='' THEN 1 ELSE 0 END,due_date,id LIMIT 1""",
         (case_id,),
     ).fetchone()
-    next_parts = []
-    if next_step:
-        next_parts.append(f"Następny krok: {next_step}.")
-    if next_date:
-        next_parts.append(f"Najbliższa wskazana data: {next_date}.")
     if earliest_task:
-        next_parts.append(f"Otwarte zadanie: {earliest_task['title']}{(' (termin: '+earliest_task['due_date']+')') if earliest_task['due_date'] else ''}.")
-    if str(c["waiting_for"] or "").strip():
-        next_parts.append(f"Czekamy na: {str(c['waiting_for']).strip()}.")
-    if not next_parts:
-        next_parts.append("Brak wskazanego następnego kroku — warto go uzupełnić.")
+        task_text = str(earliest_task["title"] or "").strip()
+        if earliest_task["due_date"]:
+            task_text += f" — do {earliest_task['due_date']}"
+        next_parts.append(task_text.rstrip(".") + ".")
+    waiting = str(c["waiting_for"] or "").strip()
+    if waiting:
+        next_parts.append(f"Czekamy na: {waiting.rstrip('.')}.")
 
-    description = " ".join(desc_parts)
-    next_summary = " ".join(next_parts)
+    next_summary = " ".join(next_parts[:2]) if next_parts else "Brak otwartych zadań."
     con.execute(
         """INSERT INTO case_generated_summary(case_id,description,stage_summary,next_action_summary,fingerprint,generated_at)
            VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)
@@ -618,29 +715,54 @@ def generate_case_summary(con: sqlite3.Connection, case_id: int, force: bool = F
 
 
 def build_unified_timeline(con: sqlite3.Connection, case_id: int, limit: int = 100) -> list[dict]:
+    """Historia sprawy bez zadań i alertów, aby nie dublować tej samej czynności."""
     items: list[dict] = []
-    for r in con.execute("SELECT id,event_date,event_type,title,description,created_at FROM process_events WHERE case_id=?", (case_id,)).fetchall():
-        items.append({"date": r["event_date"] or (r["created_at"] or "")[:10], "kind": "Proces", "type": r["event_type"], "title": r["title"], "description": r["description"], "source_type": "process_event", "source_id": r["id"]})
-    for r in con.execute("SELECT id,event_date,event_type,title,description,created_at FROM events WHERE case_id=?", (case_id,)).fetchall():
-        items.append({"date": r["event_date"] or (r["created_at"] or "")[:10], "kind": "Czynność", "type": r["event_type"], "title": r["title"], "description": r["description"], "source_type": "event", "source_id": r["id"]})
-    for r in con.execute("SELECT id,doc_date,received_date,delivered_date,doc_type,title,description,created_at FROM documents WHERE case_id=?", (case_id,)).fetchall():
+    today = date.today().isoformat()
+
+    for r in con.execute(
+        "SELECT id,event_date,event_type,title,description,created_at FROM process_events WHERE case_id=?",
+        (case_id,),
+    ).fetchall():
+        d = r["event_date"] or (r["created_at"] or "")[:10]
+        if d and d > today:
+            continue
+        items.append({"date": d, "kind": "Proces", "type": r["event_type"], "title": r["title"],
+                      "description": r["description"], "source_type": "process_event", "source_id": r["id"]})
+
+    process_keys = {(str(x.get("date") or ""), re.sub(r"\W+", "", str(x.get("title") or "").lower())) for x in items}
+    for r in con.execute(
+        "SELECT id,event_date,event_type,title,description,created_at FROM events WHERE case_id=?",
+        (case_id,),
+    ).fetchall():
+        d = r["event_date"] or (r["created_at"] or "")[:10]
+        if d and d > today:
+            continue
+        key = (str(d or ""), re.sub(r"\W+", "", str(r["title"] or "").lower()))
+        if key in process_keys:
+            continue
+        items.append({"date": d, "kind": "Czynność", "type": r["event_type"], "title": r["title"],
+                      "description": r["description"], "source_type": "event", "source_id": r["id"]})
+
+    for r in con.execute(
+        """SELECT d.id,d.doc_date,d.received_date,d.delivered_date,d.doc_type,d.title,d.description,d.created_at,
+                  (SELECT COUNT(*) FROM documents a WHERE a.parent_document_id=d.id) attachment_count
+           FROM documents d WHERE d.case_id=? AND COALESCE(d.parent_document_id,0)=0""",
+        (case_id,),
+    ).fetchall():
         d = r["received_date"] or r["doc_date"] or (r["created_at"] or "")[:10]
         extras = []
         if r["received_date"]: extras.append(f"wpływ: {r['received_date']}")
         if r["delivered_date"]: extras.append(f"doręczenie: {r['delivered_date']}")
-        desc = str(r["description"] or "") + ((" · " + ", ".join(extras)) if extras else "")
-        items.append({"date": d, "kind": "Dokument", "type": r["doc_type"], "title": r["title"], "description": desc.strip(" ·"), "source_type": "document", "source_id": r["id"]})
-    for r in con.execute("SELECT id,title,due_date,status,priority,notes,created_at FROM tasks WHERE case_id=?", (case_id,)).fetchall():
-        d = r["due_date"] or (r["created_at"] or "")[:10]
-        items.append({"date": d, "kind": "Zadanie", "type": "Wykonane" if r["status"] == "done" else "Otwarte", "title": r["title"], "description": r["notes"], "source_type": "task", "source_id": r["id"]})
-    for r in con.execute("SELECT id,note,author,created_at FROM case_notes WHERE case_id=?", (case_id,)).fetchall():
-        text = str(r["note"] or "")
-        items.append({"date": (r["created_at"] or "")[:10], "kind": "Notatka", "type": r["author"] or "Notatka", "title": text[:90] + ("…" if len(text) > 90 else ""), "description": text, "source_type": "note", "source_id": r["id"]})
-    for r in con.execute("SELECT id,alert_date,alert_type,title,description,status FROM alerts WHERE case_id=?", (case_id,)).fetchall():
-        items.append({"date": r["alert_date"], "kind": "Alert", "type": r["alert_type"], "title": r["title"], "description": r["description"], "source_type": "alert", "source_id": r["id"]})
+        if int(r["attachment_count"] or 0): extras.append(f"załączniki: {int(r['attachment_count'])}")
+        desc = str(r["description"] or "").strip()
+        if extras:
+            desc = (desc + (" · " if desc else "") + ", ".join(extras)).strip()
+        items.append({"date": d, "kind": "Dokument", "type": r["doc_type"], "title": r["title"],
+                      "description": desc, "source_type": "document", "source_id": r["id"],
+                      "attachment_count": int(r["attachment_count"] or 0)})
+
     items.sort(key=lambda x: (str(x.get("date") or ""), int(x.get("source_id") or 0)), reverse=True)
     return items[:limit]
-
 
 def auto_create_structural_links(con: sqlite3.Connection, case_id: int) -> int:
     """Tworzy wyłącznie relacje wynikające jednoznacznie ze struktury danych."""
@@ -663,6 +785,118 @@ def auto_create_structural_links(con: sqlite3.Connection, case_id: int) -> int:
         )
         count += con.execute("SELECT changes()").fetchone()[0]
     return count
+
+
+
+def _task_alert_type(row: sqlite3.Row) -> str:
+    task_type = str(row["task_type"] or "Zadanie").strip() if "task_type" in row.keys() else "Zadanie"
+    if task_type in ALERT_TYPES:
+        return task_type
+    if ("deadline_base_date" in row.keys()) and str(row["deadline_base_date"] or "").strip():
+        return "Termin procesowy"
+    return "Zadanie"
+
+
+def sync_task_alert(con: sqlite3.Connection, task_id: int, created_by: str = "") -> int | None:
+    """Jedno zadanie z terminem = jeden powiązany alert w kalendarzu."""
+    task = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if not task:
+        return None
+    existing = con.execute(
+        "SELECT * FROM alerts WHERE source_type='task' AND source_id=? ORDER BY id LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    due = str(task["due_date"] or "").strip()
+    # Migracja DEV1/DEV2: jeżeli taki sam wpis kalendarza istniał wcześniej osobno,
+    # przejmujemy go zamiast tworzyć drugi rekord.
+    if not existing and due:
+        existing = con.execute(
+            """SELECT * FROM alerts WHERE case_id=? AND alert_date=? AND title=?
+               AND (source_type IS NULL OR source_type='' OR source_id IS NULL)
+               ORDER BY CASE WHEN alert_type=? THEN 0 ELSE 1 END,id LIMIT 1""",
+            (task["case_id"], due, task["title"], _task_alert_type(task)),
+        ).fetchone()
+        if existing:
+            con.execute("UPDATE alerts SET source_type='task',source_id=? WHERE id=?", (task_id, existing["id"]))
+    if not due:
+        if existing:
+            con.execute("UPDATE alerts SET status='done',updated_at=CURRENT_TIMESTAMP WHERE id=?", (existing["id"],))
+            return int(existing["id"])
+        return None
+
+    typ = _task_alert_type(task)
+    status = "done" if str(task["status"] or "") == "done" else "open"
+    priority = "high" if str(task["priority"] or "") == "high" else "normal"
+    assigned = task["assigned_user_id"] if "assigned_user_id" in task.keys() else None
+    desc = str(task["notes"] or "").strip()
+    if existing:
+        con.execute(
+            """UPDATE alerts SET case_id=?,alert_date=?,alert_type=?,title=?,description=?,priority=?,status=?,
+               assigned_user_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+            (task["case_id"], due, typ, task["title"], desc, priority, status, assigned, existing["id"]),
+        )
+        return int(existing["id"])
+    cur = con.execute(
+        """INSERT INTO alerts(case_id,alert_date,alert_type,title,description,priority,status,source_type,source_id,
+                              assigned_user_id,created_by)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        (task["case_id"], due, typ, task["title"], desc, priority, status, "task", task_id, assigned, created_by),
+    )
+    return int(cur.lastrowid)
+
+
+def sync_alert_task(con: sqlite3.Connection, alert_id: int, created_by: str = "") -> int | None:
+    """Monit/termin/płatność dodane w kalendarzu automatycznie stają się zadaniem."""
+    alert = con.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
+    if not alert or str(alert["alert_type"] or "") not in ACTIONABLE_ALERT_TYPES or not alert["case_id"]:
+        return None
+    if str(alert["source_type"] or "") == "task" and alert["source_id"]:
+        tid = int(alert["source_id"])
+        if con.execute("SELECT 1 FROM tasks WHERE id=?", (tid,)).fetchone():
+            return tid
+    # Nie dubluj wpisów utworzonych wcześniej osobno jako „zadanie” i „monit”.
+    match = con.execute(
+        """SELECT id,task_type FROM tasks WHERE case_id=? AND title=? AND due_date=?
+           ORDER BY CASE WHEN status='done' THEN 1 ELSE 0 END,id LIMIT 1""",
+        (alert["case_id"], alert["title"], alert["alert_date"]),
+    ).fetchone()
+    if match:
+        tid=int(match["id"])
+        if str(match["task_type"] or "Zadanie") == "Zadanie" and str(alert["alert_type"] or "") != "Zadanie":
+            con.execute("UPDATE tasks SET task_type=? WHERE id=?", (alert["alert_type"], tid))
+        con.execute("UPDATE alerts SET source_type='task',source_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (tid, alert_id))
+        return tid
+    cur = con.execute(
+        """INSERT INTO tasks(case_id,title,due_date,status,priority,assigned_user_id,depends_on,notes,task_type,
+                             created_by,updated_by)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        (alert["case_id"], alert["title"], alert["alert_date"],
+         "done" if alert["status"] == "done" else "open",
+         "high" if alert["priority"] in ("high", "critical") else "normal",
+         alert["assigned_user_id"], "", alert["description"] or "", alert["alert_type"], created_by, created_by),
+    )
+    tid = int(cur.lastrowid)
+    con.execute("UPDATE alerts SET source_type='task',source_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (tid, alert_id))
+    return tid
+
+
+def reconcile_task_alerts(con: sqlite3.Connection, created_by: str = "migracja") -> tuple[int, int]:
+    """Idempotentnie scala stare osobne monity/alerty z zadaniami."""
+    alert_count=0; task_count=0
+    alerts=con.execute(
+        """SELECT id FROM alerts WHERE case_id IS NOT NULL AND alert_type IN ('Zadanie','Monit','Termin procesowy','Płatność')
+           ORDER BY id"""
+    ).fetchall()
+    for row in alerts:
+        tid=sync_alert_task(con,int(row["id"]),created_by)
+        if tid:
+            sync_task_alert(con,tid,created_by)
+            alert_count+=1
+    tasks=con.execute("SELECT id FROM tasks ORDER BY id").fetchall()
+    for row in tasks:
+        sync_task_alert(con,int(row["id"]),created_by)
+        task_count+=1
+    return alert_count,task_count
 
 
 NUMBER_WORDS = {

@@ -1,0 +1,17 @@
+RK KANCELARIA 0.3.0-dev2 — TESTY
+
+1. python -m py_compile app.py rk_smart.py desktop.py rk_paths.py rk_sync.py RK_KANCELARIA_DESKTOP.pyw — OK.
+2. TEST_TRUE_PORTABLE_PATHS.py — OK.
+3. Inicjalizacja pustej bazy — schema 310 — OK.
+4. Zadanie typu Monit z terminem → automatyczny alert Monit z tym samym wykonawcą — OK.
+5. Oznaczenie zadania jako wykonane → powiązany alert status done — OK.
+6. Dokument główny + załącznik → oś czasu pokazuje jeden dokument z liczbą załączników — OK.
+7. Generator prostego opisu: przedmiot sprawy bez technicznych dodatków — OK.
+8. Zadania: domyślny filtr show=open; wykonane dostępne przez show=all — zweryfikowane w kodzie i zapytaniu.
+9. Biblioteka ELI: logika HTML-first + PDF fallback — test kompilacji; pełne pobranie wymaga sieci w gotowym Windows buildzie.
+
+Do smoke-testu w GitHub Actions / Windows:
+- build PyInstaller,
+- self-test EXE,
+- render prostego widoku i osi czasu w WebEngine,
+- pobranie KPC/KPK/KPA/PPSA z ELI przy dostępie do Internetu.

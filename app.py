@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RK KANCELARIA 0.3.0-dev1 — SMART CASE & LAW.
+"""RK KANCELARIA 0.3.0-dev2 — USABILITY & LINKED WORKFLOW.
 
 Czytelny widok sprawy dla laika, globalna linia czasu, kalendarz i alerty,
 relacje „co z czego wynika”, generowane podsumowania oraz lokalna biblioteka prawa.
@@ -47,17 +47,18 @@ from http.cookies import SimpleCookie
 
 from rk_paths import resolve_runtime_paths, installed_data_dir
 from rk_smart import (
-    ALERT_PRIORITIES, ALERT_TYPES, LAW_REGISTRY, RELATION_TYPES as SMART_RELATION_TYPES,
+    ACTIONABLE_ALERT_TYPES, ALERT_PRIORITIES, ALERT_TYPES, LAW_REGISTRY, RELATION_TYPES as SMART_RELATION_TYPES,
     add_custom_eli_act, auto_create_structural_links, build_unified_timeline,
     derive_case_auto_tags, ensure_smart_schema, extract_explicit_deadline_suggestions,
-    generate_case_summary, search_law, update_law_from_eli, upcoming_alerts,
+    generate_case_summary, reconcile_task_alerts, search_law, sync_alert_task, sync_task_alert,
+    update_law_from_eli, upcoming_alerts,
 )
 
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.3.0-dev1"
-SCHEMA_VERSION = 300
+VERSION = "0.3.0-dev2"
+SCHEMA_VERSION = 310
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
 APP_MODE = RUNTIME_PATHS.mode
@@ -566,7 +567,7 @@ STATUS_BADGES = {
     "suspended": "gray",
     "closed": "green",
 }
-DOC_TYPES = ["Pismo procesowe", "Wniosek", "Apelacja", "Zażalenie", "Odpowiedź", "Postanowienie", "Wyrok", "Uzasadnienie", "Opinia biegłego", "Dowód", "Korespondencja", "Inne"]
+DOC_TYPES = ["Pismo procesowe", "Wniosek", "Apelacja", "Zażalenie", "Odpowiedź", "Postanowienie", "Wyrok", "Uzasadnienie", "Opinia biegłego", "Dowód", "Korespondencja", "Załącznik", "Inne"]
 PLEADING_DOC_TYPES = {"Pismo procesowe", "Wniosek", "Apelacja", "Zażalenie", "Odpowiedź"}
 DOC_STATUSES = ["Aktywny", "Roboczy", "Draft", "Do podpisu", "Podpisany", "Wysłany", "Złożone", "Złożony", "Doręczone", "Doręczony", "Oczekiwanie na odpowiedź", "Archiwalne", "Archiwalny"]
 EVENT_TYPES = ["Czynność", "Rozprawa", "Posiedzenie", "Mediacja", "Orzeczenie", "Wpływ pisma", "Wysłanie pisma", "Doręczenie", "Telefon", "Notatka"]
@@ -1157,7 +1158,8 @@ def init_db() -> None:
             "created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''", "assigned_user_id": "INTEGER",
             "deadline_base_date": "TEXT DEFAULT ''", "deadline_days": "INTEGER", "deadline_rule": "TEXT DEFAULT ''",
             "deadline_source": "TEXT DEFAULT ''", "deadline_manual": "INTEGER NOT NULL DEFAULT 0",
-            "completed_at": "TEXT DEFAULT ''", "completed_by": "TEXT DEFAULT ''"
+            "completed_at": "TEXT DEFAULT ''", "completed_by": "TEXT DEFAULT ''",
+            "task_type": "TEXT DEFAULT 'Zadanie'"
         })
         ensure_columns("documents", {
             "received_date": "TEXT DEFAULT ''", "delivered_date": "TEXT DEFAULT ''",
@@ -1165,7 +1167,8 @@ def init_db() -> None:
             "linked_task_id": "INTEGER", "created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''",
             "file_hash": "TEXT DEFAULT ''", "extracted_text": "TEXT DEFAULT ''", "indexed_at": "TEXT DEFAULT ''",
             "doc_status": "TEXT DEFAULT 'Aktywny'", "ocr_used": "INTEGER NOT NULL DEFAULT 0",
-            "ocr_status": "TEXT DEFAULT ''", "ocr_language": "TEXT DEFAULT ''"
+            "ocr_status": "TEXT DEFAULT ''", "ocr_language": "TEXT DEFAULT ''",
+            "parent_document_id": "INTEGER", "attachment_order": "INTEGER NOT NULL DEFAULT 0"
         })
         ensure_columns("cases", {"closed_edit_unlocked": "INTEGER NOT NULL DEFAULT 0"})
         ensure_columns("parties", {"entity_id": "INTEGER"})
@@ -1222,6 +1225,8 @@ def init_db() -> None:
         con.execute("CREATE INDEX IF NOT EXISTS idx_draft_versions_project ON draft_versions(project_id,version_no DESC)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_documents_linked_task ON documents(linked_task_id)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_documents_delivered ON documents(delivered_date)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_documents_parent ON documents(parent_document_id,attachment_order,id)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type,status,due_date)")
 
         # HOTFIX 0.12.13: wersja 0.13 używała w audit_log nazw actor/details,
         # podczas gdy stabilna gałąź 0.12 używa author/description. Ponieważ DATA_DIR
@@ -1279,6 +1284,8 @@ def init_db() -> None:
         # Warstwa 0.3: czytelny widok sprawy, alerty, relacje i lokalna biblioteka prawa.
         # CREATE IF NOT EXISTS + INSERT OR IGNORE zachowują pełną zgodność z danymi DEV9.
         ensure_smart_schema(con)
+        # Scala stare osobne monity/alerty i zadania. Operacja jest idempotentna.
+        reconcile_task_alerts(con)
 
         # Jawny numer wersji schematu przygotowuje bezpieczne migracje.
         con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -2609,7 +2616,7 @@ def parse_multipart(headers, body: bytes):
     synthetic = (f"Content-Type: {ctype}\r\nMIME-Version: 1.0\r\n\r\n").encode() + body
     msg = BytesParser(policy=email_policy).parsebytes(synthetic)
     fields: dict[str, str] = {}
-    files: dict[str, tuple[str, bytes, str]] = {}
+    files: dict[str, object] = {}
     if not msg.is_multipart():
         return fields, files
     for part in msg.iter_parts():
@@ -2619,7 +2626,13 @@ def parse_multipart(headers, body: bytes):
         if not name:
             continue
         if filename:
-            files[name] = (filename, payload, part.get_content_type())
+            item = (filename, payload, part.get_content_type())
+            # Pola zakończone [] mogą zawierać wiele plików (np. załączniki do pisma).
+            if name.endswith("[]"):
+                files.setdefault(name, [])
+                files[name].append(item)
+            else:
+                files[name] = item
         else:
             charset = part.get_content_charset() or "utf-8"
             try: fields[name] = payload.decode(charset)
@@ -3474,16 +3487,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_html(layout('Dodaj czynność',"<div class='card'><h1>Dodaj czynność</h1><p>Najpierw utwórz aktywną sprawę.</p><a class='btn primary' href='/case/new'>+ Nowa sprawa</a></div>"))
         body=f"""<div class='topbar'><div><h1>+ Dodaj czynność</h1><div class='sub'>Szybkie dodawanie z dowolnego miejsca w programie.</div></div><div><a class='btn' href='/case/new'>+ Sprawa</a> <a class='btn' href='/draft/new'>+ Projekt pisma</a></div></div>{notice}
         <div class='quick-add-grid'>
-          <div class='card quick-add-card'><h2>Zadanie</h2><form method='post' action='/task/create' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=zadanie'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div class='full'><label>Czynność *</label><input name='title' required></div><div><label>Termin</label><input type='date' name='due_date'></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div><div class='full'><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div><div class='full'><label>Czekamy na / zależność</label><input name='depends_on'></div><div class='full'><button class='btn primary'>Dodaj zadanie</button></div></form></div>
+          <div class='card quick-add-card'><h2>Zadanie / monit</h2><form method='post' action='/task/create' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=zadanie'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div><label>Rodzaj</label><select name='task_type'><option>Zadanie</option><option>Monit</option><option>Termin procesowy</option><option>Płatność</option></select></div><div><label>Termin</label><input type='date' name='due_date'></div><div class='full'><label>Co trzeba zrobić? *</label><input name='title' required></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div><div><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div><div class='full'><label>Czekamy na / zależność</label><input name='depends_on'></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></div>
           <div class='card quick-add-card' id='deadline'><h2>Termin procesowy</h2><div class='small muted' style='margin-bottom:10px'>Pomocnicze wyliczenie — dzień początkowy nie jest liczony; końcowa sobota/niedziela/święto jest przesuwana. Zawsze zweryfikuj podstawę prawną.</div><form method='post' action='/deadline/create' class='form-grid'><input type='hidden' name='return_to' value='/today'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div class='full'><label>Czynność *</label><input name='title' required placeholder='np. Wnieść odpowiedź na zażalenie'></div><div><label>Data początkowa *</label><input type='date' name='base_date' required></div><div><label>Liczba dni *</label><input type='number' min='0' max='3650' name='days' required value='7'></div><div><label>Sposób liczenia</label><select name='rule'><option value='calendar'>Dni kalendarzowe / procesowe</option><option value='business'>Dni robocze</option></select></div><div><label>Priorytet</label><select name='priority'><option value='high'>Wysoki</option><option value='normal'>Normalny</option></select></div><div class='full'><label>Podstawa / źródło terminu</label><input name='source' placeholder='np. doręczenie 11.09.2026, art. ...'></div><div class='full'><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div><div class='full'><button class='btn primary'>Wylicz i dodaj termin</button></div></form></div>
           <div class='card quick-add-card'><h2>Zdarzenie na osi czasu</h2><form method='post' action='/quick/event' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=zdarzenie'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div><label>Data</label><input type='date' name='event_date' value='{date.today().isoformat()}'></div><div><label>Typ</label><select name='event_type'>{event_opts}</select></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj zdarzenie</button></div></form></div>
           <div class='card quick-add-card'><h2>Notatka</h2><form method='post' action='/quick/note' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=notatka'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div class='full'><label>Treść *</label><textarea name='note' required></textarea></div><div class='full'><button class='btn primary'>Dodaj notatkę</button></div></form></div>
-          <div class='card quick-add-card'><h2>Dokument / pismo</h2><form method='post' enctype='multipart/form-data' action='/quick/document' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=dokument'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_opts}</select></div><div><label>Status</label><select name='doc_status'>{doc_status_opts}</select></div><div><label>Nadawca</label><input name='sender'></div><div><label>Autor dokumentu</label><input name='document_author'></div><div><label>Tagi</label><input name='tags' placeholder='np. pilne, dowód'></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Plik</label><input type='file' name='file'></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></div>
+          <div class='card quick-add-card'><h2>Dokument / pismo</h2><form method='post' enctype='multipart/form-data' action='/quick/document' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=dokument'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_opts}</select></div><div><label>Status</label><select name='doc_status'>{doc_status_opts}</select></div><div><label>Nadawca</label><input name='sender'></div><div><label>Autor dokumentu</label><input name='document_author'></div><div><label>Tagi</label><input name='tags' placeholder='np. pilne, dowód'></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Pismo / dokument główny</label><input type='file' name='file'></div><div class='full'><label>Załączniki do pisma</label><input type='file' name='attachments[]' multiple><div class='small muted'>Możesz zaznaczyć kilka plików. Zostaną zapisane pod pismem jako jego załączniki.</div></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></div>
         </div>"""
         self.send_html(layout('Dodaj czynność',body))
 
     def deadline_page(self,qs):
         self.redirect('/quick-add#deadline')
+
 
     def deadline_create(self,f):
         try: cid=int(f.get('case_id','0') or 0)
@@ -3502,10 +3516,12 @@ class Handler(BaseHTTPRequestHandler):
         with db() as con:
             if not con.execute('SELECT 1 FROM cases WHERE id=?',(cid,)).fetchone(): return self.send_error(404)
             if case_read_only(con,cid): return self.send_error(403,'Sprawa zakończona jest tylko do odczytu.')
-            cur=con.execute("""INSERT INTO tasks(case_id,title,due_date,status,priority,assigned_user_id,depends_on,notes,created_by,updated_by,
-                              deadline_base_date,deadline_days,deadline_rule,deadline_source,deadline_manual)
-                              VALUES(?,?,?,'open',?,?,?,?,?,?,?,?,?,?,0)""",
-                            (cid,title,due_date,priority,assigned,'',source,a,a,f.get('base_date',''),days,rule_label,source))
+            cur=con.execute("""INSERT INTO tasks(case_id,title,due_date,status,priority,assigned_user_id,depends_on,notes,task_type,
+                              created_by,updated_by,deadline_base_date,deadline_days,deadline_rule,deadline_source,deadline_manual)
+                              VALUES(?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,0)""",
+                            (cid,title,due_date,priority,assigned,'',source,'Termin procesowy',a,a,
+                             f.get('base_date',''),days,rule_label,source))
+            sync_task_alert(con,cur.lastrowid,a)
             details=(f"Czynność: {_change_value(title)}\nData początkowa: {_change_value(f.get('base_date',''))}\n"
                      f"Reguła: {_change_value(str(days)+' '+rule_label)}\nWyliczony termin: {_change_value(due_date)}")
             if source: details += f"\nPodstawa / źródło: {_change_value(source)}"
@@ -3973,6 +3989,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.case_view_advanced(cid)
         return self.case_view_simple(cid, qs)
 
+
     def case_view_simple(self, cid, qs=None):
         qs = qs or {}
         u = current_request_user()
@@ -3982,26 +3999,42 @@ class Handler(BaseHTTPRequestHandler):
             if not c:
                 return self.send_error(404)
             if uid:
-                con.execute("INSERT INTO user_case_recent(user_id,case_id,opened_at) VALUES(?,?,CURRENT_TIMESTAMP) ON CONFLICT(user_id,case_id) DO UPDATE SET opened_at=CURRENT_TIMESTAMP", (uid, cid))
+                con.execute("""INSERT INTO user_case_recent(user_id,case_id,opened_at) VALUES(?,?,CURRENT_TIMESTAMP)
+                               ON CONFLICT(user_id,case_id) DO UPDATE SET opened_at=CURRENT_TIMESTAMP""", (uid, cid))
             derive_case_auto_tags(con, cid)
             auto_create_structural_links(con, cid)
             summary = generate_case_summary(con, cid)
             parties = con.execute("SELECT role,name FROM parties WHERE case_id=? ORDER BY id", (cid,)).fetchall()
-            structured = con.execute("SELECT ce.role,e.display_name name FROM case_entities ce JOIN entities e ON e.id=ce.entity_id WHERE ce.case_id=? ORDER BY ce.id", (cid,)).fetchall()
+            structured = con.execute("""SELECT ce.role,e.display_name name FROM case_entities ce
+                                        JOIN entities e ON e.id=ce.entity_id WHERE ce.case_id=? ORDER BY ce.id""", (cid,)).fetchall()
             shown_parties = structured or parties
             auto_tags = con.execute("SELECT tag,reason FROM case_auto_tags WHERE case_id=? ORDER BY tag COLLATE NOCASE", (cid,)).fetchall()
-            manual_tags = con.execute("SELECT t.name FROM case_tags ct JOIN tags t ON t.id=ct.tag_id WHERE ct.case_id=? ORDER BY t.name COLLATE NOCASE", (cid,)).fetchall()
-            timeline = build_unified_timeline(con, cid, 80)
+            manual_tags = con.execute("""SELECT t.name FROM case_tags ct JOIN tags t ON t.id=ct.tag_id
+                                         WHERE ct.case_id=? ORDER BY t.name COLLATE NOCASE""", (cid,)).fetchall()
+            timeline = build_unified_timeline(con, cid, 60)
             links = con.execute("SELECT * FROM smart_links WHERE case_id=? ORDER BY auto_created,id DESC", (cid,)).fetchall()
             labels = self._smart_label_map(con, cid)
-            alerts = con.execute("SELECT * FROM alerts WHERE case_id=? AND status='open' ORDER BY alert_date,id LIMIT 12", (cid,)).fetchall()
-            suggestions = con.execute("SELECT ds.*,d.title document_title FROM deadline_suggestions ds LEFT JOIN documents d ON d.id=ds.document_id WHERE ds.case_id=? AND ds.status='open' ORDER BY ds.id DESC", (cid,)).fetchall()
-            docs = con.execute("SELECT id,title,doc_type,received_date,delivered_date,extracted_text FROM documents WHERE case_id=? ORDER BY id DESC LIMIT 12", (cid,)).fetchall()
+            open_tasks = con.execute("""SELECT t.*,u.author_name assigned_name,u.function assigned_function
+                                        FROM tasks t LEFT JOIN users u ON u.id=t.assigned_user_id
+                                        WHERE t.case_id=? AND t.status<>'done'
+                                        ORDER BY CASE WHEN t.due_date='' THEN 1 ELSE 0 END,t.due_date,t.id""",(cid,)).fetchall()
+            alerts = con.execute("""SELECT * FROM alerts WHERE case_id=? AND status='open'
+                                    AND NOT (source_type='task' AND source_id IS NOT NULL)
+                                    ORDER BY alert_date,id LIMIT 12""", (cid,)).fetchall()
+            suggestions = con.execute("""SELECT ds.*,d.title document_title FROM deadline_suggestions ds
+                                         LEFT JOIN documents d ON d.id=ds.document_id
+                                         WHERE ds.case_id=? AND ds.status='open' ORDER BY ds.id DESC""", (cid,)).fetchall()
+            docs = con.execute("""SELECT id,title,doc_type,received_date,delivered_date,extracted_text
+                                  FROM documents WHERE case_id=? AND COALESCE(parent_document_id,0)=0
+                                  ORDER BY id DESC LIMIT 12""", (cid,)).fetchall()
             law_links = con.execute("""SELECT lcl.id,a.code,a.short_title,COALESCE(la.article_key,lcl.article_key_text) article_key,la.heading,lcl.note
-                                     FROM law_case_links lcl JOIN law_acts a ON a.id=lcl.act_id
-                                     LEFT JOIN law_articles la ON la.id=lcl.article_id WHERE lcl.case_id=? ORDER BY a.code,la.sort_order""", (cid,)).fetchall()
+                                       FROM law_case_links lcl JOIN law_acts a ON a.id=lcl.act_id
+                                       LEFT JOIN law_articles la ON la.id=lcl.article_id
+                                       WHERE lcl.case_id=? ORDER BY a.code,la.sort_order""", (cid,)).fetchall()
             law_acts = con.execute("SELECT id,code,short_title FROM law_acts ORDER BY code").fetchall()
+            users = con.execute("SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name").fetchall()
             readonly = bool(c['status'] == 'closed' and not int(c['closed_edit_unlocked'] or 0))
+
         shown_sig, sig_kind = display_case_signature(cid, c['signature'], c['internal_signature'])
         primary = shown_sig if shown_sig != 'Bez sygnatury' else (c['internal_signature'] or 'Bez sygnatury')
         party_html = ''.join(
@@ -4012,87 +4045,130 @@ class Handler(BaseHTTPRequestHandler):
         tags_html += ''.join(f"<span class='smart-tag'>{esc(r['name'])}</span>" for r in manual_tags)
         if not tags_html:
             tags_html = "<span class='muted'>Brak tagów</span>"
+
         nearest = []
-        if c['next_date']:
-            nearest.append((c['next_date'], 'Najbliższa data', c['next_step'] or c['title'], 'case'))
+        seen_nearest=set()
+        def add_nearest(d, kind, title):
+            d=str(d or '').strip(); title=str(title or '').strip(); kind=str(kind or '').strip()
+            if not d or not title: return
+            key=(d,re.sub(r"\W+","",title.lower()))
+            if key in seen_nearest: return
+            seen_nearest.add(key); nearest.append((d,kind,title))
+        for t in open_tasks:
+            if t['due_date']:
+                add_nearest(t['due_date'], row_get(t,'task_type','Zadanie') or 'Zadanie', t['title'])
         for a in alerts:
-            nearest.append((a['alert_date'], a['alert_type'], a['title'], 'alert'))
-        nearest = sorted(nearest, key=lambda x: x[0])[:6]
+            add_nearest(a['alert_date'], a['alert_type'], a['title'])
+        # Ogólna „najbliższa data” jest fallbackiem. Nie pokazujemy jej drugi raz,
+        # jeżeli tego samego dnia jest już konkretny termin/zadanie/alert.
+        if c['next_date'] and not any(x[0]==c['next_date'] for x in nearest):
+            add_nearest(c['next_date'], 'Termin', c['next_step'] or c['title'])
+        nearest = sorted(nearest, key=lambda x: x[0])[:5]
         nearest_html = ''.join(
             f"<div class='smart-date-row {'urgent' if d and d <= date.today().isoformat() else ''}'><span>{fmt_date(d)}</span><div><b>{esc(kind)}</b><small>{esc(title)}</small></div></div>"
-            for d, kind, title, _ in nearest
-        ) or "<div class='empty'>Brak najbliższych terminów i alertów.</div>"
-        timeline_parts = []
-        for x in timeline:
-            desc = f"<p>{esc(x['description'])}</p>" if x['description'] else ''
-            timeline_parts.append(
-                f"<div class='unified-item kind-{esc(x['source_type'])}'><div class='unified-date'>{fmt_date(x['date'])}</div><div class='unified-dot'></div><div class='unified-body'><div class='unified-meta'>{esc(x['kind'])} · {esc(x['type'])}</div><b>{esc(x['title'])}</b>{desc}</div></div>"
+            for d, kind, title in nearest
+        ) or "<div class='empty'>Brak najbliższych terminów.</div>"
+
+        task_rows=[]
+        for t in open_tasks:
+            assigned=''
+            if t['assigned_name']:
+                assigned=f"<span class='task-assignee'>{esc(t['assigned_name'])}</span>"
+            due=f"<span class='task-due'>{fmt_date(t['due_date'])}</span>" if t['due_date'] else "<span class='task-due muted'>bez terminu</span>"
+            task_rows.append(
+                f"<div class='simple-task-row'><form method='post' action='/task/{t['id']}/toggle'>"
+                f"<input type='hidden' name='case_id' value='{cid}'><input type='hidden' name='return_to' value='/case/{cid}'>"
+                f"<button class='task-check' title='Oznacz jako wykonane'>✓</button></form>"
+                f"<div class='simple-task-main'><div><span class='mini-badge'>{esc(row_get(t,'task_type','Zadanie') or 'Zadanie')}</span> <b>{esc(t['title'])}</b></div>"
+                f"<div class='simple-task-meta'>{due}{assigned}</div></div>"
+                f"<a class='btn small' href='/task/{t['id']}/edit?return_to=%2Fcase%2F{cid}'>Edytuj</a></div>"
             )
-        timeline_html = ''.join(timeline_parts) or "<div class='empty'>Brak zdarzeń na osi czasu.</div>"
-        relation_rows = []
-        for r in links:
-            sl = labels.get((r['source_type'], r['source_id']), f"{r['source_type']} #{r['source_id']}")
-            tl = labels.get((r['target_type'], r['target_id']), f"{r['target_type']} #{r['target_id']}")
-            auto = "<span class='mini-badge'>AUTO</span>" if r['auto_created'] else ''
-            delete = '' if readonly else f"<form method='post' action='/smart-link/{r['id']}/delete' class='inline'><input type='hidden' name='return_to' value='/case/{cid}#relations'><button class='btn small danger'>×</button></form>"
-            note = f"<small>{esc(r['note'])}</small>" if r['note'] else ''
-            relation_rows.append(f"<div class='smart-relation'><span>{esc(sl)}</span><b>{esc(r['relation_type'])}</b><span>{esc(tl)}</span>{auto}{delete}{note}</div>")
-        relations_html = ''.join(relation_rows) or "<div class='empty'>Brak logicznych powiązań. Możesz je dodać ręcznie; program automatyzuje tylko jednoznaczne związki.</div>"
-        item_opts = ''.join(
-            f"<option value='{esc(t)}:{i}'>{esc(label)}</option>"
-            for (t, i), label in sorted(labels.items(), key=lambda z: z[1].lower())
+        tasks_html=''.join(task_rows) or "<div class='empty'>Brak otwartych zadań.</div>"
+        user_opts='<option value="">— bez przypisania —</option>'+''.join(
+            f"<option value='{x['id']}'>{esc(user_display_name(x))}</option>" for x in users
         )
-        relation_type_opts = ''.join(f"<option>{esc(x)}</option>" for x in SMART_RELATION_TYPES)
-        suggestions_parts = []
-        for sg in suggestions:
-            suggestions_parts.append(
-                f"<div class='deadline-suggestion'><b>{esc(sg['suggested_title'])}</b><p>„{esc(sg['source_text'])}”</p><div class='small'>Baza: {fmt_date(sg['base_date'])} · {sg['days']} dni · {esc(sg['confidence'])}</div><form method='post' action='/deadline-suggestion/{sg['id']}/accept'><input type='hidden' name='return_to' value='/case/{cid}#deadlines'><button class='btn primary small'>Zatwierdź i utwórz termin</button></form></div>"
-            )
-        suggestions_html = ''.join(suggestions_parts) or "<div class='empty'>Brak jawnych terminów oczekujących na zatwierdzenie.</div>"
-        doc_scan = ''.join(
-            f"<form method='post' action='/document/{d['id']}/suggest-deadlines' class='doc-scan-row'><input type='hidden' name='return_to' value='/case/{cid}#deadlines'><span><b>{esc(d['title'])}</b><small>{esc(d['doc_type'])} · doręczenie: {fmt_date(d['delivered_date'])}</small></span><button class='btn small'>Sprawdź jawny termin</button></form>"
+        task_type_opts=''.join(f"<option>{esc(x)}</option>" for x in ["Zadanie","Monit","Termin procesowy","Płatność"])
+        work_form='' if readonly else f"""<details class='smart-add'><summary>+ Dodaj zadanie / monit</summary>
+        <form method='post' action='/case/{cid}/task' class='form-grid'>
+          <input type='hidden' name='return_to' value='/case/{cid}'>
+          <div><label>Rodzaj</label><select name='task_type'>{task_type_opts}</select></div>
+          <div><label>Termin / data</label><input type='date' name='due_date'></div>
+          <div class='full'><label>Co trzeba zrobić?</label><input name='title' required></div>
+          <div><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div>
+          <div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div>
+          <div class='full'><label>Notatka</label><input name='notes'></div>
+          <div class='full'><button class='btn primary'>Dodaj</button></div>
+        </form></details>"""
+
+        # Czytelna historia grupowana według dnia. Zadania i alerty są poza historią.
+        grouped={}
+        for x in timeline:
+            grouped.setdefault(x['date'] or '',[]).append(x)
+        day_parts=[]
+        for d in sorted(grouped.keys(), reverse=True):
+            rows=[]
+            for x in grouped[d]:
+                desc=(x.get('description') or '').strip()
+                if len(desc)>170: desc=desc[:167]+'…'
+                desc_html=f"<small>{esc(desc)}</small>" if desc else ''
+                att=''
+                if int(x.get('attachment_count') or 0):
+                    att=f"<span class='attachment-count'>📎 {int(x['attachment_count'])}</span>"
+                href=f"/document/{x['source_id']}/open" if x['source_type']=='document' else f"/case/{cid}?mode=advanced"
+                rows.append(f"<a class='timeline-clean-row' href='{href}'><span class='timeline-clean-kind'>{esc(x['kind'])}</span><div><b>{esc(x['title'])}</b>{desc_html}</div>{att}</a>")
+            day_parts.append(f"<div class='timeline-day'><div class='timeline-day-date'>{fmt_date(d)}</div><div class='timeline-day-items'>{''.join(rows)}</div></div>")
+        timeline_html=''.join(day_parts) or "<div class='empty'>Brak historii sprawy.</div>"
+
+        relation_rows=[]
+        for r in links:
+            sl=labels.get((r['source_type'],r['source_id']),f"{r['source_type']} #{r['source_id']}")
+            tl=labels.get((r['target_type'],r['target_id']),f"{r['target_type']} #{r['target_id']}")
+            auto="<span class='mini-badge'>AUTO</span>" if r['auto_created'] else ''
+            delete='' if readonly else f"<form method='post' action='/smart-link/{r['id']}/delete' class='inline'><input type='hidden' name='return_to' value='/case/{cid}#relations'><button class='btn small danger'>×</button></form>"
+            relation_rows.append(f"<div class='smart-relation'><span>{esc(sl)}</span><b>{esc(r['relation_type'])}</b><span>{esc(tl)}</span>{auto}{delete}</div>")
+        relations_html=''.join(relation_rows) or "<div class='empty'>Brak zapisanych powiązań.</div>"
+        item_opts=''.join(f"<option value='{esc(t)}:{i}'>{esc(label)}</option>" for (t,i),label in sorted(labels.items(),key=lambda z:z[1].lower()))
+        relation_type_opts=''.join(f"<option>{esc(x)}</option>" for x in SMART_RELATION_TYPES)
+        relation_form='' if readonly else f"""<details class='smart-add'><summary>+ Dodaj powiązanie</summary><form method='post' action='/case/{cid}/smart-link' class='form-grid'><div><label>Z czego</label><select name='source' required><option value=''>— wybierz —</option>{item_opts}</select></div><div><label>Relacja</label><select name='relation_type'>{relation_type_opts}</select></div><div><label>Z czym</label><select name='target' required><option value=''>— wybierz —</option>{item_opts}</select></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details>"""
+
+        suggestions_html=''.join(
+            f"<div class='deadline-suggestion'><b>{esc(sg['suggested_title'])}</b><div class='small'>{esc(sg['source_text'])}</div><form method='post' action='/deadline-suggestion/{sg['id']}/accept'><input type='hidden' name='return_to' value='/case/{cid}#deadlines'><button class='btn primary small'>Zatwierdź</button></form></div>"
+            for sg in suggestions
+        ) or "<div class='empty'>Brak terminów do zatwierdzenia.</div>"
+        doc_scan=''.join(
+            f"<form method='post' action='/document/{d['id']}/suggest-deadlines' class='doc-scan-row'><input type='hidden' name='return_to' value='/case/{cid}#deadlines'><span><b>{esc(d['title'])}</b><small>{esc(d['doc_type'])}</small></span><button class='btn small'>Sprawdź</button></form>"
             for d in docs
         )
-        law_parts = []
-        for r in law_links:
-            article = f" · art. {esc(r['article_key'])}" if r['article_key'] else ''
-            delete = '' if readonly else f"<form method='post' action='/law-case-link/{r['id']}/delete' class='inline'><input type='hidden' name='return_to' value='/case/{cid}#law'><button class='btn small danger'>×</button></form>"
-            law_parts.append(f"<div class='law-link'><a href='/law/{esc(r['code'])}?q={quote(str(r['article_key'] or ''))}'><b>{esc(r['code'])}{article}</b></a><span>{esc(r['short_title'])}</span>{delete}</div>")
-        law_html = ''.join(law_parts) or "<div class='empty'>Nie przypięto jeszcze przepisów do tej sprawy.</div>"
-        law_act_opts = ''.join(f"<option value='{esc(r['code'])}'>{esc(r['code'])} — {esc(r['short_title'])}</option>" for r in law_acts)
-        alert_type_opts = ''.join(f"<option>{esc(x)}</option>" for x in ALERT_TYPES)
-        alert_priority_opts = ''.join(f"<option value='{x}'>{'Krytyczny' if x == 'critical' else 'Wysoki' if x == 'high' else 'Normalny'}</option>" for x in ALERT_PRIORITIES)
-        readonly_note = "<div class='readonly-banner'>Sprawa zakończona — widok tylko do odczytu.</div>" if readonly else ''
-        relation_form = ''
-        law_form = ''
-        alert_form = ''
-        if not readonly:
-            relation_form = f"""<details class='smart-add'><summary>+ Dodaj powiązanie</summary><form method='post' action='/case/{cid}/smart-link' class='form-grid'><div><label>Z czego</label><select name='source' required><option value=''>— wybierz —</option>{item_opts}</select></div><div><label>Relacja</label><select name='relation_type'>{relation_type_opts}</select></div><div><label>Co wynika / z czym związane</label><select name='target' required><option value=''>— wybierz —</option>{item_opts}</select></div><div><label>Notatka</label><input name='note'></div><div class='full'><button class='btn primary'>Dodaj relację</button></div></form></details>"""
-            law_form = f"""<details><summary>+ Przypnij przepis</summary><form method='post' action='/case/{cid}/law-link' class='form-grid'><div><label>Akt</label><select name='code'>{law_act_opts}</select></div><div><label>Artykuł</label><input name='article_key' placeholder='np. 317'></div><div class='full'><label>Notatka</label><input name='note'></div><div class='full'><button class='btn primary'>Przypnij</button></div></form></details>"""
-            alert_form = f"""<form method='post' action='/alert/create' class='form-grid'><input type='hidden' name='case_id' value='{cid}'><input type='hidden' name='return_to' value='/case/{cid}'><div><label>Data</label><input type='date' name='alert_date' required></div><div><label>Rodzaj</label><select name='alert_type'>{alert_type_opts}</select></div><div class='full'><label>Nazwa</label><input name='title' required></div><div><label>Priorytet</label><select name='priority'>{alert_priority_opts}</select></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><button class='btn primary'>Dodaj alert</button></div></form>"""
-        body = f"""{readonly_note}<div class='case-mode-switch'><a class='btn primary' href='/case/{cid}?mode=simple'>Widok prosty</a><a class='btn' href='/case/{cid}?mode=advanced'>Widok zaawansowany</a><a class='btn' href='/case/{cid}/edit'>Edytuj</a></div>
+        law_html=''.join(
+            f"<div class='law-link'><a href='/law/{esc(r['code'])}?q={quote(str(r['article_key'] or ''))}'><b>{esc(r['code'])}{(' · art. '+esc(r['article_key'])) if r['article_key'] else ''}</b></a><span>{esc(r['short_title'])}</span></div>"
+            for r in law_links
+        ) or "<div class='empty'>Brak przypiętych przepisów.</div>"
+        law_act_opts=''.join(f"<option value='{esc(r['code'])}'>{esc(r['code'])} — {esc(r['short_title'])}</option>" for r in law_acts)
+        law_form='' if readonly else f"""<details class='smart-add'><summary>+ Przypnij przepis</summary><form method='post' action='/case/{cid}/law-link' class='form-grid'><div><label>Akt</label><select name='code'>{law_act_opts}</select></div><div><label>Artykuł</label><input name='article_key' placeholder='np. 317'></div><div class='full'><button class='btn primary'>Przypnij</button></div></form></details>"""
+
+        readonly_note="<div class='readonly-banner'>Sprawa zakończona — widok tylko do odczytu.</div>" if readonly else ''
+        body=f"""{readonly_note}<div class='case-mode-switch'><a class='btn primary' href='/case/{cid}?mode=simple'>Widok prosty</a><a class='btn' href='/case/{cid}?mode=advanced'>Widok zaawansowany</a><a class='btn' href='/case/{cid}/edit'>Edytuj</a></div>
         <section class='smart-case-hero'>
           <div class='case-signature-label'>{esc(sig_kind or 'Sygnatura')}</div><h1>{esc(primary)}</h1>
           <div class='case-parties'>{party_html}</div>
           <h2>{esc(c['title'])}</h2><div class='case-subject'>{esc(c['subject']) or 'Brak opisu przedmiotu sprawy'}</div>
           <div class='smart-tags'>{tags_html}</div>
         </section>
-        <div class='smart-summary-grid'>
-          <div class='card smart-summary-card'><div class='section-kicker'>O CZYM JEST SPRAWA</div><p>{esc(summary['description'])}</p></div>
-          <div class='card smart-summary-card'><div class='section-kicker'>AKTUALNY ETAP</div><p>{esc(summary['stage'])}</p></div>
-          <div class='card smart-summary-card'><div class='section-kicker'>CO TERAZ</div><p>{esc(summary['next'])}</p></div>
-          <div class='card smart-summary-card'><div class='section-kicker'>NAJBLIŻSZE</div>{nearest_html}<a class='smart-more' href='/calendar?case_id={cid}'>Otwórz kalendarz →</a></div>
+        <div class='smart-summary-grid simple-three'>
+          <div class='card smart-summary-card'><div class='section-kicker'>O SPRAWIE</div><p>{esc(summary['description'])}</p></div>
+          <div class='card smart-summary-card'><div class='section-kicker'>ETAP</div><p>{esc(summary['stage'])}</p></div>
+          <div class='card smart-summary-card'><div class='section-kicker'>NAJBLIŻSZE</div>{nearest_html}<a class='smart-more' href='/calendar?case_id={cid}'>Kalendarz →</a></div>
         </div>
+        <section class='card simple-tasks-card'><div class='section-head'><div><div class='section-kicker'>DO ZROBIENIA</div><h2>Otwarte zadania</h2></div><a class='btn small' href='/tasks?show=open'>Wszystkie zadania</a></div>{tasks_html}{work_form}</section>
         <div class='smart-case-layout'>
-          <section class='card smart-main'><div class='section-head'><div><div class='section-kicker'>GLOBALNA LINIA CZASU</div><h2>Co wydarzyło się w sprawie</h2></div><a class='btn small' href='/case/{cid}?mode=advanced#documents'>Szczegóły</a></div><div class='unified-timeline'>{timeline_html}</div></section>
-          <aside class='smart-side'>
-            <section class='card' id='relations'><h2>Co z czego wynika</h2><div class='small muted'>Relacje ręczne oraz jednoznaczne powiązania odczytane z danych.</div>{relations_html}{relation_form}</section>
-            <section class='card' id='deadlines'><h2>Terminy z dokumentów</h2><div class='notice subtle'><b>Bez automatycznego zgadywania.</b> Program tworzy tylko sugestię, gdy w treści widzi jawny termin. Użytkownik zawsze zatwierdza.</div>{suggestions_html}<details><summary>Sprawdź dokumenty</summary>{doc_scan or '<div class="empty">Brak dokumentów.</div>'}</details></section>
-            <section class='card' id='law'><div class='section-head'><h2>Podstawy prawne</h2><a class='btn small' href='/law?case_id={cid}'>Biblioteka</a></div>{law_html}{law_form}</section>
-            <section class='card'><h2>Nowy alert / monit</h2>{alert_form or '<div class="empty">Sprawa tylko do odczytu.</div>'}</section>
+          <section class='card smart-main'><div class='section-head'><div><div class='section-kicker'>HISTORIA SPRAWY</div><h2>Co już się wydarzyło</h2></div><a class='btn small' href='/case/{cid}?mode=advanced'>Pełna historia</a></div><div class='timeline-clean'>{timeline_html}</div></section>
+          <aside class='smart-side compact-side'>
+            <details class='card smart-collapsible' id='relations'><summary><b>Co z czego wynika</b><span>{len(links)}</span></summary><div class='smart-collapsible-body'>{relations_html}{relation_form}</div></details>
+            <details class='card smart-collapsible' id='deadlines'><summary><b>Terminy z dokumentów</b><span>{len(suggestions)}</span></summary><div class='smart-collapsible-body'><div class='notice subtle'>Program tylko podpowiada jawny termin. Niczego nie tworzy bez zatwierdzenia.</div>{suggestions_html}<details><summary>Sprawdź dokumenty</summary>{doc_scan or '<div class="empty">Brak dokumentów.</div>'}</details></div></details>
+            <details class='card smart-collapsible' id='law'><summary><b>Podstawy prawne</b><span>{len(law_links)}</span></summary><div class='smart-collapsible-body'><a class='btn small' href='/law?case_id={cid}'>Otwórz bibliotekę</a>{law_html}{law_form}</div></details>
           </aside>
         </div>"""
-        self.send_html(layout(primary, body, 'cases'))
+        self.send_html(layout(primary,body,'cases'))
 
     def calendar_page(self, qs):
         raw = (qs.get('month') or [date.today().strftime('%Y-%m')])[0]
@@ -4117,7 +4193,11 @@ class Handler(BaseHTTPRequestHandler):
                 f"SELECT a.*,c.title case_title,c.signature,c.internal_signature FROM alerts a LEFT JOIN cases c ON c.id=a.case_id WHERE a.status='open' AND a.alert_date BETWEEN ? AND ?{' AND a.case_id=?' if case_filter else ''}", params
             ).fetchall()
             tasks = con.execute(
-                f"SELECT t.*,c.title case_title,c.signature,c.internal_signature FROM tasks t JOIN cases c ON c.id=t.case_id WHERE t.status<>'done' AND t.due_date BETWEEN ? AND ?{' AND t.case_id=?' if case_filter else ''}", params
+                f"""SELECT t.*,c.title case_title,c.signature,c.internal_signature FROM tasks t
+                     JOIN cases c ON c.id=t.case_id
+                     WHERE t.status<>'done' AND t.due_date BETWEEN ? AND ?
+                     AND NOT EXISTS (SELECT 1 FROM alerts ax WHERE ax.source_type='task' AND ax.source_id=t.id AND ax.status='open')
+                     {' AND t.case_id=?' if case_filter else ''}""", params
             ).fetchall()
             process = con.execute(
                 f"SELECT p.*,c.title case_title,c.signature,c.internal_signature FROM process_events p JOIN cases c ON c.id=p.case_id WHERE (p.event_date BETWEEN ? AND ? OR p.next_date BETWEEN ? AND ?){' AND p.case_id=?' if case_filter else ''}",
@@ -4130,10 +4210,15 @@ class Handler(BaseHTTPRequestHandler):
                 f"SELECT id,next_date,title,signature,internal_signature,next_step FROM cases WHERE next_date BETWEEN ? AND ?{' AND id=?' if case_filter else ''}", params
             ).fetchall()
             cases = con.execute("SELECT id,title,signature,internal_signature FROM cases WHERE status<>'closed' ORDER BY signature='',signature,title").fetchall()
-        bydate = {}
+            users = con.execute("SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name").fetchall()
+        bydate = {}; seen_calendar=set()
         def add_item(d, kind, title, cid=0, priority='normal'):
-            if d:
-                bydate.setdefault(d, []).append((kind, title, cid, priority))
+            if not d: return
+            norm=re.sub(r'\W+','',str(title or '').lower())
+            key=(str(d),int(cid or 0),norm)
+            if key in seen_calendar: return
+            seen_calendar.add(key)
+            bydate.setdefault(d, []).append((kind, title, cid, priority))
         for r in alerts:
             add_item(r['alert_date'], r['alert_type'], r['title'], r['case_id'] or 0, r['priority'])
         for r in tasks:
@@ -4146,7 +4231,11 @@ class Handler(BaseHTTPRequestHandler):
         for r in work_events:
             add_item(r['event_date'], r['event_type'] or 'Czynność', r['title'], r['case_id'], 'normal')
         for r in case_dates:
-            add_item(r['next_date'], 'Najbliższa data', r['next_step'] or r['title'], r['id'], 'high')
+            # Pole ogólne w sprawie jest tylko fallbackiem. Jeżeli tego dnia mamy już
+            # konkretną rozprawę, zadanie, mediację itp., nie dokładamy drugiego wpisu.
+            already=any(int(item[2] or 0)==int(r['id']) for item in bydate.get(r['next_date'],[]))
+            if not already:
+                add_item(r['next_date'], 'Termin', r['next_step'] or r['title'], r['id'], 'high')
         cells = []
         cur = start
         while cur <= end:
@@ -4165,11 +4254,14 @@ class Handler(BaseHTTPRequestHandler):
         )
         type_opts = ''.join(f"<option>{esc(x)}</option>" for x in ALERT_TYPES)
         prio_opts = ''.join(f"<option value='{x}'>{esc(x)}</option>" for x in ALERT_PRIORITIES)
+        user_opts = '<option value="">— bez przypisania —</option>' + ''.join(
+            f"<option value='{u['id']}'>{esc(user_display_name(u))}</option>" for u in users
+        )
         cf = f"&case_id={case_filter}" if case_filter else ''
         body = f"""<div class='topbar'><div><h1>Kalendarz kancelarii</h1><div class='sub'>Rozprawy, terminy, zadania, monity i alerty w jednym miejscu.</div></div><div><a class='btn' href='/calendar?month={prev.strftime('%Y-%m')}{cf}'>←</a> <b class='calendar-month-title'>{first.strftime('%m.%Y')}</b> <a class='btn' href='/calendar?month={nxt.strftime('%Y-%m')}{cf}'>→</a></div></div>
         <div class='card'><form method='get' action='/calendar' class='form-grid compact-form'><input type='hidden' name='month' value='{first.strftime('%Y-%m')}'><div class='full'><label>Filtr sprawy</label><select name='case_id' onchange='this.form.submit()'>{case_opts}</select></div></form></div>
         <div class='calendar-weekdays'>{''.join(f'<div>{x}</div>' for x in ['Pon','Wt','Śr','Czw','Pt','Sob','Niedz'])}</div><div class='calendar-grid'>{''.join(cells)}</div>
-        <div class='card'><h2>Dodaj alert / monit</h2><form method='post' action='/alert/create' class='form-grid'><input type='hidden' name='return_to' value='/calendar?month={first.strftime('%Y-%m')}'><div><label>Sprawa</label><select name='case_id'>{case_opts}</select></div><div><label>Data *</label><input type='date' name='alert_date' required></div><div><label>Rodzaj</label><select name='alert_type'>{type_opts}</select></div><div><label>Priorytet</label><select name='priority'>{prio_opts}</select></div><div class='full'><label>Nazwa *</label><input name='title' required></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj alert</button></div></form></div>"""
+        <div class='card'><h2>Dodaj wpis</h2><div class='small muted' style='margin-bottom:10px'>Monit, zadanie, termin procesowy i płatność utworzą automatycznie powiązane zadanie. Rozprawa, posiedzenie i mediacja pozostaną wpisem kalendarza.</div><form method='post' action='/alert/create' class='form-grid'><input type='hidden' name='return_to' value='/calendar?month={first.strftime('%Y-%m')}'><div><label>Sprawa</label><select name='case_id'>{case_opts}</select></div><div><label>Data *</label><input type='date' name='alert_date' required></div><div><label>Rodzaj</label><select name='alert_type'>{type_opts}</select></div><div><label>Priorytet</label><select name='priority'>{prio_opts}</select></div><div class='full'><label>Nazwa *</label><input name='title' required></div><div><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></div>"""
         self.send_html(layout('Kalendarz', body, 'calendar'))
 
     def law_page(self, qs, code=''):
@@ -4183,9 +4275,15 @@ class Handler(BaseHTTPRequestHandler):
         with db() as con:
             acts = con.execute("SELECT a.*,(SELECT COUNT(*) FROM law_articles la WHERE la.act_id=a.id) article_count FROM law_acts a ORDER BY a.code").fetchall()
             results = search_law(con, q, code, 120) if (q or code) else []
-        cards = ''.join(
-            f"<div class='law-card'><div><b>{esc(a['code'])}</b><h3>{esc(a['short_title'])}</h3><div class='small muted'>{esc(a['display_address'])} · lokalnie: {a['article_count']} art. · sprawdzono: {esc(a['last_checked_at'] or 'nigdy')}</div></div><div><a class='btn small' href='/law/{esc(a['code'])}'>Otwórz</a> <form method='post' action='/law/{esc(a['code'])}/update' class='inline'><input type='hidden' name='return_to' value='/law/{esc(a['code'])}'><button class='btn small'>Aktualizuj z ELI</button></form></div></div>" for a in acts
-        )
+        card_parts=[]
+        for a in acts:
+            count=int(a['article_count'] or 0)
+            empty_cls=' needs-download' if count==0 else ''
+            status=(f"<span class='law-status'>{count} art. lokalnie</span>" if count else "<span class='law-status empty'>Nie pobrano tekstu</span>")
+            open_btn=(f"<a class='btn small' href='/law/{esc(a['code'])}'>Otwórz</a> " if count else '')
+            update_label='Pobierz z ELI' if count==0 else 'Aktualizuj z ELI'
+            card_parts.append(f"<div class='law-card{empty_cls}'><div><b>{esc(a['code'])}</b><h3>{esc(a['short_title'])}</h3><div>{status}</div><div class='small muted'>{esc(a['display_address'])} · sprawdzono: {esc(a['last_checked_at'] or 'nigdy')}</div></div><div>{open_btn}<form method='post' action='/law/{esc(a['code'])}/update' class='inline'><input type='hidden' name='return_to' value='/law/{esc(a['code'])}'><button class='btn small primary'>{update_label}</button></form></div></div>")
+        cards=''.join(card_parts)
         result_parts = []
         for r in results:
             link_form = ''
@@ -4193,51 +4291,64 @@ class Handler(BaseHTTPRequestHandler):
                 link_form = f"<form method='post' action='/case/{case_id}/law-link' class='inline'><input type='hidden' name='code' value='{esc(r['code'])}'><input type='hidden' name='article_key' value='{esc(r['article_key'])}'><input type='hidden' name='return_to' value='/law/{esc(r['code'])}?q={quote(q)}&case_id={case_id}'><button class='btn small primary'>Przypnij do sprawy</button></form>"
             result_parts.append(f"<article class='law-article'><div class='section-head'><div><span class='smart-tag'>{esc(r['code'])}</span><h3>{esc(r['heading'])}</h3></div>{link_form}</div><pre>{esc(r['body'])}</pre></article>")
         result_html = ''.join(result_parts) or ("<div class='empty'>Brak wyników. Jeśli akt ma 0 artykułów lokalnie, użyj „Aktualizuj z ELI”.</div>" if (q or code) else '')
-        body = f"""<div class='topbar'><div><h1>Biblioteka prawa</h1><div class='sub'>Lokalne teksty pomocnicze z oficjalnego ELI. Aktualność zawsze można sprawdzić jednym kliknięciem.</div></div></div>
+        body = f"""<div class='topbar'><div><h1>Biblioteka prawa</h1><div class='sub'>Kliknij „Pobierz z ELI”. Program zapisze tekst lokalnie i potem możesz go przeszukiwać bez ponownego pobierania.</div></div></div>
         <div class='notice'><b>Ważne:</b> biblioteka nie ustala sama skutków procesowych ani terminów. Przepisy są materiałem pomocniczym; aktualność i właściwą podstawę prawną weryfikuje użytkownik.</div>
         <div class='law-grid'>{cards}</div>
         <div class='card'><form method='get' action='/law/{esc(code)}' class='form-grid'><input type='hidden' name='case_id' value='{case_id or ''}'><div class='full'><label>Szukaj w {esc(code or 'wszystkich aktach')}</label><input name='q' value='{esc(q)}' placeholder='np. 317 albo rygor natychmiastowej wykonalności'></div><div class='full'><button class='btn primary'>Szukaj</button></div></form></div>{result_html}
         <details class='card'><summary>+ Dodaj inny akt z ELI</summary><form method='post' action='/law/add-eli' class='form-grid'><div><label>Kod roboczy</label><input name='code' placeholder='np. UKSC' required></div><div><label>Rok Dz.U.</label><input type='number' name='year' required></div><div><label>Pozycja</label><input type='number' name='position' required></div><div class='full'><label>Nazwa</label><input name='short_title' required></div><div class='full'><button class='btn primary'>Pobierz z ELI</button></div></form></details>"""
         self.send_html(layout('Prawo', body, 'law'))
 
+
     def alert_create(self, f):
         title = (f.get('title') or '').strip()
         d = (f.get('alert_date') or '').strip()
         if not title or not d:
             return self.redirect(f.get('return_to') or '/calendar')
-        try:
-            cid = int(f.get('case_id') or 0) or None
-        except ValueError:
-            cid = None
-        try:
-            assigned = int(f.get('assigned_user_id') or 0) or None
-        except ValueError:
-            assigned = None
+        try: cid = int(f.get('case_id') or 0) or None
+        except ValueError: cid = None
+        try: assigned = int(f.get('assigned_user_id') or 0) or None
+        except ValueError: assigned = None
         a = self.current_author(f)
         typ = (f.get('alert_type') or 'Inne').strip()
         pr = (f.get('priority') or 'normal').strip()
-        if typ not in ALERT_TYPES:
-            typ = 'Inne'
-        if pr not in ALERT_PRIORITIES:
-            pr = 'normal'
+        if typ not in ALERT_TYPES: typ = 'Inne'
+        if pr not in ALERT_PRIORITIES: pr = 'normal'
         with db() as con:
-            cur = con.execute("INSERT INTO alerts(case_id,alert_date,alert_type,title,description,priority,status,assigned_user_id,created_by) VALUES(?,?,?,?,?,?,'open',?,?)", (cid, d, typ, title, (f.get('description') or '').strip(), pr, assigned, a))
+            cur = con.execute("""INSERT INTO alerts(case_id,alert_date,alert_type,title,description,priority,status,
+                                 assigned_user_id,created_by) VALUES(?,?,?,?,?,?,'open',?,?)""",
+                              (cid,d,typ,title,(f.get('description') or '').strip(),pr,assigned,a))
+            task_id = sync_alert_task(con,cur.lastrowid,a)
+            if task_id:
+                sync_task_alert(con,task_id,a)
             if cid:
-                audit(con, cid, 'alert', cur.lastrowid, 'Dodano alert', f"{typ}: {_change_value(title)}\nData: {_change_value(d)}", a)
+                extra = "\nUtworzono powiązane zadanie." if task_id else ""
+                audit(con,cid,'alert',cur.lastrowid,'Dodano alert',f"{typ}: {_change_value(title)}\nData: {_change_value(d)}{extra}",a)
         target = (f.get('return_to') or '/calendar').strip()
         self.redirect(target if target.startswith('/') else '/calendar')
 
+
     def alert_toggle(self, aid, f):
+        a=self.current_author(f)
         with db() as con:
             r = con.execute("SELECT * FROM alerts WHERE id=?", (aid,)).fetchone()
             if not r:
                 return self.send_error(404)
             status = 'done' if r['status'] == 'open' else 'open'
             con.execute("UPDATE alerts SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (status, aid))
+            if r['source_type']=='task' and r['source_id']:
+                completed_at='' if status=='open' else datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                completed_by='' if status=='open' else a
+                con.execute("UPDATE tasks SET status=?,completed_at=?,completed_by=?,updated_by=? WHERE id=?",
+                            (status,completed_at,completed_by,a,r['source_id']))
         self.redirect(f.get('return_to') or '/calendar')
 
     def alert_delete(self, aid, f):
+        a=self.current_author(f)
         with db() as con:
+            r=con.execute("SELECT * FROM alerts WHERE id=?", (aid,)).fetchone()
+            if r and r['source_type']=='task' and r['source_id']:
+                # Zadanie i jego wpis w kalendarzu są jednym elementem roboczym.
+                move_to_trash(con,'task',int(r['source_id']),a)
             con.execute("DELETE FROM alerts WHERE id=?", (aid,))
         self.redirect(f.get('return_to') or '/calendar')
 
@@ -4319,6 +4430,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_html(layout('Analiza terminu', f"<div class='card'><h1>Nie wykryto jawnego terminu</h1><p>Program nie znalazł w odczytanej treści sformułowania typu „w terminie X dni”. Nie utworzono terminu i nie zastosowano żadnego domyślnego okresu.</p><a class='btn primary' href='{esc(target)}'>Wróć</a></div>", 'cases'))
         self.redirect(target)
 
+
     def deadline_suggestion_accept(self, sid, f):
         with db() as con:
             sg = con.execute("SELECT * FROM deadline_suggestions WHERE id=? AND status='open'", (sid,)).fetchone()
@@ -4332,11 +4444,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_html(layout('Termin', f"<div class='card'><p>{esc(exc)}</p></div>", 'cases'), 400)
             a = self.current_author(f)
             source = f"Jawny termin z dokumentu: {sg['source_text']} — zatwierdzony przez użytkownika"
-            cur = con.execute("""INSERT INTO tasks(case_id,title,due_date,status,priority,depends_on,notes,created_by,updated_by,deadline_base_date,deadline_days,deadline_rule,deadline_source,deadline_manual)
-                               VALUES(?,?,?,'open','high','',?,?,?,?,?,?,?,0)""", (sg['case_id'], sg['suggested_title'], due, source, a, a, sg['base_date'], sg['days'], rule_label, source))
+            cur = con.execute("""INSERT INTO tasks(case_id,title,due_date,status,priority,depends_on,notes,task_type,created_by,updated_by,
+                               deadline_base_date,deadline_days,deadline_rule,deadline_source,deadline_manual)
+                               VALUES(?,?,?,'open','high','',?,'Termin procesowy',?,?,?,?,?,?,0)""",
+                              (sg['case_id'], sg['suggested_title'], due, source, a, a,
+                               sg['base_date'], sg['days'], rule_label, source))
+            sync_task_alert(con,cur.lastrowid,a)
             con.execute("UPDATE deadline_suggestions SET status='accepted' WHERE id=?", (sid,))
-            con.execute("INSERT OR IGNORE INTO smart_links(case_id,source_type,source_id,target_type,target_id,relation_type,note,auto_created,created_by) VALUES(?,?,?,?,?,'uruchamia termin',?,0,?)", (sg['case_id'], 'document', sg['document_id'], 'task', cur.lastrowid, 'Termin zatwierdzony przez użytkownika', a))
-            audit(con, sg['case_id'], 'task', cur.lastrowid, 'Zatwierdzono sugestię terminu', f"Źródło: {_change_value(sg['source_text'])}\nTermin: {_change_value(due)}", a)
+            con.execute("""INSERT OR IGNORE INTO smart_links(case_id,source_type,source_id,target_type,target_id,relation_type,note,auto_created,created_by)
+                           VALUES(?,?,?,?,?,'uruchamia termin',?,0,?)""",
+                        (sg['case_id'], 'document', sg['document_id'], 'task', cur.lastrowid, 'Termin zatwierdzony przez użytkownika', a))
+            audit(con, sg['case_id'], 'task', cur.lastrowid, 'Zatwierdzono sugestię terminu',
+                  f"Źródło: {_change_value(sg['source_text'])}\nTermin: {_change_value(due)}", a)
         target = f.get('return_to') or f"/case/{sg['case_id']}#deadlines"
         self.redirect(target if target.startswith('/') else f"/case/{sg['case_id']}#deadlines")
 
@@ -4373,7 +4492,9 @@ class Handler(BaseHTTPRequestHandler):
             case_sig_map=load_external_signature_map(con,sig_ids)
         user_map={x['id']:x for x in users}
         task_user_opts='<option value="">— nie przypisano —</option>'+''.join(f"<option value='{x['id']}'>{esc(user_display_name(x))}</option>" for x in users if x['is_active'])
-        doc_task_opts='<option value="">— bez powiązanego zadania / terminu —</option>'+''.join(f"<option value='{x['id']}'>{esc(x['title'])}{(' · '+fmt_date(x['due_date'])) if x['due_date'] else ''}</option>" for x in tasks)
+        task_type_opts=''.join(f"<option>{esc(x)}</option>" for x in ["Zadanie","Monit","Termin procesowy","Płatność"])
+        doc_task_opts='<option value="">— bez powiązanego zadania / terminu —</option>'+''.join(f"<option value='{x['id']}'>{esc(x['title'])}{(' · '+fmt_date(x['due_date'])) if x['due_date'] else ''}</option>" for x in tasks if x['status']!='done')
+        doc_parent_opts='<option value="">— nowe pismo / dokument główny —</option>'+''.join(f"<option value='{x['id']}'>{esc(x['title'])}</option>" for x in docs if not row_get(x,'parent_document_id',None))
         entity_opts='<option value="">— wybierz podmiot —</option>'+''.join(f"<option value='{x['id']}'>{esc(x['display_name'])}{' · PESEL '+esc(x['pesel']) if x['pesel'] else ''}{' · NIP '+esc(x['nip']) if x['nip'] else ''}</option>" for x in all_entities)
         structured_parts=[]
         for x in structured_entities:
@@ -4456,11 +4577,10 @@ class Handler(BaseHTTPRequestHandler):
         events_html=''.join(x[4] for x in timeline_items) or '<div class="empty">Brak wpisów na osi czasu.</div>'
         timeline_filters="""<div class='timeline-filters'><button type='button' class='btn small primary' data-timeline-filter='all'>Wszystko</button><button type='button' class='btn small' data-timeline-filter='event'>Zdarzenia</button><button type='button' class='btn small' data-timeline-filter='document'>Dokumenty</button><button type='button' class='btn small' data-timeline-filter='task'>Zadania</button><button type='button' class='btn small' data-timeline-filter='draft'>Projekty</button><button type='button' class='btn small' data-timeline-filter='note'>Notatki</button></div>"""
 
-        task_parts=[]
+        open_task_parts=[]; done_task_parts=[]
         for x in tasks:
-            done='done' if x['status']=='done' else ''
-            pri='priority-high' if x['priority']=='high' and x['status']!='done' else ''
-            toggle='↩' if x['status']=='done' else '✓'
+            done=x['status']=='done'
+            pri='priority-high' if x['priority']=='high' and not done else ''
             dep=(' · zależność: '+esc(x['depends_on'])) if x['depends_on'] else ''
             note_html=f"<div class='small'>{esc(x['notes'])}</div>" if x['notes'] else ''
             au=user_map.get(x['assigned_user_id']) if x['assigned_user_id'] else None
@@ -4469,16 +4589,19 @@ class Handler(BaseHTTPRequestHandler):
             if row_get(x,'deadline_base_date',''):
                 manual=' · ręcznie skorygowany' if int(row_get(x,'deadline_manual',0) or 0) else ''
                 deadline_html=f"<div class='small deadline-meta'>Termin pomocniczo wyliczony: {fmt_date(x['deadline_base_date'])} + {esc(str(row_get(x,'deadline_days','')))} {esc(row_get(x,'deadline_rule',''))}{manual}</div>"
-            task_parts.append(
-                f"<div class='task {done}'><form method='post' action='/task/{x['id']}/toggle'><input type='hidden' name='case_id' value='{cid}'><button class='btn small'>{toggle}</button></form>"
-                f"<div style='flex:1'><div class='task-title {pri}'>{esc(x['title'])}</div><div class='small muted'>{fmt_date(x['due_date'])}{dep}</div>{assigned_html}{deadline_html}{note_html}{who(x)}"
-                f"<div style='margin-top:6px'><a class='btn small' href='/task/{x['id']}/edit'>Edytuj</a></div></div>"
-                f"<form method='post' action='/task/{x['id']}/delete' onsubmit=\"return confirm('Przenieść zadanie do Kosza?')\"><input type='hidden' name='case_id' value='{cid}'><button class='btn small danger'>×</button></form></div>"
+            type_badge=f"<span class='mini-badge'>{esc(row_get(x,'task_type','Zadanie') or 'Zadanie')}</span>"
+            item=(
+                f"<div class='task {'done compact-done' if done else ''}'><form method='post' action='/task/{x['id']}/toggle'><input type='hidden' name='case_id' value='{cid}'><input type='hidden' name='return_to' value='/case/{cid}?mode=advanced#case-tasks'><button class='task-check' title='{'Przywróć zadanie' if done else 'Oznacz jako wykonane'}'>{'↩' if done else '✓'}</button></form>"
+                f"<div style='flex:1'><div>{type_badge} <span class='task-title {pri}'>{esc(x['title'])}</span></div><div class='small muted'>{fmt_date(x['due_date'])}{dep}</div>{assigned_html}{deadline_html}{note_html}{who(x)}"
+                f"<div style='margin-top:6px'><a class='btn small' href='/task/{x['id']}/edit?return_to=%2Fcase%2F{cid}%3Fmode%3Dadvanced%23case-tasks'>Edytuj</a></div></div>"
+                f"<form method='post' action='/task/{x['id']}/delete' onsubmit=\"return confirm('Przenieść zadanie do Kosza?')\"><input type='hidden' name='case_id' value='{cid}'><input type='hidden' name='return_to' value='/case/{cid}?mode=advanced#case-tasks'><button class='btn small danger'>×</button></form></div>"
             )
-        tasks_html=''.join(task_parts) or '<div class="empty">Brak zadań.</div>'
+            (done_task_parts if done else open_task_parts).append(item)
+        open_tasks_html=''.join(open_task_parts) or '<div class="empty">Brak otwartych zadań.</div>'
+        done_tasks_html=(f"<details class='done-tasks-details'><summary>Wykonane ({len(done_task_parts)})</summary>{''.join(done_task_parts)}</details>" if done_task_parts else '')
+        tasks_html=open_tasks_html+done_tasks_html
 
-        doc_parts=[]
-        for x in docs:
+        def render_doc_row(x, child=False, parent_title=''):
             file_actions='—'
             if x['stored_name']:
                 file_actions=f"<a class='btn small' href='/document/{x['id']}/open'>Otwórz</a> <a class='btn small' href='/document/{x['id']}/download'>Pobierz</a>"
@@ -4493,12 +4616,33 @@ class Handler(BaseHTTPRequestHandler):
             if row_get(x,'document_author',''): metadata.append('autor dokumentu: '+esc(row_get(x,'document_author','')))
             if row_get(x,'tags',''): metadata.append('tagi: '+esc(row_get(x,'tags','')))
             meta_html=("<div class='small muted'>"+' · '.join(metadata)+"</div>") if metadata else ''
-            doc_parts.append(
-                f"<tr><td><b>dokument:</b> {fmt_date(x['doc_date'])}<div class='small muted'><b>wpływ:</b> {fmt_date(x['received_date'])}</div><div class='small muted'><b>doręczenie:</b> {fmt_date(row_get(x,'delivered_date',''))}</div></td>"
-                f"<td><span class='pill'>{esc(x['doc_type'])}</span><div><span class='doc-status {'sign' if x['doc_status']=='Do podpisu' else ''}'>{esc(x['doc_status'])}</span></div></td><td><b>{esc(x['title'])}</b><div class='small muted'>{esc(x['description'])}</div>{meta_html}{linked}<div class='small muted'>{filename}</div>{who(x)}</td>"
+            child_hint=(f"<div class='attachment-parent-hint'>Załącznik do: {esc(parent_title)}</div>" if child and parent_title else '')
+            kind=("<span class='attachment-label'>↳ Załącznik</span>" if child else f"<span class='pill'>{esc(x['doc_type'])}</span>")
+            row_cls=" class='attachment-row'" if child else " class='document-family'"
+            title_prefix='📎 ' if child else ''
+            return (
+                f"<tr{row_cls}><td><b>{'załącznik:' if child else 'dokument:'}</b> {fmt_date(x['doc_date'])}<div class='small muted'><b>wpływ:</b> {fmt_date(x['received_date'])}</div><div class='small muted'><b>doręczenie:</b> {fmt_date(row_get(x,'delivered_date',''))}</div></td>"
+                f"<td>{kind}<div><span class='doc-status {'sign' if x['doc_status']=='Do podpisu' else ''}'>{esc(x['doc_status'])}</span></div></td><td><b>{title_prefix}{esc(x['title'])}</b>{child_hint}<div class='small muted'>{esc(x['description'])}</div>{meta_html}{linked}<div class='small muted'>{filename}</div>{who(x)}</td>"
                 f"<td>{file_actions}</td><td class='nowrap'><a class='btn small' href='/document/{x['id']}/edit'>Edytuj</a> "
                 f"<form method='post' action='/document/{x['id']}/delete' style='display:inline' onsubmit=\"return confirm('Przenieść dokument do Kosza? Plik zostanie zachowany do czasu trwałego usunięcia z Kosza.')\"><input type='hidden' name='case_id' value='{cid}'><button class='btn small danger'>Do kosza</button></form></td></tr>"
             )
+
+        children_by_parent={}
+        roots=[]
+        ids={x['id'] for x in docs}
+        for x in docs:
+            pid=int(row_get(x,'parent_document_id',0) or 0)
+            if pid and pid in ids:
+                children_by_parent.setdefault(pid,[]).append(x)
+            else:
+                roots.append(x)
+        for arr in children_by_parent.values():
+            arr.sort(key=lambda x:(int(row_get(x,'attachment_order',0) or 0),x['id']))
+        doc_parts=[]
+        for root in roots:
+            doc_parts.append(render_doc_row(root))
+            for child in children_by_parent.get(root['id'],[]):
+                doc_parts.append(render_doc_row(child,True,root['title']))
         docs_html=''.join(doc_parts) or '<tr><td colspan=5>Brak dokumentów.</td></tr>'
 
         ext_sig_parts=[]
@@ -4583,9 +4727,9 @@ class Handler(BaseHTTPRequestHandler):
           <div class='card span12'><h2>Powiązane sprawy</h2><table><tr><th>Relacja</th><th>Sprawa</th><th>Notatka / autor</th><th></th></tr>{relations_html}</table><details><summary>+ Połącz z inną sprawą</summary>{relation_form}</details></div>
           <div class='card span12 process-preview-card'><div class='section-head'><div><div class='section-kicker'>PRZEBIEG POSTĘPOWANIA</div><h2>Historia procesu</h2><div class='small muted'>Najważniejsze zdarzenia procesowe — osobno od technicznej historii zmian.</div></div><a class='btn primary-soft' href='/case/{cid}/history#process'>Otwórz pełną historię procesu</a></div><div class='process-preview'>{''.join(f"<div class='process-preview-row'><span>{fmt_date(x['event_date'])}</span><b>{esc(x['title'])}</b><em>{'✓' if x['status']=='done' else '○'}</em></div>" for x in process_recent) or '<div class="empty">Brak wpisów procesowych. Dodaj je w Historii sprawy.</div>'}</div></div>
           <div class='card span7'><div class='section-head'><div><h2>Oś czasu pracy</h2><div class='small muted'>Codzienna praca kancelarii: dokumenty, zadania, notatki i projekty.</div></div></div>{timeline_filters}<div class='timeline'>{events_html}</div><details><summary>+ Dodaj zdarzenie</summary><form method='post' action='/case/{cid}/event' class='form-grid' style='margin-top:12px'><div><label>Data</label><input type='date' name='event_date' value='{date.today().isoformat()}'></div><div><label>Typ</label><select name='event_type'>{event_opts}</select></div><div class='full'><label>Tytuł</label><input name='title' required></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details></div>
-          <details class='card span5 module-card' id='case-tasks'><summary class='module-summary'><span><b>Zadania</b><small>Otwarte i wykonane czynności w tej sprawie</small></span><span class='module-open-label'>Otwórz</span></summary><div class='module-body'>{tasks_html}<details class='add-panel nested'><summary>+ Dodaj zadanie</summary><form method='post' action='/case/{cid}/task' class='form-grid' style='margin-top:12px'><div class='full'><label>Zadanie</label><input name='title' required></div><div><label>Termin</label><input type='date' name='due_date'></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div><div class='full'><label>Wykonawca</label><select name='assigned_user_id'>{task_user_opts}</select></div><div class='full'><label>Zależność / czekamy na</label><input name='depends_on'></div><div class='full'><label>Notatki</label><textarea name='notes'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details></div></details>
+          <details class='card span5 module-card' id='case-tasks'><summary class='module-summary'><span><b>Zadania</b><small>Domyślnie tylko otwarte; wykonane są schowane niżej</small></span><span class='module-open-label'>Otwórz</span></summary><div class='module-body'>{tasks_html}<details class='add-panel nested'><summary>+ Dodaj zadanie / monit</summary><form method='post' action='/case/{cid}/task' class='form-grid' style='margin-top:12px'><input type='hidden' name='return_to' value='/case/{cid}?mode=advanced#case-tasks'><div><label>Rodzaj</label><select name='task_type'>{task_type_opts}</select></div><div><label>Termin</label><input type='date' name='due_date'></div><div class='full'><label>Co trzeba zrobić?</label><input name='title' required></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div><div><label>Wykonawca</label><select name='assigned_user_id'>{task_user_opts}</select></div><div class='full'><label>Zależność / czekamy na</label><input name='depends_on'></div><div class='full'><label>Notatki</label><textarea name='notes'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details></div></details>
           <div class='card span12'><div class='section-head'><div><h2>Kontrola kompletności</h2><div class='small muted'>Checklista sprawy — można zastosować szablon odpowiedni do kategorii albo dodawać własne elementy.</div></div><a class='btn small' href='/checklists'>Szablony</a></div>{checklist_html}{'' if readonly else f"<details class='add-panel nested'><summary>+ Dodaj / zastosuj checklistę</summary><div class='form-grid' style='margin-top:12px'><form method='post' action='/case/{cid}/checklist/apply'><label>Zastosuj szablon</label><select name='template_id' required>{checklist_opts}</select><button class='btn'>Zastosuj</button></form><form method='post' action='/case/{cid}/checklist/add'><label>Dodaj własny element</label><input name='label' required placeholder='np. Potwierdzenie opłaty'><button class='btn'>Dodaj</button></form></div></details>"}</div>
-          <details class='card span12 module-card' id='documents'><summary class='module-summary'><span><b>Dokumenty</b><small>Dokumenty, pisma i załączniki tej sprawy</small></span><span class='module-open-label'>Otwórz</span></summary><div class='module-body'><div class='section-head'><div><h2>Dokumenty 2.0</h2><div class='small muted'>Metadane, status, doręczenie, tagi i powiązanie z terminem/zadaniem.</div></div><a class='btn small' href='/documents?q={quote(c['internal_signature'] or c['signature'] or c['title'])}'>Otwórz teczkę dokumentów</a></div><table><tr><th>Daty</th><th>Rodzaj</th><th>Dokument / autor</th><th>Plik</th><th></th></tr>{docs_html}</table>{'' if readonly else f"<details class='add-panel nested'><summary>+ Podepnij dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid' style='margin-top:12px'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_opts}</select></div><div><label>Status dokumentu</label><select name='doc_status'>{doc_status_opts}</select></div><div><label>Nadawca</label><input name='sender'></div><div><label>Autor dokumentu</label><input name='document_author'></div><div><label>Tagi</label><input name='tags' placeholder='np. dowód, odpowiedź, pilne'></div><div class='full'><label>Powiązane zadanie / termin</label><select name='linked_task_id'>{doc_task_opts}</select></div><div class='full'><label>Tytuł *</label><input id='newDocTitle' name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Plik (opcjonalnie)</label><input type='file' name='file'><label style='font-weight:500'><input style='width:auto' type='checkbox' name='allow_duplicate' value='1'> Zezwól na identyczny plik, jeśli świadomie chcę duplikat</label></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"}</div></details>
+          <details class='card span12 module-card' id='documents'><summary class='module-summary'><span><b>Dokumenty</b><small>Dokumenty, pisma i załączniki tej sprawy</small></span><span class='module-open-label'>Otwórz</span></summary><div class='module-body'><div class='section-head'><div><h2>Dokumenty 2.0</h2><div class='small muted'>Metadane, status, doręczenie, tagi i powiązanie z terminem/zadaniem.</div></div><a class='btn small' href='/documents?q={quote(c['internal_signature'] or c['signature'] or c['title'])}'>Otwórz teczkę dokumentów</a></div><table><tr><th>Daty</th><th>Rodzaj</th><th>Dokument / autor</th><th>Plik</th><th></th></tr>{docs_html}</table>{'' if readonly else f"<details class='add-panel nested'><summary>+ Podepnij dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid' style='margin-top:12px'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_opts}</select></div><div><label>Status dokumentu</label><select name='doc_status'>{doc_status_opts}</select></div><div><label>Nadawca</label><input name='sender'></div><div><label>Autor dokumentu</label><input name='document_author'></div><div><label>Tagi</label><input name='tags' placeholder='np. dowód, odpowiedź, pilne'></div><div class='full'><label>Dodaj jako</label><select name='parent_document_id'>{doc_parent_opts}</select><div class='small muted'>Jeżeli wybierzesz istniejące pismo, nowy dokument stanie się jego załącznikiem.</div></div><div class='full'><label>Powiązane zadanie / termin</label><select name='linked_task_id'>{doc_task_opts}</select></div><div class='full'><label>Tytuł *</label><input id='newDocTitle' name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Pismo / dokument główny (opcjonalnie)</label><input type='file' name='file'><label style='font-weight:500'><input style='width:auto' type='checkbox' name='allow_duplicate' value='1'> Zezwól na identyczny plik, jeśli świadomie chcę duplikat</label></div><div class='full'><label>Załączniki do tego pisma</label><input type='file' name='attachments[]' multiple><div class='small muted'>Możesz wskazać kilka plików naraz. Program zapisze je pod dokumentem głównym.</div></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"}</div></details>
           <details class='card span12 module-card' id='case-notes'><summary class='module-summary'><span><b>Notatki</b><small>Chronologiczne notatki kancelarii</small></span><span class='module-open-label'>Otwórz</span></summary><div class='module-body'>{notes_html}<details><summary>+ Dodaj notatkę</summary><form method='post' action='/case/{cid}/note' style='margin-top:12px'><label>Treść notatki</label><textarea name='note' required></textarea><button class='btn primary'>Dodaj notatkę</button></form></details></div></details>
           <div class='card span12'><div class='section-head'><div><h2>Historia zmian tej sprawy</h2><div class='small muted'>Kto, kiedy i co zmienił. Powtarzające się autosave są scalane.</div></div><a class='btn small' href='/history?case_id={cid}'>Pełna historia</a></div>{history_html}</div>
         </div>"""
@@ -4848,28 +4992,35 @@ class Handler(BaseHTTPRequestHandler):
         prio='<option value="normal" {n}>Normalny</option><option value="high" {h}>Wysoki</option>'.format(n='selected' if t['priority']=='normal' else '',h='selected' if t['priority']=='high' else '')
         stat='<option value="open" {o}>Otwarte</option><option value="done" {d}>Wykonane</option>'.format(o='selected' if t['status']=='open' else '',d='selected' if t['status']=='done' else '')
         user_opts='<option value="">— nie przypisano —</option>'+''.join(f"<option value='{u['id']}' {'selected' if t['assigned_user_id']==u['id'] else ''}>{esc(user_display_name(u))}</option>" for u in users)
+        type_opts=''.join(f"<option value='{esc(x)}' {'selected' if row_get(t,'task_type','Zadanie')==x else ''}>{esc(x)}</option>" for x in ["Zadanie","Monit","Termin procesowy","Płatność"])
         back_href=return_to if return_to.startswith('/') else f"/case/{t['case_id']}"
         deadline_info=''
         if row_get(t,'deadline_base_date',''):
             manual=' · <b>termin skorygowany ręcznie</b>' if int(row_get(t,'deadline_manual',0) or 0) else ''
             deadline_info=f"<div class='notice deadline-note'><b>Termin wyliczony pomocniczo:</b> od {fmt_date(t['deadline_base_date'])} + {esc(str(row_get(t,'deadline_days','')))} {esc(row_get(t,'deadline_rule',''))}. {esc(row_get(t,'deadline_source',''))}{manual}</div>"
-        body=f'''<div class="topbar"><div><h1>Edytuj zadanie</h1><div class="sub">{esc(t['signature'] or t['case_title'])}</div></div></div>{deadline_info}<div class="card"><form method="post" action="/task/{tid}/update" class="form-grid" data-autosave="1"><input type="hidden" name="case_id" value="{t['case_id']}"><input type="hidden" name="return_to" value="{esc(return_to)}"><div class="full"><label>Zadanie</label><input name="title" required value="{esc(t['title'])}"></div><div><label>Termin</label><input type="date" name="due_date" value="{esc(t['due_date'])}"><div class="small muted">Możesz ręcznie skorygować termin. Historia zachowa zmianę.</div></div><div><label>Priorytet</label><select name="priority">{prio}</select></div><div><label>Status</label><select name="status">{stat}</select></div><div><label>Wykonawca</label><select name="assigned_user_id">{user_opts}</select></div><div class="full"><label>Zależność / czekamy na</label><input name="depends_on" value="{esc(t['depends_on'])}"></div><div class="full"><label>Notatki</label><textarea name="notes">{esc(t['notes'])}</textarea></div><div class="full"><button class="btn primary">Zapisz zmiany</button> <a class="btn" href="{esc(back_href)}">Anuluj</a></div></form></div>'''
+        body=f'''<div class="topbar"><div><h1>Edytuj zadanie</h1><div class="sub">{esc(t['signature'] or t['case_title'])}</div></div></div>{deadline_info}<div class="card"><form method="post" action="/task/{tid}/update" class="form-grid" data-autosave="1"><input type="hidden" name="case_id" value="{t['case_id']}"><input type="hidden" name="return_to" value="{esc(return_to)}"><div><label>Rodzaj</label><select name="task_type">{type_opts}</select></div><div class="full"><label>Zadanie</label><input name="title" required value="{esc(t['title'])}"></div><div><label>Termin</label><input type="date" name="due_date" value="{esc(t['due_date'])}"><div class="small muted">Możesz ręcznie skorygować termin. Historia zachowa zmianę.</div></div><div><label>Priorytet</label><select name="priority">{prio}</select></div><div><label>Status</label><select name="status">{stat}</select></div><div><label>Wykonawca</label><select name="assigned_user_id">{user_opts}</select></div><div class="full"><label>Zależność / czekamy na</label><input name="depends_on" value="{esc(t['depends_on'])}"></div><div class="full"><label>Notatki</label><textarea name="notes">{esc(t['notes'])}</textarea></div><div class="full"><button class="btn primary">Zapisz zmiany</button> <a class="btn" href="{esc(back_href)}">Anuluj</a></div></form></div>'''
         self.send_html(layout('Edycja zadania',body,'tasks'))
+
 
     def task_update(self,tid,f):
         cid=int(f.get('case_id','0') or 0); a=self.current_author(f)
         try: assigned=int(f.get('assigned_user_id','') or 0) or None
         except ValueError: assigned=None
+        task_type=(f.get('task_type') or 'Zadanie').strip()
+        if task_type not in ACTIONABLE_ALERT_TYPES:
+            task_type='Zadanie'
         new={
             'title':f.get('title','').strip(),'due_date':f.get('due_date',''),'status':f.get('status','open'),
-            'priority':f.get('priority','normal'),'assigned_user_id':assigned,'depends_on':f.get('depends_on','').strip(),'notes':f.get('notes','').strip()
+            'priority':f.get('priority','normal'),'assigned_user_id':assigned,'depends_on':f.get('depends_on','').strip(),
+            'notes':f.get('notes','').strip(),'task_type':task_type
         }
         with db() as con:
             old=con.execute("SELECT * FROM tasks WHERE id=?",(tid,)).fetchone()
             if not old: return self.send_error(404)
             cid=old['case_id']
             details=describe_changes(old,new,{
-                'title':'Zadanie','due_date':'Termin','status':'Status','priority':'Priorytet','depends_on':'Zależność / czekamy na','notes':'Notatki'
+                'title':'Zadanie','task_type':'Rodzaj','due_date':'Termin','status':'Status','priority':'Priorytet',
+                'depends_on':'Zależność / czekamy na','notes':'Notatki'
             },compact_fields={'notes'})
             if old['assigned_user_id'] != assigned:
                 old_u=con.execute("SELECT author_name,function FROM users WHERE id=?",(old['assigned_user_id'],)).fetchone() if old['assigned_user_id'] else None
@@ -4880,7 +5031,16 @@ class Handler(BaseHTTPRequestHandler):
             if row_get(old,'deadline_base_date','') and old['due_date'] != new['due_date']:
                 deadline_manual=1
                 details=(details+'\n'+f"• Tryb terminu: {_change_value('wyliczony automatycznie')} → {_change_value('skorygowany ręcznie')}").strip()
-            con.execute("UPDATE tasks SET title=?,due_date=?,status=?,priority=?,assigned_user_id=?,depends_on=?,notes=?,updated_by=?,deadline_manual=? WHERE id=?",(new['title'],new['due_date'],new['status'],new['priority'],assigned,new['depends_on'],new['notes'],a,deadline_manual,tid))
+            completed_at=row_get(old,'completed_at',''); completed_by=row_get(old,'completed_by','')
+            if old['status']!='done' and new['status']=='done':
+                completed_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'); completed_by=a
+            elif old['status']=='done' and new['status']!='done':
+                completed_at=''; completed_by=''
+            con.execute("""UPDATE tasks SET title=?,due_date=?,status=?,priority=?,assigned_user_id=?,depends_on=?,notes=?,
+                           task_type=?,updated_by=?,deadline_manual=?,completed_at=?,completed_by=? WHERE id=?""",
+                        (new['title'],new['due_date'],new['status'],new['priority'],assigned,new['depends_on'],new['notes'],
+                         task_type,a,deadline_manual,completed_at,completed_by,tid))
+            sync_task_alert(con,tid,a)
             if details: audit(con,cid,'task',tid,'Edytowano zadanie',details,a)
         target=(f.get('return_to','') or '').strip()
         self.redirect(target if target.startswith('/') else f'/case/{cid}')
@@ -4973,6 +5133,7 @@ class Handler(BaseHTTPRequestHandler):
         target=(f.get('return_to','') or '').strip()
         self.redirect(target if target.startswith('/') else f'/case/{cid}')
 
+
     def task_add(self,cid,f):
         a=self.current_author(f); title=f.get('title','').strip()
         if not title:
@@ -4980,12 +5141,20 @@ class Handler(BaseHTTPRequestHandler):
             return self.redirect(target if target.startswith('/') else f'/case/{cid}')
         try: assigned=int(f.get('assigned_user_id','') or 0) or None
         except ValueError: assigned=None
+        task_type=(f.get('task_type') or 'Zadanie').strip()
+        if task_type not in ACTIONABLE_ALERT_TYPES:
+            task_type='Zadanie'
         with db() as con:
             if not con.execute("SELECT 1 FROM cases WHERE id=?",(cid,)).fetchone(): return self.send_error(404)
             if case_read_only(con,cid): return self.send_error(403,'Sprawa zakończona jest tylko do odczytu.')
-            cur=con.execute("INSERT INTO tasks(case_id,title,due_date,status,priority,assigned_user_id,depends_on,notes,created_by,updated_by) VALUES(?,?,?,'open',?,?,?,?,?,?)",(cid,title,f.get('due_date',''),f.get('priority','normal'),assigned,f.get('depends_on','').strip(),f.get('notes','').strip(),a,a))
+            cur=con.execute("""INSERT INTO tasks(case_id,title,due_date,status,priority,assigned_user_id,depends_on,notes,task_type,created_by,updated_by)
+                               VALUES(?,?,?,'open',?,?,?,?,?,?,?)""",
+                            (cid,title,f.get('due_date',''),f.get('priority','normal'),assigned,
+                             f.get('depends_on','').strip(),f.get('notes','').strip(),task_type,a,a))
+            sync_task_alert(con,cur.lastrowid,a)
             assigned_row=con.execute("SELECT author_name,function FROM users WHERE id=?",(assigned,)).fetchone() if assigned else None
             details=(f"Zadanie: {_change_value(title)}\n"
+                     f"Rodzaj: {_change_value(task_type)}\n"
                      f"Termin: {_change_value(f.get('due_date',''))}\n"
                      f"Priorytet: {_change_value('Wysoki' if f.get('priority','normal')=='high' else 'Normalny')}\n"
                      f"Wykonawca: {_change_value(user_display_name(assigned_row) if assigned_row else '—')}")
@@ -5002,37 +5171,83 @@ class Handler(BaseHTTPRequestHandler):
         if not (f.get('return_to','') or '').strip(): f['return_to']='/tasks'
         return self.task_add(cid,f)
 
+
     def document_add(self,cid,f,files):
         if not self.ensure_case_editable(cid): return
         title=f.get('title','').strip(); stored=''; original=''; a=self.current_author(f); data=None
-        if 'file' in files and files['file'][0]:
+        try: parent_id=int(f.get('parent_document_id') or 0) or None
+        except Exception: parent_id=None
+
+        if 'file' in files and isinstance(files['file'], tuple) and files['file'][0]:
             original=safe_filename(files['file'][0]); data=files['file'][1]
             h=sha256_bytes(data)
             with db() as con:
-                dup=con.execute("SELECT d.id,d.title,d.case_id,c.title case_title,c.signature,c.internal_signature FROM documents d JOIN cases c ON c.id=d.case_id WHERE d.file_hash=? LIMIT 1",(h,)).fetchone()
+                dup=con.execute("""SELECT d.id,d.title,d.case_id,c.title case_title,c.signature,c.internal_signature
+                                   FROM documents d JOIN cases c ON c.id=d.case_id WHERE d.file_hash=? LIMIT 1""",(h,)).fetchone()
             if dup and not f.get('allow_duplicate'):
                 label=primary_signature_text(dup['case_id'],dup['signature'],dup['internal_signature'])
-                body=f"<div class='conflict-box'><h1>Identyczny dokument już istnieje</h1><p>Ten sam plik (SHA-256) jest już podpięty jako <b>{esc(dup['title'])}</b> w sprawie <a href='/case/{dup['case_id']}'>{esc(label)}</a>.</p><p>Jeśli to celowe, wróć do sprawy, ponownie wybierz plik i zaznacz <b>„Zezwól na identyczny plik”</b>.</p><a class='btn' href='/case/{cid}#documents'>Wróć do dokumentów</a></div>"
+                body=f"<div class='conflict-box'><h1>Identyczny dokument już istnieje</h1><p>Ten sam plik jest już podpięty jako <b>{esc(dup['title'])}</b> w sprawie <a href='/case/{dup['case_id']}'>{esc(label)}</a>.</p><p>Jeśli to celowe, wróć i zaznacz „Zezwól na identyczny plik”.</p><a class='btn' href='/case/{cid}#documents'>Wróć do dokumentów</a></div>"
                 return self.send_html(layout('Wykryto duplikat',body,'documents'),409)
-            folder=FILES_DIR/f"sprawa_{cid}"; folder.mkdir(parents=True,exist_ok=True); stored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"; atomic_write_bytes(folder/stored,data)
+            folder=FILES_DIR/f"sprawa_{cid}"; folder.mkdir(parents=True,exist_ok=True)
+            stored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"
+            atomic_write_bytes(folder/stored,data)
+
+        attachment_files=files.get('attachments[]',[]) if isinstance(files,dict) else []
+        if isinstance(attachment_files,tuple):
+            attachment_files=[attachment_files]
+
+        indexed_ids=[]
         with db() as con:
-            dtype=f.get('doc_type','Inne'); dstatus=f.get('doc_status','Aktywny'); ddate=f.get('doc_date',''); rdate=f.get('received_date',''); delivered=f.get('delivered_date','')
+            dtype=f.get('doc_type','Inne'); dstatus=f.get('doc_status','Aktywny')
+            if parent_id: dtype='Załącznik'
+            ddate=f.get('doc_date',''); rdate=f.get('received_date',''); delivered=f.get('delivered_date','')
             try: linked=int(f.get('linked_task_id') or 0) or None
             except Exception: linked=None
             if linked and not con.execute('SELECT 1 FROM tasks WHERE id=? AND case_id=?',(linked,cid)).fetchone(): linked=None
-            cur=con.execute("INSERT INTO documents(case_id,doc_date,received_date,delivered_date,doc_type,doc_status,title,description,sender,document_author,tags,linked_task_id,stored_name,original_name,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                            (cid,ddate,rdate,delivered,dtype,dstatus,title,f.get('description','').strip(),f.get('sender','').strip(),f.get('document_author','').strip(),f.get('tags','').strip(),linked,stored,original,a,a))
+            if parent_id and not con.execute("SELECT 1 FROM documents WHERE id=? AND case_id=?",(parent_id,cid)).fetchone():
+                parent_id=None
+            cur=con.execute("""INSERT INTO documents(case_id,doc_date,received_date,delivered_date,doc_type,doc_status,title,description,
+                               sender,document_author,tags,linked_task_id,stored_name,original_name,parent_document_id,attachment_order,
+                               created_by,updated_by)
+                               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (cid,ddate,rdate,delivered,dtype,dstatus,title,f.get('description','').strip(),
+                             f.get('sender','').strip(),f.get('document_author','').strip(),f.get('tags','').strip(),linked,
+                             stored,original,parent_id,0,a,a))
             doc_id=cur.lastrowid
-            if data is not None: con.execute("UPDATE documents SET file_hash=?,ocr_status='kolejka' WHERE id=?",(sha256_bytes(data),doc_id))
+            if data is not None:
+                con.execute("UPDATE documents SET file_hash=?,ocr_status='kolejka' WHERE id=?",(sha256_bytes(data),doc_id))
+                indexed_ids.append(doc_id)
+
+            # Pliki wybrane w polu „Załączniki do pisma” są automatycznie dziećmi dokumentu głównego.
+            if not parent_id:
+                folder=FILES_DIR/f"sprawa_{cid}"; folder.mkdir(parents=True,exist_ok=True)
+                for order,item in enumerate(attachment_files,1):
+                    if not item or not item[0]:
+                        continue
+                    aname=safe_filename(item[0]); adata=item[1]
+                    astored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{aname}"
+                    atomic_write_bytes(folder/astored,adata)
+                    atitle=Path(aname).stem or f"Załącznik {order}"
+                    acur=con.execute("""INSERT INTO documents(case_id,doc_date,received_date,delivered_date,doc_type,doc_status,title,description,
+                                       sender,document_author,tags,linked_task_id,stored_name,original_name,parent_document_id,attachment_order,
+                                       created_by,updated_by,file_hash,ocr_status)
+                                       VALUES(?,?,?,?,?,'Aktywny',?,'',?,?,?,?,?,?,?,?,?,?,?,'kolejka')""",
+                                    (cid,ddate,rdate,delivered,'Załącznik',atitle,f.get('sender','').strip(),
+                                     f.get('document_author','').strip(),'załącznik',linked,astored,aname,doc_id,order,a,a,sha256_bytes(adata)))
+                    indexed_ids.append(acur.lastrowid)
+
             details=(f"Tytuł: {_change_value(title)}\nRodzaj: {_change_value(dtype)}\nStatus: {_change_value(dstatus)}"
-                     f"\nData dokumentu: {_change_value(ddate)}\nData wpływu: {_change_value(rdate)}\nData doręczenia: {_change_value(delivered)}"
-                     f"\nNadawca: {_change_value(f.get('sender','').strip())}\nAutor dokumentu: {_change_value(f.get('document_author','').strip())}\nTagi: {_change_value(f.get('tags','').strip())}")
-            if linked:
-                t=con.execute('SELECT title FROM tasks WHERE id=?',(linked,)).fetchone(); details += f"\nPowiązane zadanie/termin: {_change_value(t['title'] if t else linked)}"
+                     f"\nData dokumentu: {_change_value(ddate)}\nData wpływu: {_change_value(rdate)}\nData doręczenia: {_change_value(delivered)}")
+            if parent_id:
+                pdoc=con.execute("SELECT title FROM documents WHERE id=?",(parent_id,)).fetchone()
+                details+=f"\nZałącznik do: {_change_value(pdoc['title'] if pdoc else parent_id)}"
+            if attachment_files and not parent_id:
+                details+=f"\nZałączniki: {len([x for x in attachment_files if x and x[0]])}"
             if original: details += f"\nPlik: {_change_value(original)}"
-            action='Dodano pismo' if dtype in PLEADING_DOC_TYPES else 'Dodano dokument'
+            action='Dodano pismo' if dtype in PLEADING_DOC_TYPES else ('Dodano załącznik' if parent_id else 'Dodano dokument')
             audit(con,cid,'document',doc_id,action,details,a)
-        if data is not None: enqueue_document_index(doc_id)
+        for iid in indexed_ids:
+            enqueue_document_index(iid)
         target=(f.get('return_to','') or '').strip()
         self.redirect(target if target.startswith('/') else f'/case/{cid}')
 
@@ -5045,14 +5260,17 @@ class Handler(BaseHTTPRequestHandler):
                 completed_at='' if new=='open' else datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 completed_by='' if new=='open' else a
                 con.execute("UPDATE tasks SET status=?,updated_by=?,completed_at=?,completed_by=? WHERE id=?",(new,a,completed_at,completed_by,tid))
+                sync_task_alert(con,tid,a)
                 audit(con,cid,'task',tid,'Zadanie oznaczono jako wykonane' if new=='done' else 'Cofnięto wykonanie zadania',f"Zadanie: {_change_value(r['title'])}",a)
         target=(f.get('return_to','') or '').strip()
         self.redirect(target if target.startswith('/') else (f'/case/{cid}' if cid else '/tasks'))
+
 
     def task_delete(self,tid,f):
         cid=int(f.get('case_id','0') or 0); a=self.current_author(f)
         with db() as con:
             row=con.execute("SELECT case_id FROM tasks WHERE id=?",(tid,)).fetchone(); cid=row['case_id'] if row else cid
+            con.execute("DELETE FROM alerts WHERE source_type='task' AND source_id=?",(tid,))
             move_to_trash(con,'task',tid,a)
         target=(f.get('return_to','') or '').strip()
         self.redirect(target if target.startswith('/') else (f'/case/{cid}' if cid else '/tasks'))
@@ -5067,10 +5285,14 @@ class Handler(BaseHTTPRequestHandler):
         with db() as con: move_to_trash(con,'party',pid,a)
         self.redirect(f'/case/{cid}')
 
+
     def document_delete(self,did,f):
         cid=int(f.get('case_id','0') or 0); a=self.current_author(f)
         with db() as con:
             row=con.execute("SELECT case_id FROM documents WHERE id=?",(did,)).fetchone(); cid=row['case_id'] if row else cid
+            children=con.execute("SELECT id FROM documents WHERE parent_document_id=? ORDER BY attachment_order,id",(did,)).fetchall()
+            for ch in children:
+                move_to_trash(con,'document',ch['id'],a)
             move_to_trash(con,'document',did,a)
         self.redirect(f'/case/{cid}')
 
@@ -5107,6 +5329,8 @@ class Handler(BaseHTTPRequestHandler):
     def document_view(self,did,qs=None):
         with db() as con:
             d=con.execute("SELECT d.*,c.title case_title,c.signature,c.internal_signature FROM documents d JOIN cases c ON c.id=d.case_id WHERE d.id=?",(did,)).fetchone()
+            parent=con.execute("SELECT id,title FROM documents WHERE id=?",(row_get(d,'parent_document_id',0),)).fetchone() if d and row_get(d,'parent_document_id',0) else None
+            children=con.execute("SELECT id,title,original_name,stored_name FROM documents WHERE parent_document_id=? ORDER BY attachment_order,id",(did,)).fetchall() if d else []
         if not d: return self.send_error(404)
         state,p,why=document_state(d)
         if state!='ok' or not p: return self.document_missing_page(d,why)
@@ -5142,7 +5366,16 @@ class Handler(BaseHTTPRequestHandler):
             except OSError: size=0
             preview=(f"<div class='doc-native-view' style='text-align:center;background:#eef1ef;padding:18px;overflow:auto;max-height:calc(100vh - 260px)'><img src='/document/{did}/file' alt='{esc(d['title'])}' style='max-width:100%;height:auto;box-shadow:0 4px 20px rgba(0,0,0,.18)'></div>" if size<=25*1024*1024 else f"<div class='notice'>Obraz ma {size/1024/1024:.1f} MB. Automatyczny podgląd wyłączono, aby nie zamrozić okna. Użyj „Otwórz w programie domyślnym” lub „Pobierz”.</div>")
         else: preview=text_preview(f'Format {ext or "bez rozszerzenia"} nie ma własnego stabilnego podglądu')
-        body=f"<div class='topbar'><div><h1>{esc(d['title'])}</h1><div class='sub'>{esc(case_label)} · {meta}</div></div><div class='case-control-bar'>{toolbar}</div></div>{preview}"
+        family_html=''
+        if parent:
+            family_html=f"<div class='card document-family'><span class='attachment-label'>📎 Załącznik</span> do pisma: <a href='/document/{parent['id']}/open'><b>{esc(parent['title'])}</b></a></div>"
+        elif children:
+            attachment_rows=[]
+            for ch in children:
+                file_note=esc(ch['original_name'] or 'bez pliku')
+                attachment_rows.append(f"<div class='document-attachment-item'><span>📎 <a href='/document/{ch['id']}/open'><b>{esc(ch['title'])}</b></a><small class='muted'> · {file_note}</small></span><a class='btn small' href='/document/{ch['id']}/open'>Otwórz</a></div>")
+            family_html=f"<div class='card document-family'><h2>Załączniki ({len(children)})</h2><div class='document-attachment-list'>{''.join(attachment_rows)}</div></div>"
+        body=f"<div class='topbar'><div><h1>{esc(d['title'])}</h1><div class='sub'>{esc(case_label)} · {meta}</div></div><div class='case-control-bar'>{toolbar}</div></div>{family_html}{preview}"
         extra_css="<style>.doc-native-view{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff}.doc-text-preview{background:#fff;border:1px solid var(--line);border-radius:10px;padding:28px;max-width:1200px;margin:0 auto;max-height:calc(100vh - 250px);overflow:auto;box-shadow:0 2px 10px rgba(0,0,0,.04)}.pdf-preview{min-height:420px}</style>"
         self.send_html(layout('Podgląd dokumentu',extra_css+body,'documents'))
 
@@ -5282,7 +5515,7 @@ class Handler(BaseHTTPRequestHandler):
                 manual=' · ręcznie skorygowany' if int(row_get(r,'deadline_manual',0) or 0) else ''
                 deadline_meta=f"<div class='small deadline-meta'>wyliczono: {fmt_date(r['deadline_base_date'])} + {esc(str(row_get(r,'deadline_days','')))} {esc(row_get(r,'deadline_rule',''))}{manual}</div>"
             edit_return=quote(current_return,safe='')
-            parts.append(f"<tr><td><form method='post' action='/task/{r['id']}/toggle'><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small'>{toggle}</button></form></td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td class='{cls}'><b>{esc(r['title'])}</b>{dep}{deadline_meta}{auth_html}</td><td>{fmt_date(r['due_date'])}</td><td>{esc(assigned)}</td><td>{prio}</td><td class='nowrap'><a class='btn small' href='/task/{r['id']}/edit?return_to={edit_return}'>Edytuj</a> <form style='display:inline' method='post' action='/task/{r['id']}/delete' onsubmit=\"return confirm('Przenieść zadanie do Kosza?');\"><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small danger'>Do kosza</button></form></td></tr>")
+            parts.append(f"<tr><td><form method='post' action='/task/{r['id']}/toggle'><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small'>{toggle}</button></form></td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td class='{cls}'><span class='mini-badge'>{esc(row_get(r,'task_type','Zadanie') or 'Zadanie')}</span> <b>{esc(r['title'])}</b>{dep}{deadline_meta}{auth_html}</td><td>{fmt_date(r['due_date'])}</td><td>{esc(assigned)}</td><td>{prio}</td><td class='nowrap'><a class='btn small' href='/task/{r['id']}/edit?return_to={edit_return}'>Edytuj</a> <form style='display:inline' method='post' action='/task/{r['id']}/delete' onsubmit=\"return confirm('Przenieść zadanie do Kosza?');\"><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small danger'>Do kosza</button></form></td></tr>")
         trs=''.join(parts) or '<tr><td colspan=7><div class="empty compact-empty"><b>Brak zadań do pokazania.</b><div class="small">Dodaj nowe zadanie przyciskiem u góry.</div></div></td></tr>'
         qp='&mine=1' if mine else ''; a1='primary' if show=='open' else ''; a2='primary' if show=='all' else ''
         mine_button="<a class='btn primary' href='/tasks?show=open&mine=1'>Moje zadania</a> <a class='btn' href='/tasks?show=open'>Wszystkie zadania</a>" if mine else "<a class='btn' href='/tasks?show=open&mine=1'>Moje zadania</a>"
@@ -5300,8 +5533,8 @@ class Handler(BaseHTTPRequestHandler):
         create_form=(f"""<details class='card add-panel' id='new-task'><summary><span class='add-panel-plus'>＋</span><span><b>Dodaj zadanie</b><small>Formularz pokaże się dopiero tutaj.</small></span></summary><div class='add-panel-body'>
         <form method='post' action='/task/create' class='form-grid'><input type='hidden' name='return_to' value='/tasks'>
         <div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz sprawę —</option>{''.join(case_opts)}</select></div>
-        <div class='full'><label>Co trzeba zrobić? *</label><input name='title' required placeholder='np. Przygotować odpowiedź na pismo'></div>
-        <div><label>Termin</label><input type='date' name='due_date'></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div>
+        <div><label>Rodzaj</label><select name='task_type'><option>Zadanie</option><option>Monit</option><option>Termin procesowy</option><option>Płatność</option></select></div><div><label>Termin</label><input type='date' name='due_date'></div>
+        <div class='full'><label>Co trzeba zrobić? *</label><input name='title' required placeholder='np. Przygotować odpowiedź na pismo'></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div>
         <div class='full'><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div>
         <details class='advanced-fields full'><summary>Więcej opcji</summary><div class='form-grid'><div class='full'><label>Zależność / czekamy na</label><input name='depends_on'></div><div class='full'><label>Notatki</label><textarea name='notes'></textarea></div></div></details>
         <div class='full'><button class='btn primary'>Dodaj zadanie</button></div></form></div></details>""" if cases else "<div class='notice'>Najpierw dodaj aktywną sprawę, aby utworzyć zadanie.</div>")
@@ -5319,7 +5552,7 @@ class Handler(BaseHTTPRequestHandler):
         if dtype: sql += " AND d.doc_type=?"; params.append(dtype)
         if dstatus: sql += " AND d.doc_status=?"; params.append(dstatus)
         direction='ASC' if order=='asc' else 'DESC'
-        sql += f" ORDER BY c.title COLLATE NOCASE, CASE WHEN d.doc_date='' THEN 1 ELSE 0 END, d.doc_date {direction}, d.id {direction}"
+        sql += f" ORDER BY c.title COLLATE NOCASE, CASE WHEN COALESCE(d.parent_document_id,0)=0 THEN COALESCE(NULLIF(d.doc_date,''),'0000-00-00') ELSE COALESCE((SELECT NULLIF(p.doc_date,'') FROM documents p WHERE p.id=d.parent_document_id),'0000-00-00') END {direction}, COALESCE(d.parent_document_id,d.id) {direction}, CASE WHEN COALESCE(d.parent_document_id,0)=0 THEN 0 ELSE 1 END, d.attachment_order, d.id"
         with db() as con:
             rows=con.execute(sql,params).fetchall()
             doc_sig_map=load_external_signature_map(con,[r['case_id'] for r in rows])
@@ -5362,10 +5595,14 @@ class Handler(BaseHTTPRequestHandler):
                     tags_info=(f"<div class='small'>tagi: {esc(row_get(r,'tags',''))}</div>" if row_get(r,'tags','') else '')
                     linked_id=int(row_get(r,'linked_task_id',0) or 0)
                     linked_info=(f"<div class='small'><a class='linked-chip' href='/task/{linked_id}/edit'>Powiązane zadanie #{linked_id}</a></div>" if linked_id else '')
-                    rows_html.append(f"""<tr class='doc-filter-row' data-doc-type='{esc(r['doc_type'])}'><td class='nowrap'><b>{fmt_date(r['doc_date'])}</b><div class='small muted'>wpływ: {fmt_date(r['received_date'])}</div><div class='small muted'>doręczenie: {fmt_date(row_get(r,'delivered_date',''))}</div></td><td><span class='pill'>{esc(r['doc_type'])}</span><div><span class='doc-status {'sign' if r['doc_status']=='Do podpisu' else ''}'>{esc(r['doc_status'])}</span></div></td><td><b>{esc(r['title'])}</b><div class='small muted'>{esc(r['description'])}</div>{sender_info}{doc_author_info}{tags_info}{linked_info}<div class='small muted'>{filename}</div>{ocr_info}{auth_html}</td><td class='nowrap'>{file_actions} <a class='btn small' href='/document/{r['id']}/edit'>Edytuj</a> <form method='post' action='/document/{r['id']}/delete' style='display:inline' onsubmit="return confirm('Przenieść dokument do Kosza?');"><input type='hidden' name='case_id' value='{cid}'><button class='btn small danger'>Do kosza</button></form></td></tr>""")
+                    is_attachment=bool(int(row_get(r,'parent_document_id',0) or 0))
+                    row_class='doc-filter-row attachment-row' if is_attachment else 'doc-filter-row document-family'
+                    kind_label=("<span class='attachment-label'>↳ Załącznik</span>" if is_attachment else f"<span class='pill'>{esc(r['doc_type'])}</span>")
+                    title_prefix='📎 ' if is_attachment else ''
+                    rows_html.append(f"""<tr class='{row_class}' data-doc-type='{esc(r['doc_type'])}'><td class='nowrap'><b>{fmt_date(r['doc_date'])}</b><div class='small muted'>wpływ: {fmt_date(r['received_date'])}</div><div class='small muted'>doręczenie: {fmt_date(row_get(r,'delivered_date',''))}</div></td><td>{kind_label}<div><span class='doc-status {'sign' if r['doc_status']=='Do podpisu' else ''}'>{esc(r['doc_status'])}</span></div></td><td><b>{title_prefix}{esc(r['title'])}</b><div class='small muted'>{esc(r['description'])}</div>{sender_info}{doc_author_info}{tags_info}{linked_info}<div class='small muted'>{filename}</div>{ocr_info}{auth_html}</td><td class='nowrap'>{file_actions} <a class='btn small' href='/document/{r['id']}/edit'>Edytuj</a> <form method='post' action='/document/{r['id']}/delete' style='display:inline' onsubmit="return confirm('Przenieść dokument do Kosza?');"><input type='hidden' name='case_id' value='{cid}'><button class='btn small danger'>Do kosza</button></form></td></tr>""")
                 year_html.append(f"<details class='year-folder' {'open' if auto_open or year==year_keys[0] else ''}><summary>{esc(year)} — {len(years[year])} dokumentów</summary><div style='padding:0 8px 8px'><table><tr><th>Data / wpływ</th><th>Rodzaj</th><th>Dokument</th><th>Akcje</th></tr>{''.join(rows_html)}</table></div></details>")
             open_attr=' open' if auto_open else ''
-            quick_form=f"""<details><summary>+ Szybko dodaj dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid' style='margin-top:10px'><input type='hidden' name='return_to' value='/documents'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_form_opts}</select></div><div><label>Status</label><select name='doc_status'>{doc_status_form_opts}</select></div><div><label>Nadawca</label><input name='sender'></div><div><label>Autor dokumentu</label><input name='document_author'></div><div><label>Tagi</label><input name='tags' placeholder='np. dowód, pilne'></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Plik</label><input type='file' name='file'><label style='font-weight:500'><input style='width:auto' type='checkbox' name='allow_duplicate' value='1'> Zezwól na identyczny plik</label></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"""
+            quick_form=f"""<details><summary>+ Szybko dodaj dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid' style='margin-top:10px'><input type='hidden' name='return_to' value='/documents'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_form_opts}</select></div><div><label>Status</label><select name='doc_status'>{doc_status_form_opts}</select></div><div><label>Nadawca</label><input name='sender'></div><div><label>Autor dokumentu</label><input name='document_author'></div><div><label>Tagi</label><input name='tags' placeholder='np. dowód, pilne'></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Pismo / dokument główny</label><input type='file' name='file'><label style='font-weight:500'><input style='width:auto' type='checkbox' name='allow_duplicate' value='1'> Zezwól na identyczny plik</label></div><div class='full'><label>Załączniki do pisma</label><input type='file' name='attachments[]' multiple><div class='small muted'>Każdy plik zostanie zapisany jako załącznik tego dokumentu.</div></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"""
             folders.append(f"""<details class='doc-case-folder'{open_attr} id='docs-{cid}'><summary><span class='doc-chevron'>›</span><div class='doc-folder-main'><div class='doc-folder-title'>{esc(primary)} · {esc(internal)} — {esc(first['case_title'])}</div><div class='doc-folder-sub'>{client or 'Kliknij, aby rozwinąć dokumenty sprawy'}</div></div><span class='doc-count'>{len(docs)} dok.</span><span class='doc-latest'>najnowszy: {latest}</span></summary><div class='doc-folder-body'><div class='doc-folder-actions'><a class='btn small' href='/case/{cid}'>Karta sprawy</a></div><div class='doc-type-toolbar'>{type_buttons}</div>{quick_form}{''.join(year_html)}</div></details>""")
         folders_html=''.join(folders) or '<div class="empty">Brak dokumentów.</div>'
         order_desc='primary' if order=='desc' else ''; order_asc='primary' if order=='asc' else ''; hidden_q=f"&q={quote(q)}" if q else ''; hidden_type=f"&type={quote(dtype)}" if dtype else ''; hidden_status=f"&status={quote(dstatus)}" if dstatus else ''
@@ -6299,7 +6536,7 @@ class Handler(BaseHTTPRequestHandler):
                 GROUP BY c.id
                 HAVING datetime(COALESCE(MAX(a.created_at),c.updated_at,c.created_at)) < datetime('now','-30 days')
                 ORDER BY last_activity LIMIT 15""").fetchall()
-            smart_alerts=con.execute("SELECT a.*,c.title case_title FROM alerts a LEFT JOIN cases c ON c.id=a.case_id WHERE a.status='open' AND a.alert_date<=? ORDER BY a.alert_date,CASE a.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 ELSE 2 END LIMIT 20",(soon,)).fetchall()
+            smart_alerts=con.execute("SELECT a.*,c.title case_title FROM alerts a LEFT JOIN cases c ON c.id=a.case_id WHERE a.status='open' AND a.alert_date<=? AND NOT (a.source_type='task' AND a.source_id IS NOT NULL) ORDER BY a.alert_date,CASE a.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 ELSE 2 END LIMIT 20",(soon,)).fetchall()
         for r in overdue: notices.append(('danger',f"Zadanie po terminie: {r['title']}",r['case_id'],f"termin {fmt_date(r['due_date'])}"))
         for r in due: notices.append(('',f"Termin w ciągu 3 dni: {r['title']}",r['case_id'],fmt_date(r['due_date'])))
         for r in sign: notices.append(('',f"Dokument do podpisu: {r['title']}",r['case_id'],r['original_name'] or r['doc_type']))
