@@ -58,7 +58,7 @@ from rk_smart import (
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.3.0-dev5"
+VERSION = "0.3.0-dev6"
 SCHEMA_VERSION = 322
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
@@ -1974,8 +1974,9 @@ def audit(con: sqlite3.Connection, case_id: int | None, entity_type: str, entity
 
 
 def case_read_only(con: sqlite3.Connection, case_id: int) -> bool:
-    r=con.execute("SELECT status,closed_edit_unlocked FROM cases WHERE id=?",(case_id,)).fetchone()
-    return bool(r and r['status']=='closed' and not int(r['closed_edit_unlocked'] or 0))
+    # „Zakończona” jest statusem organizacyjnym i przenosi sprawę do archiwum.
+    # Nie może jednak blokować poprawiania danych, dokumentów ani załączników.
+    return False
 
 
 def entity_display(row) -> str:
@@ -3228,9 +3229,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self.require_auth():
             return
         self._autosave_mode = fields.get("_autosave", "") == "1" or self.headers.get("X-Sprawnik-Autosave") == "1"
-        # Zakończone sprawy są domyślnie tylko do odczytu. Usunięcie ma osobne,
-        # administracyjne potwierdzenie i dlatego nie może utknąć na tej blokadzie.
-        if not re.fullmatch(r"/case/\d+/(?:unlock|lock|pin|duplicate|delete)", path):
+        # Kontrola pozostaje dla zgodności ze starszymi bazami. Sam status
+        # „zakończona” nie odbiera już możliwości edycji sprawy.
+        if not re.fullmatch(r"/case/\d+/(?:unlock|lock|reopen|pin|duplicate|delete)", path):
             cid_ro=self.mutation_case_id(path,fields)
             if cid_ro:
                 with db() as con: ro=case_read_only(con,cid_ro)
@@ -3256,6 +3257,7 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"/checklist/item/\d+/delete", path): return self.checklist_item_delete(int(path.split('/')[3]), fields)
             if re.fullmatch(r"/case/\d+/unlock", path): return self.case_unlock(int(path.split('/')[2]), fields)
             if re.fullmatch(r"/case/\d+/lock", path): return self.case_lock(int(path.split('/')[2]), fields)
+            if re.fullmatch(r"/case/\d+/reopen", path): return self.case_reopen(int(path.split('/')[2]), fields)
             if path == "/admin/reindex-documents": return self.reindex_documents(fields)
             if path == "/security/ocr/install": return self.ocr_install_start(fields)
             if path == "/security/key": return self.security_key_update(fields)
@@ -3593,7 +3595,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _quick_case_and_user_options(self):
         with db() as con:
-            cases=con.execute("SELECT id,signature,internal_signature,title FROM cases WHERE status<>'closed' OR closed_edit_unlocked=1 ORDER BY signature='',signature,title").fetchall()
+            cases=con.execute("SELECT id,signature,internal_signature,title FROM cases ORDER BY status='closed',signature='',signature,title").fetchall()
             users=con.execute("SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name").fetchall()
             sig_map=load_external_signature_map(con,[r['id'] for r in cases])
         case_opts=[]
@@ -3984,11 +3986,12 @@ class Handler(BaseHTTPRequestHandler):
                 nxt=esc(r['next_step']) or '<span class="muted">Brak wskazanej następnej czynności</span>'
                 dt=fmt_date(r['next_date']); dt='Bez terminu' if dt=='—' else dt
                 pin='★' if r['pinned'] else '☆'; pincls='on' if r['pinned'] else ''
+                archive_actions=(f"<div class='case-archive-actions'><a class='btn small' href='/case/{r['id']}/edit'>Edytuj</a><form method='post' action='/case/{r['id']}/reopen' style='display:inline' onsubmit=\"return confirm('Przywrócić tę sprawę do aktywnych?');\"><button class='btn small primary'>Przywróć</button></form><a class='btn small danger' href='/case/{r['id']}/delete'>Usuń</a></div>" if closed_only else '')
                 cards.append(f"""<div class='case-compact-card'>
                   <div class='case-card-top'><div><a class='case-signature' href='/case/{r['id']}'>{esc(primary)}</a>{internal}</div><div class='case-control-bar'><form method='post' action='/case/{r['id']}/pin'><button class='pin-btn {pincls}' title='Przypnij / odepnij'>{pin}</button></form>{badge(r['status'])}</div></div>
                   <a class='case-card-title' href='/case/{r['id']}'>{esc(r['title'])}</a>{client}<div>{lead} {waiting}</div>
                   <div class='case-action'><span class='case-date'>{dt}</span><span class='case-arrow'>→</span><span class='case-next clamp-2' title='{esc(r['next_step'])}'>{nxt}</span></div>
-                  <div class='case-footer'><div class='case-tags'>{tags_for(r['id']) or '<span class="small muted">bez tagów</span>'}</div><a class='btn small open-arrow' href='/case/{r['id']}' title='Otwórz sprawę'>›</a></div>
+                  <div class='case-footer'><div class='case-tags'>{tags_for(r['id']) or '<span class="small muted">bez tagów</span>'}</div><a class='btn small open-arrow' href='/case/{r['id']}' title='Otwórz sprawę'>›</a></div>{archive_actions}
                 </div>""")
             list_html='<div class="case-list">'+''.join(cards)+'</div>' if cards else '<div class="empty">Brak spraw.</div>'
         else:
@@ -4001,7 +4004,8 @@ class Handler(BaseHTTPRequestHandler):
                 if r['waiting_for']: meta.append('Czekamy na: '+esc(r['waiting_for']))
                 if r['subject']: meta.append(esc(r['subject']))
                 pin='★' if r['pinned'] else '☆'; pincls='on' if r['pinned'] else ''
-                trs.append(f"<tr><td><form method='post' action='/case/{r['id']}/pin' style='display:inline'><button class='pin-btn {pincls}'>{pin}</button></form><a class='case-link' href='/case/{r['id']}'>{esc(primary)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td class='case-title-cell'><a class='case-link' href='/case/{r['id']}'>{esc(r['title'])}</a><div class='small muted'>{' · '.join(meta)}</div><div class='case-tags' style='margin-top:5px'>{tags_for(r['id'])}</div></td><td>{badge(r['status'])}</td><td>{fmt_date(r['next_date'])}</td><td class='next-cell'><div class='clamp-2'>{esc(r['next_step']) or '—'}</div></td><td><a class='btn small open-arrow' href='/case/{r['id']}'>›</a></td></tr>")
+                row_actions=(f"<a class='btn small' href='/case/{r['id']}/edit'>Edytuj</a> <form method='post' action='/case/{r['id']}/reopen' style='display:inline' onsubmit=\"return confirm('Przywrócić tę sprawę do aktywnych?');\"><button class='btn small primary'>Przywróć</button></form> <a class='btn small danger' href='/case/{r['id']}/delete'>Usuń</a>" if closed_only else f"<a class='btn small open-arrow' href='/case/{r['id']}'>›</a>")
+                trs.append(f"<tr><td><form method='post' action='/case/{r['id']}/pin' style='display:inline'><button class='pin-btn {pincls}'>{pin}</button></form><a class='case-link' href='/case/{r['id']}'>{esc(primary)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td class='case-title-cell'><a class='case-link' href='/case/{r['id']}'>{esc(r['title'])}</a><div class='small muted'>{' · '.join(meta)}</div><div class='case-tags' style='margin-top:5px'>{tags_for(r['id'])}</div></td><td>{badge(r['status'])}</td><td>{fmt_date(r['next_date'])}</td><td class='next-cell'><div class='clamp-2'>{esc(r['next_step']) or '—'}</div></td><td>{row_actions}</td></tr>")
             list_html=f"<div class='card' style='padding:8px 14px'><table class='case-table'><tr><th>Sygnatura</th><th>Sprawa</th><th>Status</th><th>Termin</th><th>Następny krok</th><th></th></tr>{''.join(trs) or '<tr><td colspan=6>Brak spraw.</td></tr>'}</table></div>"
         active_statuses={k:v for k,v in STATUS_LABELS.items() if k!='closed'}
         opts=''.join(f"<option value='{k}' {'selected' if status==k else ''}>{v}</option>" for k,v in active_statuses.items())
@@ -4358,7 +4362,7 @@ class Handler(BaseHTTPRequestHandler):
                     WHERE r.source_case_id=? OR r.target_case_id=? ORDER BY r.created_at DESC,r.id DESC''',(cid,cid)).fetchall()
                 relation_cases=con.execute('''SELECT id,signature,internal_signature,title,status FROM cases
                                               WHERE id<>? ORDER BY status='closed',signature='',signature,title COLLATE NOCASE''',(cid,)).fetchall()
-            readonly=bool(c['status']=='closed' and not int(c['closed_edit_unlocked'] or 0))
+            readonly=case_read_only(con,cid)
 
         shown_sig,sig_kind=display_case_signature(cid,c['signature'],c['internal_signature'])
         primary=shown_sig if shown_sig!='Bez sygnatury' else (c['internal_signature'] or 'Bez sygnatury')
@@ -4385,13 +4389,14 @@ class Handler(BaseHTTPRequestHandler):
             ('relations','Powiązania',str(relation_count)),('notes','Notatki',str(len(notes))),
         ]
         tab_nav=''.join(f"<a class='case-tab {'active' if tab==key else ''}' href='/case/{cid}?tab={key}'>{label}{f'<span>{count}</span>' if count else ''}</a>" for key,label,count in tab_meta)
+        closed_actions=(f"<form method='post' action='/case/{cid}/reopen' style='display:inline' onsubmit=\"return confirm('Przywrócić tę sprawę do aktywnych?');\"><button class='btn small primary'>Przywróć do aktywnych</button></form>" if c['status']=='closed' else '')
         header=f"""<div class='case-workspace-sticky' id='rkCaseContext'>
           <div class='case-workspace-head'><div class='case-workspace-identity'><div class='case-workspace-sig'>{esc(primary)}</div>
           <div class='case-workspace-parties'>{esc(party_line)}</div><h1>{esc(c['title'])}</h1></div>
-          <div class='case-workspace-actions'>{badge(c['status'])}<a class='btn small' href='/case/{cid}/edit'>Edytuj</a><a class='btn small' href='/case/{cid}/export'>Eksport</a>{("<a class='btn small danger' href='/case/"+str(cid)+"/delete'>Usuń duplikat</a>") if user and user['role']=='admin' else ''}<a class='btn small' href='/case/{cid}?mode=advanced'>Widok techniczny</a></div></div>
+          <div class='case-workspace-actions'>{badge(c['status'])}{closed_actions}<a class='btn small' href='/case/{cid}/edit'>Edytuj</a><a class='btn small' href='/case/{cid}/export'>Eksport</a><a class='btn small danger' href='/case/{cid}/delete'>Usuń</a><a class='btn small' href='/case/{cid}?mode=advanced'>Widok techniczny</a></div></div>
           <div class='case-workspace-meta'><span>{esc(c['court']) or 'Sąd/organ: —'}</span><span>{esc(c['category']) or 'Kategoria: —'}</span><div class='smart-tags'>{tags}</div></div>
           <nav class='case-tabs'>{tab_nav}</nav></div>"""
-        readonly_html="<div class='readonly-banner'>Sprawa zakończona — widok tylko do odczytu.</div>" if readonly else ''
+        readonly_html=(f"<div class='readonly-banner'><b>Sprawa zakończona.</b> Nadal możesz poprawiać jej dane i dokumenty albo <form method='post' action='/case/{cid}/reopen' style='display:inline'><button class='btn small'>przywrócić ją do aktywnych</button></form>.</div>" if c['status']=='closed' else '')
         ro_disabled=' disabled' if readonly else ''
 
         if tab=='dashboard':
@@ -4429,7 +4434,11 @@ class Handler(BaseHTTPRequestHandler):
             for d in docs:
                 parent=' <span class="attachment-label">załącznik</span>' if row_get(d,'parent_document_id',None) else ''
                 state=f"<span class='doc-status {'sign' if d['doc_status']=='Do podpisu' else ''}'>{esc(d['doc_status'])}</span>"
-                rows.append(f"<tr><td>{fmt_date(d['doc_date'])}<div class='small muted'>wpływ {fmt_date(d['received_date'])} · doręczenie {fmt_date(d['delivered_date'])}</div></td><td><a class='case-link' href='/document/{d['id']}/open'>{esc(d['title'])}</a>{parent}<div class='small muted'>{esc(d['doc_type'])} · {esc(d['sender'])}</div></td><td>{state}</td><td><a class='btn small' href='/document/{d['id']}/edit'>Edytuj</a></td></tr>")
+                description=esc(d['description']) or '<span class="muted">Brak opisu dokumentu.</span>'
+                sender=esc(d['sender']) or '—'
+                author=esc(row_get(d,'document_author','')) or '—'
+                disclosure=f"""<details class='document-disclosure'><summary><span>{esc(d['title'])}</span>{parent}</summary><div class='document-disclosure-body'><div><b>Rodzaj dokumentu:</b> {esc(d['doc_type']) or '—'}</div><div><b>Opis:</b> {description}</div><div class='small muted'>Nadawca: {sender} · autor: {author}</div><a class='btn small' href='/document/{d['id']}/open'>Otwórz dokument</a></div></details>"""
+                rows.append(f"<tr><td>{fmt_date(d['doc_date'])}<div class='small muted'>wpływ {fmt_date(d['received_date'])} · doręczenie {fmt_date(d['delivered_date'])}</div></td><td>{disclosure}</td><td>{state}</td><td><a class='btn small' href='/document/{d['id']}/edit'>Edytuj</a></td></tr>")
             add='' if readonly else f"""<details class='card smart-add'><summary>+ Dodaj dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid'><input type='hidden' name='return_to' value='/case/{cid}?tab=documents'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{''.join(f'<option>{esc(x)}</option>' for x in DOC_TYPES)}</select></div><div class='full'><label>Tytuł</label><input name='title' required></div><div><label>Nadawca</label><input name='sender'></div><div><label>Status</label><select name='doc_status'>{''.join(f'<option>{esc(x)}</option>' for x in DOC_STATUSES)}</select></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><label>Plik</label><input type='file' name='file'></div><div class='full'><label>Załączniki</label><input type='file' name='attachments[]' multiple></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"""
             content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Dokumenty</h2><div class='muted'>Dokumenty i załączniki wyłącznie tej sprawy.</div></div><a class='btn' href='/documents?case_id={cid}'>Widok globalny</a></div>{add}<div class='card table-scroll'><table><tr><th>Daty</th><th>Dokument</th><th>Status</th><th></th></tr>{''.join(rows) or '<tr><td colspan=4>Brak dokumentów.</td></tr>'}</table></div></section>"
 
@@ -4606,7 +4615,7 @@ class Handler(BaseHTTPRequestHandler):
                                        WHERE lcl.case_id=? ORDER BY a.code,la.sort_order""", (cid,)).fetchall()
             law_acts = con.execute("SELECT id,code,short_title FROM law_acts ORDER BY code").fetchall()
             users = con.execute("SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name").fetchall()
-            readonly = bool(c['status'] == 'closed' and not int(c['closed_edit_unlocked'] or 0))
+            readonly = case_read_only(con,cid)
 
         shown_sig, sig_kind = display_case_signature(cid, c['signature'], c['internal_signature'])
         primary = shown_sig if shown_sig != 'Bez sygnatury' else (c['internal_signature'] or 'Bez sygnatury')
@@ -5059,7 +5068,7 @@ class Handler(BaseHTTPRequestHandler):
             all_entities=con.execute("SELECT id,display_name,pesel,nip,krs FROM entities ORDER BY display_name COLLATE NOCASE").fetchall()
             checklist=con.execute("SELECT * FROM case_checklist_items WHERE case_id=? ORDER BY sort_order,id",(cid,)).fetchall()
             checklist_templates=con.execute("SELECT * FROM checklist_templates ORDER BY category,name").fetchall()
-            readonly=bool(c['status']=='closed' and not int(c['closed_edit_unlocked'] or 0))
+            readonly=case_read_only(con,cid)
             sig_ids=[cid]+[x['id'] for x in all_cases]
             sig_ids += [x['source_case_id'] for x in relations] + [x['target_case_id'] for x in relations]
             case_sig_map=load_external_signature_map(con,sig_ids)
@@ -5085,13 +5094,9 @@ class Handler(BaseHTTPRequestHandler):
             check_parts.append(f"<div class='check-item {cls}'>{controls}<span>{esc(x['label'])}</span></div>")
         checklist_html=''.join(check_parts) or '<div class="empty">Brak checklisty dla tej sprawy.</div>'
         checklist_opts='<option value="">— wybierz szablon —</option>'+''.join(f"<option value='{x['id']}'>{esc(x['name'])}{' · '+esc(x['category']) if x['category'] else ''}</option>" for x in checklist_templates)
-        ro_user=current_request_user(); ro_admin=bool(ro_user and ro_user['role']=='admin')
         readonly_banner=''
-        if readonly:
-            unlock=(f"<form method='post' action='/case/{cid}/unlock' style='display:inline'><button class='btn danger'>Odblokuj do edycji</button></form>" if ro_admin else '')
-            readonly_banner=f"<div class='readonly-banner'><b>🔒 Sprawa zakończona — tryb tylko do odczytu.</b> Edycja jest zablokowana, aby nie zmienić przypadkowo akt archiwalnych. {unlock}</div>"
-        elif c['status']=='closed' and ro_admin:
-            readonly_banner=f"<div class='readonly-banner'><b>🔓 Zakończona sprawa jest czasowo odblokowana.</b> <form method='post' action='/case/{cid}/lock' style='display:inline'><button class='btn'>Zablokuj ponownie</button></form></div>"
+        if c['status']=='closed':
+            readonly_banner=f"<div class='readonly-banner'><b>Sprawa zakończona.</b> Możesz ją normalnie edytować. <form method='post' action='/case/{cid}/reopen' style='display:inline' onsubmit=\"return confirm('Przywrócić tę sprawę do aktywnych?');\"><button class='btn primary'>Przywróć do aktywnych</button></form> <a class='btn danger' href='/case/{cid}/delete'>Usuń sprawę</a></div>"
         history_html=''.join(f"<div class='audit-row'><div><b>{esc(row_get(x,'action'))}</b></div><div class='small muted' style='margin:4px 0'>{audit_description_html(row_get(x,'description',row_get(x,'details','')))}</div><div style='margin:5px 0'>{audit_target_html(x)}</div><div class='author'>{esc(row_get(x,'created_at'))} · {esc(row_get(x,'author',row_get(x,'actor','')))}</div></div>" for x in history) or '<div class="empty">Brak historii zmian.</div>'
         lead_text=user_display_name(lead_user) if lead_user else '—'
         pin_char='★' if pinned else '☆'; pin_cls='on' if pinned else ''
@@ -5311,21 +5316,20 @@ class Handler(BaseHTTPRequestHandler):
     def case_edit(self,cid):
         with db() as con:
             c=con.execute("SELECT * FROM cases WHERE id=?",(cid,)).fetchone()
-            if c and case_read_only(con,cid):
-                return self.send_html(layout('Sprawa tylko do odczytu',f"<div class='readonly-banner'>Sprawa jest zakończona i zablokowana. <a class='btn' href='/case/{cid}'>Wróć</a></div>",'cases'),403)
             tags=', '.join(r['name'] for r in con.execute("SELECT t.name FROM case_tags ct JOIN tags t ON t.id=ct.tag_id WHERE ct.case_id=? ORDER BY t.name",(cid,)).fetchall()) if c else ''
             users=con.execute("SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name").fetchall()
         if not c: return self.send_error(404)
         opts=''.join(f"<option value='{k}' {'selected' if c['status']==k else ''}>{v}</option>" for k,v in STATUS_LABELS.items())
         lead_opts='<option value="">— nie przypisano —</option>'+''.join(f"<option value='{u['id']}' {'selected' if c['lead_user_id']==u['id'] else ''}>{esc(user_display_name(u))}</option>" for u in users)
-        body=f"""<div class='topbar'><div><h1>Edytuj sprawę</h1><div class='sub'>{esc(c['title'])}</div></div></div><div class='card'><form method='post' action='/case/{cid}/update' class='form-grid' data-autosave='1'>
+        reopen=(f"<form method='post' action='/case/{cid}/reopen' style='display:inline' onsubmit=\"return confirm('Przywrócić tę sprawę do aktywnych?');\"><button class='btn primary'>Przywróć do aktywnych</button></form>" if c['status']=='closed' else '')
+        body=f"""<div class='topbar'><div><h1>Edytuj sprawę</h1><div class='sub'>{esc(c['title'])}</div></div><div>{reopen}</div></div><div class='card'><form method='post' action='/case/{cid}/update' class='form-grid' data-autosave='1'>
         <div><label>Sygnatura sądowa</label><input name='signature' value='{esc(c['signature'])}'></div><div><label>Sygnatura wewnętrzna</label><input name='internal_signature' value='{esc(c['internal_signature'])}'></div>
         <div class='full'><label>Nazwa sprawy * <span class='help-dot' title='Krótka nazwa robocza sprawy'>?</span></label><input name='title' required value='{esc(c['title'])}'></div><div class='full'><label>Klient / zlecający</label><input name='client' value='{esc(c['client'])}'></div>
         <div><label>Prowadzący sprawę</label><select name='lead_user_id'>{lead_opts}</select></div><div><label>Status</label><select name='status'>{opts}</select></div>
         <div class='full'><label>Czekamy na / powód oczekiwania</label><input name='waiting_for' value='{esc(c['waiting_for'])}' placeholder='np. sąd, klient, przeciwnik, urząd'></div>
         <div><label>Sąd</label><input name='court' value='{esc(c['court'])}'></div><div><label>Wydział</label><input name='department' value='{esc(c['department'])}'></div><div><label>Kategoria</label><input name='category' value='{esc(c['category'])}'></div><div><label>Najbliższa data</label><input type='date' name='next_date' value='{esc(c['next_date'])}'></div>
         <div class='full'><label>Tagi</label><input name='tags' value='{esc(tags)}'></div><div class='full important-field'><label>Czego dotyczy sprawa? / Przedmiot <span class='help-dot' title='Opis widoczny na pulpicie i karcie sprawy'>?</span></label><input name='subject' value='{esc(c['subject'])}' placeholder='np. alimenty, zapłata, rozwód, odszkodowanie'></div><div class='full'><label>Następny krok</label><input name='next_step' value='{esc(c['next_step'])}'></div><div class='full'><label>Notatki</label><textarea name='notes'>{esc(c['notes'])}</textarea></div><div class='full'><button class='btn primary'>Zapisz</button> <a class='btn' href='/case/{cid}'>Wróć</a></div></form></div>
-        <br><div class='card danger-zone'><h2>Usuwanie duplikatu</h2><p class='muted'>Całą sprawę może usunąć wyłącznie administrator. Przed operacją program automatycznie tworzy pełny snapshot danych.</p><a class='btn danger' href='/case/{cid}/delete'>Przejdź do bezpiecznego usuwania</a></div>"""
+        <br><div class='card danger-zone'><h2>Usuwanie sprawy</h2><p class='muted'>Przed operacją program automatycznie tworzy pełny snapshot danych. Usunięcie wymaga dodatkowego potwierdzenia.</p><a class='btn danger' href='/case/{cid}/delete'>Przejdź do bezpiecznego usuwania</a></div>"""
         self.send_html(layout('Edycja',body,'cases'))
 
     def case_update(self,cid,f):
@@ -5360,7 +5364,6 @@ class Handler(BaseHTTPRequestHandler):
         self.redirect(f'/case/{cid}')
 
     def case_delete_confirm(self,cid,message=''):
-        if not self.require_admin(): return
         with db() as con:
             c=con.execute('SELECT * FROM cases WHERE id=?',(cid,)).fetchone()
             if not c: return self.send_error(404)
@@ -5376,12 +5379,11 @@ class Handler(BaseHTTPRequestHandler):
         count_rows=''.join(f"<tr><th>{esc(label)}</th><td>{int(value)}</td></tr>" for label,value in counts.items())
         closed_note='' if c['status']=='closed' else "<div class='error'><b>Najpierw oznacz sprawę jako zakończoną.</b> Aktywnej sprawy nie można trwale usunąć.</div>"
         disabled=' disabled' if c['status']!='closed' else ''
-        body=f"""<div class='topbar'><div><h1>Usuń duplikat sprawy</h1><div class='sub'>{esc(c['signature'] or c['internal_signature'] or c['title'])}</div></div><a class='btn' href='/case/{cid}'>← Wróć</a></div>{msg}{closed_note}
-        <div class='grid'><div class='card span7 danger-zone'><h2>Operacja nieodwracalna</h2><p>Usunięta zostanie sprawa <b>{esc(c['title'])}</b> wraz z danymi przypisanymi wyłącznie do niej. Status: <b>{esc(status)}</b>.</p><p><b>Przed usunięciem program automatycznie zapisze pełny snapshot</b> bazy, dokumentów i projektów pism w katalogu danych programu.</p><form method='post' action='/case/{cid}/delete'><label>Wpisz dokładnie <b>USUŃ</b></label><input name='confirmation' autocomplete='off' required><label style='font-weight:500'><input style='width:auto' type='checkbox' name='acknowledge' value='1' required> Potwierdzam, że sprawdziłem/am, iż jest to duplikat.</label><button class='btn danger'{disabled}>Utwórz snapshot i usuń sprawę</button></form></div><div class='card span5'><h2>Zawartość sprawy</h2><table>{count_rows}</table><p class='small muted'>Powiązania z innymi sprawami zostaną usunięte. Wspólne rekordy osób w Kartotece pozostaną bez zmian.</p></div></div>"""
+        body=f"""<div class='topbar'><div><h1>Usuń sprawę</h1><div class='sub'>{esc(c['signature'] or c['internal_signature'] or c['title'])}</div></div><a class='btn' href='/case/{cid}'>← Wróć</a></div>{msg}{closed_note}
+        <div class='grid'><div class='card span7 danger-zone'><h2>Operacja nieodwracalna</h2><p>Usunięta zostanie sprawa <b>{esc(c['title'])}</b> wraz z danymi przypisanymi wyłącznie do niej. Status: <b>{esc(status)}</b>.</p><p><b>Przed usunięciem program automatycznie zapisze pełny snapshot</b> bazy, dokumentów i projektów pism w katalogu danych programu.</p><form method='post' action='/case/{cid}/delete'><label>Wpisz dokładnie <b>USUŃ</b></label><input name='confirmation' autocomplete='off' required><label style='font-weight:500'><input style='width:auto' type='checkbox' name='acknowledge' value='1' required> Potwierdzam, że chcę trwale usunąć tę sprawę.</label><button class='btn danger'{disabled}>Utwórz snapshot i usuń sprawę</button></form></div><div class='card span5'><h2>Zawartość sprawy</h2><table>{count_rows}</table><p class='small muted'>Powiązania z innymi sprawami zostaną usunięte. Wspólne rekordy osób w Kartotece pozostaną bez zmian.</p></div></div>"""
         self.send_html(layout('Bezpieczne usuwanie sprawy',body,'cases'))
 
     def case_delete(self,cid,f):
-        if not self.require_admin(): return
         with db() as con:
             c=con.execute('SELECT * FROM cases WHERE id=?',(cid,)).fetchone()
         if not c: return self.send_error(404)
@@ -6039,7 +6041,7 @@ class Handler(BaseHTTPRequestHandler):
         desktop_actions=''
         if DESKTOP_MODE and LOCAL_MODE:
             desktop_actions=f"<form method='post' action='/document/{did}/open-default' style='display:inline'><button class='btn'>Otwórz w programie domyślnym</button></form> <form method='post' action='/document/{did}/open-folder' style='display:inline'><button class='btn'>Otwórz folder dokumentu</button></form>"
-        editable=not (d['case_status']=='closed' and not int(d['closed_edit_unlocked'] or 0))
+        editable=True
         edit_action=f"<a class='btn' href='/document/{did}/edit'>Edytuj / dodaj załączniki</a>" if editable else ''
         toolbar=f"<a class='btn' href='/case/{d['case_id']}?tab=documents'>← Wróć do sprawy</a> <a class='btn' href='/documents'>Dokumenty</a> {edit_action} <a class='btn primary' href='/document/{did}/download'>Pobierz</a> {desktop_actions}"
         max_chars=160_000; bodytxt,status=self._preview_text_now(d,p,ext)
@@ -6198,7 +6200,7 @@ class Handler(BaseHTTPRequestHandler):
             sql += " ORDER BY t.status,CASE WHEN t.due_date='' THEN 1 ELSE 0 END,t.due_date,CASE t.priority WHEN 'high' THEN 0 ELSE 1 END"
             rows=con.execute(sql,params).fetchall()
             task_sig_map=load_external_signature_map(con,[r['case_id'] for r in rows])
-            cases=con.execute("SELECT id,signature,internal_signature,title,status,closed_edit_unlocked FROM cases WHERE status<>'closed' OR closed_edit_unlocked=1 ORDER BY signature='',signature,title").fetchall()
+            cases=con.execute("SELECT id,signature,internal_signature,title,status,closed_edit_unlocked FROM cases ORDER BY status='closed',signature='',signature,title").fetchall()
             case_sig_map=load_external_signature_map(con,[r['id'] for r in cases])
             users=con.execute("SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name").fetchall()
         parts=[]
@@ -6857,15 +6859,24 @@ class Handler(BaseHTTPRequestHandler):
         self.redirect(f'/case/{cid}')
 
     def case_unlock(self,cid,f):
-        if not self.require_admin(): return
         a=self.current_author(f)
-        with db() as con: con.execute('UPDATE cases SET closed_edit_unlocked=1 WHERE id=?',(cid,)); audit(con,cid,'case',cid,'Odblokowano zakończoną sprawę do edycji','Tryb tylko do odczytu wyłączony przez administratora',a)
+        with db() as con: con.execute('UPDATE cases SET closed_edit_unlocked=1 WHERE id=?',(cid,)); audit(con,cid,'case',cid,'Odblokowano zakończoną sprawę do edycji','Tryb tylko do odczytu wyłączony',a)
         self.redirect(f'/case/{cid}')
 
     def case_lock(self,cid,f):
-        if not self.require_admin(): return
         a=self.current_author(f)
         with db() as con: con.execute('UPDATE cases SET closed_edit_unlocked=0 WHERE id=?',(cid,)); audit(con,cid,'case',cid,'Zablokowano zakończoną sprawę','Tryb tylko do odczytu włączony',a)
+        self.redirect(f'/case/{cid}')
+
+    def case_reopen(self,cid,f):
+        a=self.current_author(f)
+        with db() as con:
+            c=con.execute('SELECT id,title,status FROM cases WHERE id=?',(cid,)).fetchone()
+            if not c: return self.send_error(404)
+            if c['status']!='closed':
+                return self.redirect(f'/case/{cid}')
+            con.execute("UPDATE cases SET status='active',closed_edit_unlocked=0,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(a,cid))
+            audit(con,cid,'case',cid,'Przywrócono sprawę do aktywnych',c['title'],a)
         self.redirect(f'/case/{cid}')
 
     def ocr_install_start(self,f):

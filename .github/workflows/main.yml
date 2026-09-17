@@ -40,6 +40,7 @@ jobs:
           python TEST_CASE_WORKSPACE.py
           python TEST_UI_PERFORMANCE_DEV4.py
           python TEST_CASE_RELATIONS_DOCUMENTS_DEV5.py
+          python TEST_CLOSED_CASE_ACTIONS_DEV6.py
           python RK_KANCELARIA_DESKTOP.pyw --self-test
 
       - name: Zbuduj prawdziwe EXE na Windows

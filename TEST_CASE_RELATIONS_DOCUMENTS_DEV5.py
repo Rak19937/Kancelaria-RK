@@ -122,7 +122,7 @@ def main() -> int:
             assert "Dodaj kolejne załączniki" in edit_html and "zalacznik-a.txt" in edit_html
 
             confirm_html=opener.open(base + f"/case/{duplicate}/delete",timeout=10).read().decode("utf-8")
-            assert "Usuń duplikat sprawy" in confirm_html and "USUŃ" in confirm_html
+            assert "Usuń sprawę" in confirm_html and "USUŃ" in confirm_html
             delete_data=urllib.parse.urlencode({"confirmation":"USUŃ","acknowledge":"1"}).encode()
             opener.open(urllib.request.Request(base + f"/case/{duplicate}/delete",data=delete_data),timeout=30).read()
             with sqlite3.connect(db_path) as con:
