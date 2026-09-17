@@ -58,8 +58,8 @@ from rk_smart import (
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.3.0-dev4"
-SCHEMA_VERSION = 321
+VERSION = "0.3.0-dev5"
+SCHEMA_VERSION = 322
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
 APP_MODE = RUNTIME_PATHS.mode
@@ -3168,6 +3168,7 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"/process-event/\d+/edit", path): return self.process_event_edit(int(path.split("/")[2]))
             if re.fullmatch(r"/case/\d+", path): return self.case_view(int(path.split("/")[-1]), qs)
             if re.fullmatch(r"/case/\d+/edit", path): return self.case_edit(int(path.split("/")[-2]))
+            if re.fullmatch(r"/case/\d+/delete", path): return self.case_delete_confirm(int(path.split("/")[-2]))
             if re.fullmatch(r"/case/\d+/export", path): return self.case_export_page(int(path.split("/")[-2]))
             if re.fullmatch(r"/case/\d+/export/pdf", path): return self.case_export_pdf(int(path.split("/")[-3]), qs, None)
             if re.fullmatch(r"/party/\d+/edit", path): return self.party_edit(int(path.split("/")[2]))
@@ -3227,8 +3228,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self.require_auth():
             return
         self._autosave_mode = fields.get("_autosave", "") == "1" or self.headers.get("X-Sprawnik-Autosave") == "1"
-        # Zakończone sprawy są domyślnie tylko do odczytu. Wyjątki to operacje administracyjne odblokuj/zablokuj oraz przypięcie/duplikowanie.
-        if not re.fullmatch(r"/case/\d+/(?:unlock|lock|pin|duplicate)", path):
+        # Zakończone sprawy są domyślnie tylko do odczytu. Usunięcie ma osobne,
+        # administracyjne potwierdzenie i dlatego nie może utknąć na tej blokadzie.
+        if not re.fullmatch(r"/case/\d+/(?:unlock|lock|pin|duplicate|delete)", path):
             cid_ro=self.mutation_case_id(path,fields)
             if cid_ro:
                 with db() as con: ro=case_read_only(con,cid_ro)
@@ -4295,7 +4297,7 @@ class Handler(BaseHTTPRequestHandler):
     def case_workspace(self, cid, qs=None):
         """Zakładkowy warsztat sprawy: jeden nagłówek, jeden kontekst pracy naraz."""
         qs = qs or {}
-        valid_tabs = ('dashboard','history','documents','tasks','deadlines','evidence','strategy','hearing','finances','people','notes')
+        valid_tabs = ('dashboard','history','documents','tasks','deadlines','evidence','strategy','hearing','finances','people','relations','notes')
         user = current_request_user(); uid = user['id'] if user else None
         requested = (qs.get('tab') or [''])[0].strip().lower()
         with db() as con:
@@ -4346,6 +4348,16 @@ class Handler(BaseHTTPRequestHandler):
             suggestions=con.execute("""SELECT ds.*,d.title document_title FROM deadline_suggestions ds LEFT JOIN documents d ON d.id=ds.document_id
                                        WHERE ds.case_id=? AND ds.status='open' ORDER BY ds.id DESC""",(cid,)).fetchall()
             users=con.execute('SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name').fetchall()
+            relation_count=int(con.execute('SELECT COUNT(*) FROM case_relations WHERE source_case_id=? OR target_case_id=?',(cid,cid)).fetchone()[0])
+            relations=[]; relation_cases=[]
+            if tab=='relations':
+                relations=con.execute('''SELECT r.*,
+                    sc.signature source_signature,sc.internal_signature source_internal,sc.title source_title,sc.status source_status,
+                    tc.signature target_signature,tc.internal_signature target_internal,tc.title target_title,tc.status target_status
+                    FROM case_relations r JOIN cases sc ON sc.id=r.source_case_id JOIN cases tc ON tc.id=r.target_case_id
+                    WHERE r.source_case_id=? OR r.target_case_id=? ORDER BY r.created_at DESC,r.id DESC''',(cid,cid)).fetchall()
+                relation_cases=con.execute('''SELECT id,signature,internal_signature,title,status FROM cases
+                                              WHERE id<>? ORDER BY status='closed',signature='',signature,title COLLATE NOCASE''',(cid,)).fetchall()
             readonly=bool(c['status']=='closed' and not int(c['closed_edit_unlocked'] or 0))
 
         shown_sig,sig_kind=display_case_signature(cid,c['signature'],c['internal_signature'])
@@ -4369,13 +4381,14 @@ class Handler(BaseHTTPRequestHandler):
             ('dashboard','Pulpit',''),('history','Historia',str(len(timeline))),('documents','Dokumenty',str(len(docs))),
             ('tasks','Zadania',str(len(open_tasks))),('deadlines','Terminy',str(len(next_dates))),
             ('evidence','Dowody',str(len(assertions))),('strategy','Strategia',''),('hearing','Rozprawa',''),
-            ('finances','Finanse',str(len(claims))),('people','Osoby',str(len(shown_people))),('notes','Notatki',str(len(notes))),
+            ('finances','Finanse',str(len(claims))),('people','Osoby',str(len(shown_people))),
+            ('relations','Powiązania',str(relation_count)),('notes','Notatki',str(len(notes))),
         ]
         tab_nav=''.join(f"<a class='case-tab {'active' if tab==key else ''}' href='/case/{cid}?tab={key}'>{label}{f'<span>{count}</span>' if count else ''}</a>" for key,label,count in tab_meta)
         header=f"""<div class='case-workspace-sticky' id='rkCaseContext'>
           <div class='case-workspace-head'><div class='case-workspace-identity'><div class='case-workspace-sig'>{esc(primary)}</div>
           <div class='case-workspace-parties'>{esc(party_line)}</div><h1>{esc(c['title'])}</h1></div>
-          <div class='case-workspace-actions'>{badge(c['status'])}<a class='btn small' href='/case/{cid}/edit'>Edytuj</a><a class='btn small' href='/case/{cid}/export'>Eksport</a><a class='btn small' href='/case/{cid}?mode=advanced'>Widok techniczny</a></div></div>
+          <div class='case-workspace-actions'>{badge(c['status'])}<a class='btn small' href='/case/{cid}/edit'>Edytuj</a><a class='btn small' href='/case/{cid}/export'>Eksport</a>{("<a class='btn small danger' href='/case/"+str(cid)+"/delete'>Usuń duplikat</a>") if user and user['role']=='admin' else ''}<a class='btn small' href='/case/{cid}?mode=advanced'>Widok techniczny</a></div></div>
           <div class='case-workspace-meta'><span>{esc(c['court']) or 'Sąd/organ: —'}</span><span>{esc(c['category']) or 'Kategoria: —'}</span><div class='smart-tags'>{tags}</div></div>
           <nav class='case-tabs'>{tab_nav}</nav></div>"""
         readonly_html="<div class='readonly-banner'>Sprawa zakończona — widok tylko do odczytu.</div>" if readonly else ''
@@ -4509,6 +4522,38 @@ class Handler(BaseHTTPRequestHandler):
             entity_opts='<option value="">— wybierz z kartoteki —</option>'+''.join(f"<option value='{x['id']}'>{esc(x['display_name'])}</option>" for x in all_entities)
             add='' if readonly else f"""<div class='grid workspace-add-grid'><details class='card span6 smart-add'><summary>+ Przypisz z kartoteki</summary><form method='post' action='/case/{cid}/entity' class='form-grid'><div class='full'><label>Osoba / podmiot</label><select name='entity_id' required>{entity_opts}</select></div><div><label>Rola</label><input name='role' value='Uczestnik'></div><div><label>Notatka</label><input name='notes'></div><div class='full'><button class='btn primary'>Przypisz</button></div></form></details><details class='card span6 smart-add'><summary>+ Szybki wpis w sprawie</summary><form method='post' action='/case/{cid}/party' class='form-grid'><div><label>Imię / nazwa</label><input name='name' required></div><div><label>Rola</label><input name='role'></div><div class='full'><label>Notatka</label><input name='notes'></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details></div>"""
             content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Osoby i podmioty</h2><div class='muted'>Wspólna kartoteka umożliwia kontrolę konfliktu interesów.</div></div><a class='btn' href='/entities'>Kartoteka</a></div>{add}<div class='card table-scroll'><table><tr><th>Osoba / podmiot</th><th>Rola</th><th>Notatka</th></tr>{''.join(rows) or '<tr><td colspan=3>Brak osób.</td></tr>'}</table></div></section>"
+
+        elif tab=='relations':
+            relation_rows=[]
+            for r in relations:
+                labels=RELATION_TYPES.get(r['relation_type'],(r['relation_type'],r['relation_type']))
+                outgoing=r['source_case_id']==cid
+                other_id=r['target_case_id'] if outgoing else r['source_case_id']
+                other_sig=r['target_signature'] if outgoing else r['source_signature']
+                other_internal=r['target_internal'] if outgoing else r['source_internal']
+                other_title=r['target_title'] if outgoing else r['source_title']
+                other_status=r['target_status'] if outgoing else r['source_status']
+                label=labels[0] if outgoing else labels[1]
+                case_label=other_sig or other_internal or other_title
+                actions=''
+                if not readonly:
+                    actions=(f"<a class='btn small' href='/relation/{r['id']}/edit'>Edytuj</a> "
+                             f"<form method='post' action='/relation/{r['id']}/delete' class='inline' onsubmit=\"return confirm('Usunąć to powiązanie?');\">"
+                             f"<input type='hidden' name='case_id' value='{cid}'><input type='hidden' name='return_to' value='/case/{cid}?tab=relations'>"
+                             f"<button class='btn small danger'>Usuń powiązanie</button></form>")
+                relation_rows.append(f"<tr><td><span class='pill'>{esc(label)}</span></td><td><a class='case-link' href='/case/{other_id}'>{esc(case_label)}</a><div class='small muted'>{esc(other_title)} · {esc(STATUS_LABELS.get(other_status,other_status))}</div></td><td>{esc(r['note']) or '—'}</td><td class='nowrap'>{actions}</td></tr>")
+            relation_options=[]
+            for other in relation_cases:
+                label=other['signature'] or other['internal_signature'] or other['title']
+                relation_options.append(f"<option value='{other['id']}'>{esc(label)} — {esc(other['title'])} ({esc(STATUS_LABELS.get(other['status'],other['status']))})</option>")
+            type_options=''.join(f"<option value='{esc(key)}'>{esc(labels[0])}</option>" for key,labels in RELATION_TYPES.items())
+            if readonly:
+                add=''
+            elif relation_options:
+                add=f"""<details class='card smart-add' open><summary>+ Połącz z inną sprawą</summary><form method='post' action='/case/{cid}/relation' class='form-grid'><input type='hidden' name='return_to' value='/case/{cid}?tab=relations'><div><label>Rodzaj powiązania</label><select name='relation_type'>{type_options}</select></div><div><label>Druga sprawa</label><select name='target_case_id' required>{''.join(relation_options)}</select></div><div class='full'><label>Notatka</label><input name='note' placeholder='np. apelacja od wyroku w tej sprawie'></div><div class='full'><button class='btn primary'>Połącz sprawy</button></div></form></details>"""
+            else:
+                add="<div class='card empty'>Nie ma jeszcze drugiej sprawy, z którą można utworzyć powiązanie.</div>"
+            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Powiązane sprawy</h2><div class='muted'>Połącz instancje, egzekucję albo inne sprawy dotyczące tego samego klienta lub zdarzenia.</div></div></div>{add}<div class='card table-scroll'><table><tr><th>Relacja</th><th>Sprawa</th><th>Notatka</th><th></th></tr>{''.join(relation_rows) or '<tr><td colspan=4>Brak powiązanych spraw.</td></tr>'}</table></div></section>"
 
         else:  # notes
             note_rows=''.join(f"<article class='note-card'><div class='workspace-pre'>{esc(x['note'])}</div><small>{esc(x['created_at'])} · {esc(x['author'])}</small></article>" for x in notes) or '<div class="empty">Brak notatek.</div>'
@@ -5280,7 +5325,7 @@ class Handler(BaseHTTPRequestHandler):
         <div class='full'><label>Czekamy na / powód oczekiwania</label><input name='waiting_for' value='{esc(c['waiting_for'])}' placeholder='np. sąd, klient, przeciwnik, urząd'></div>
         <div><label>Sąd</label><input name='court' value='{esc(c['court'])}'></div><div><label>Wydział</label><input name='department' value='{esc(c['department'])}'></div><div><label>Kategoria</label><input name='category' value='{esc(c['category'])}'></div><div><label>Najbliższa data</label><input type='date' name='next_date' value='{esc(c['next_date'])}'></div>
         <div class='full'><label>Tagi</label><input name='tags' value='{esc(tags)}'></div><div class='full important-field'><label>Czego dotyczy sprawa? / Przedmiot <span class='help-dot' title='Opis widoczny na pulpicie i karcie sprawy'>?</span></label><input name='subject' value='{esc(c['subject'])}' placeholder='np. alimenty, zapłata, rozwód, odszkodowanie'></div><div class='full'><label>Następny krok</label><input name='next_step' value='{esc(c['next_step'])}'></div><div class='full'><label>Notatki</label><textarea name='notes'>{esc(c['notes'])}</textarea></div><div class='full'><button class='btn primary'>Zapisz</button> <a class='btn' href='/case/{cid}'>Wróć</a></div></form></div>
-        <br><div class='card danger-zone'><h2>Usuń sprawę</h2><p class='muted'>Usunięcie całej sprawy pozostaje operacją trwałą. Zwykłe zadania, dokumenty i wpisy trafiają natomiast do Kosza.</p><form method='post' action='/case/{cid}/delete' onsubmit="return confirm('Na pewno trwale usunąć całą sprawę?')"><button class='btn danger'>Usuń całą sprawę</button></form></div>"""
+        <br><div class='card danger-zone'><h2>Usuwanie duplikatu</h2><p class='muted'>Całą sprawę może usunąć wyłącznie administrator. Przed operacją program automatycznie tworzy pełny snapshot danych.</p><a class='btn danger' href='/case/{cid}/delete'>Przejdź do bezpiecznego usuwania</a></div>"""
         self.send_html(layout('Edycja',body,'cases'))
 
     def case_update(self,cid,f):
@@ -5314,14 +5359,54 @@ class Handler(BaseHTTPRequestHandler):
                 audit(con,cid,'case',cid,'Edytowano dane sprawy',details,author)
         self.redirect(f'/case/{cid}')
 
-    def case_delete(self,cid,f):
-        folder=FILES_DIR/f"sprawa_{cid}"
+    def case_delete_confirm(self,cid,message=''):
+        if not self.require_admin(): return
         with db() as con:
+            c=con.execute('SELECT * FROM cases WHERE id=?',(cid,)).fetchone()
+            if not c: return self.send_error(404)
+            counts={
+                'Dokumenty':con.execute('SELECT COUNT(*) FROM documents WHERE case_id=?',(cid,)).fetchone()[0],
+                'Zadania':con.execute('SELECT COUNT(*) FROM tasks WHERE case_id=?',(cid,)).fetchone()[0],
+                'Historia i zdarzenia':con.execute('SELECT (SELECT COUNT(*) FROM events WHERE case_id=?)+(SELECT COUNT(*) FROM process_events WHERE case_id=?)',(cid,cid)).fetchone()[0],
+                'Osoby / podmioty':con.execute('SELECT (SELECT COUNT(*) FROM parties WHERE case_id=?)+(SELECT COUNT(*) FROM case_entities WHERE case_id=?)',(cid,cid)).fetchone()[0],
+                'Powiązania':con.execute('SELECT COUNT(*) FROM case_relations WHERE source_case_id=? OR target_case_id=?',(cid,cid)).fetchone()[0],
+            }
+        status=STATUS_LABELS.get(c['status'],c['status'])
+        msg=f"<div class='error'>{esc(message)}</div>" if message else ''
+        count_rows=''.join(f"<tr><th>{esc(label)}</th><td>{int(value)}</td></tr>" for label,value in counts.items())
+        closed_note='' if c['status']=='closed' else "<div class='error'><b>Najpierw oznacz sprawę jako zakończoną.</b> Aktywnej sprawy nie można trwale usunąć.</div>"
+        disabled=' disabled' if c['status']!='closed' else ''
+        body=f"""<div class='topbar'><div><h1>Usuń duplikat sprawy</h1><div class='sub'>{esc(c['signature'] or c['internal_signature'] or c['title'])}</div></div><a class='btn' href='/case/{cid}'>← Wróć</a></div>{msg}{closed_note}
+        <div class='grid'><div class='card span7 danger-zone'><h2>Operacja nieodwracalna</h2><p>Usunięta zostanie sprawa <b>{esc(c['title'])}</b> wraz z danymi przypisanymi wyłącznie do niej. Status: <b>{esc(status)}</b>.</p><p><b>Przed usunięciem program automatycznie zapisze pełny snapshot</b> bazy, dokumentów i projektów pism w katalogu danych programu.</p><form method='post' action='/case/{cid}/delete'><label>Wpisz dokładnie <b>USUŃ</b></label><input name='confirmation' autocomplete='off' required><label style='font-weight:500'><input style='width:auto' type='checkbox' name='acknowledge' value='1' required> Potwierdzam, że sprawdziłem/am, iż jest to duplikat.</label><button class='btn danger'{disabled}>Utwórz snapshot i usuń sprawę</button></form></div><div class='card span5'><h2>Zawartość sprawy</h2><table>{count_rows}</table><p class='small muted'>Powiązania z innymi sprawami zostaną usunięte. Wspólne rekordy osób w Kartotece pozostaną bez zmian.</p></div></div>"""
+        self.send_html(layout('Bezpieczne usuwanie sprawy',body,'cases'))
+
+    def case_delete(self,cid,f):
+        if not self.require_admin(): return
+        with db() as con:
+            c=con.execute('SELECT * FROM cases WHERE id=?',(cid,)).fetchone()
+        if not c: return self.send_error(404)
+        if c['status']!='closed':
+            return self.case_delete_confirm(cid,'Aktywnej sprawy nie można trwale usunąć. Najpierw ustaw status „Zakończona”.')
+        if (f.get('confirmation','') or '').strip()!='USUŃ' or f.get('acknowledge')!='1':
+            return self.case_delete_confirm(cid,'Nie potwierdzono usunięcia. Wpisz dokładnie „USUŃ” i zaznacz pole potwierdzenia.')
+
+        # Usunięcie całej sprawy omija zwykły Kosz, dlatego najpierw powstaje
+        # kompletny, przenośny snapshot możliwy do odtworzenia z ekranu Recovery.
+        raw,snapshot_name=create_data_snapshot_zip()
+        backup_dir=DATA_DIR/'backup_przed_usunieciem_sprawy'
+        backup_dir.mkdir(parents=True,exist_ok=True)
+        backup_path=backup_dir/f"sprawa_{cid}_{snapshot_name}"
+        atomic_write_bytes(backup_path,raw)
+
+        author=self.current_author(f); folder=FILES_DIR/f"sprawa_{cid}"
+        with db() as con:
+            immutable_audit(con,None,'case',cid,'Trwale usunięto sprawę po wykonaniu snapshotu',
+                            f"{c['title']} · kopia: {backup_path.name}",author)
             con.execute("DELETE FROM cases WHERE id=?",(cid,))
         if folder.exists():
             try: shutil.rmtree(folder)
-            except Exception: pass
-        self.redirect("/cases")
+            except Exception as exc: log_app_exception(f'/case/{cid}/delete-files',exc)
+        self.redirect("/cases?deleted=1")
 
     def case_pin_toggle(self,cid,f):
         u=current_request_user()
@@ -5400,13 +5485,19 @@ class Handler(BaseHTTPRequestHandler):
         try: target=int(f.get('target_case_id','0') or 0)
         except ValueError: target=0
         rtype=f.get('relation_type','related'); rtype=rtype if rtype in RELATION_TYPES else 'related'
-        if not target or target==cid: return self.redirect(f"/case/{cid}")
+        return_to=(f.get('return_to','') or '').strip()
+        fallback=f"/case/{cid}?tab=relations"
+        if not target or target==cid: return self.redirect(return_to if return_to.startswith('/') else fallback)
         author=self.current_author(f)
         with db() as con:
             if con.execute("SELECT 1 FROM cases WHERE id=?",(target,)).fetchone():
-                cur=con.execute("INSERT INTO case_relations(source_case_id,target_case_id,relation_type,note,created_by,updated_by) VALUES(?,?,?,?,?,?)",(cid,target,rtype,f.get('note','').strip(),author,author))
-                audit(con,cid,'relation',cur.lastrowid,'Dodano powiązanie',RELATION_TYPES.get(rtype,(rtype,rtype))[0],author)
-        self.redirect(f"/case/{cid}")
+                duplicate=con.execute('''SELECT id FROM case_relations WHERE relation_type=? AND
+                    ((source_case_id=? AND target_case_id=?) OR (source_case_id=? AND target_case_id=?)) LIMIT 1''',
+                    (rtype,cid,target,target,cid)).fetchone()
+                if not duplicate:
+                    cur=con.execute("INSERT INTO case_relations(source_case_id,target_case_id,relation_type,note,created_by,updated_by) VALUES(?,?,?,?,?,?)",(cid,target,rtype,f.get('note','').strip(),author,author))
+                    audit(con,cid,'relation',cur.lastrowid,'Dodano powiązanie',RELATION_TYPES.get(rtype,(rtype,rtype))[0],author)
+        self.redirect(return_to if return_to.startswith('/') else fallback)
 
     def relation_edit(self,rid):
         with db() as con:
@@ -5432,7 +5523,8 @@ class Handler(BaseHTTPRequestHandler):
         <div><label>Sprawa powiązana</label><select name="target_case_id" required>{target_opts}</select></div>
         <div class="full"><label>Typ relacji</label><select name="relation_type">{type_opts}</select><div class="small muted">Dla relacji „II instancja” sprawa bazowa jest I instancją, a sprawa powiązana — II instancją.</div></div>
         <div class="full"><label>Notatka</label><textarea name="note">{esc(r['note'])}</textarea></div>
-        <div class="full"><button class="btn primary">Zapisz zmiany</button> <a class="btn" href="/case/{r['source_case_id']}">Anuluj</a></div>
+        <input type="hidden" name="return_to" value="/case/{r['source_case_id']}?tab=relations">
+        <div class="full"><button class="btn primary">Zapisz zmiany</button> <a class="btn" href="/case/{r['source_case_id']}?tab=relations">Anuluj</a></div>
         </form></div>'''
         self.send_html(layout("Edycja powiązania",body,"cases"))
 
@@ -5444,7 +5536,10 @@ class Handler(BaseHTTPRequestHandler):
         if source and target and source!=target:
             with db() as con:
                 old=con.execute("SELECT * FROM case_relations WHERE id=?",(rid,)).fetchone()
-                if old and con.execute("SELECT COUNT(*) FROM cases WHERE id IN (?,?)",(source,target)).fetchone()[0]==2:
+                duplicate=con.execute('''SELECT id FROM case_relations WHERE id<>? AND relation_type=? AND
+                    ((source_case_id=? AND target_case_id=?) OR (source_case_id=? AND target_case_id=?)) LIMIT 1''',
+                    (rid,rtype,source,target,target,source)).fetchone()
+                if old and not duplicate and con.execute("SELECT COUNT(*) FROM cases WHERE id IN (?,?)",(source,target)).fetchone()[0]==2:
                     def case_name(xid):
                         row=con.execute("SELECT signature,internal_signature,title FROM cases WHERE id=?",(xid,)).fetchone()
                         if not row: return f'#{xid}'
@@ -5462,14 +5557,16 @@ class Handler(BaseHTTPRequestHandler):
                         detail_lines.append(f"• Notatka: {_change_value(old['note'])} → {_change_value(note)}")
                     con.execute("UPDATE case_relations SET source_case_id=?,target_case_id=?,relation_type=?,note=?,updated_by=? WHERE id=?",(source,target,rtype,note,author,rid))
                     if detail_lines: audit(con,source,'relation',rid,'Edytowano powiązanie','\n'.join(detail_lines),author)
-        self.redirect(f"/case/{source}" if source else '/cases')
+        target_url=(f.get('return_to','') or '').strip()
+        self.redirect(target_url if target_url.startswith('/') else (f"/case/{source}?tab=relations" if source else '/cases'))
 
     def relation_delete(self,rid,f):
         try: cid=int(f.get('case_id','0') or 0)
         except ValueError: cid=0
         a=self.current_author(f)
         with db() as con: move_to_trash(con,'relation',rid,a)
-        self.redirect(f"/case/{cid}" if cid else '/cases')
+        target=(f.get('return_to','') or '').strip()
+        self.redirect(target if target.startswith('/') else (f"/case/{cid}?tab=relations" if cid else '/cases'))
 
     def party_edit(self,pid):
         with db() as con:
@@ -5580,6 +5677,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_html(layout('Sprawa tylko do odczytu',f"<div class='readonly-banner'>Sprawa jest zakończona i zablokowana. <a class='btn' href='/case/{d['case_id']}'>Wróć</a></div>",'documents'),403)
             tasks=con.execute("SELECT id,title,due_date,status FROM tasks WHERE case_id=? ORDER BY status,CASE WHEN due_date='' THEN 1 ELSE 0 END,due_date,id",(d['case_id'],)).fetchall() if d else []
             versions=con.execute("SELECT * FROM document_versions WHERE document_id=? ORDER BY version_no DESC",(did,)).fetchall() if d else []
+            children=con.execute("SELECT id,title,original_name FROM documents WHERE parent_document_id=? ORDER BY attachment_order,id",(did,)).fetchall() if d else []
         if not d: return self.send_error(404)
         opts=''.join(f"<option value='{esc(x)}' {'selected' if d['doc_type']==x else ''}>{esc(x)}</option>" for x in DOC_TYPES)
         status_opts=''.join(f"<option value='{esc(x)}' {'selected' if d['doc_status']==x else ''}>{esc(x)}</option>" for x in DOC_STATUSES)
@@ -5591,33 +5689,65 @@ class Handler(BaseHTTPRequestHandler):
         idx=f"Zindeksowano: {esc(d['indexed_at'])}" if d['indexed_at'] else 'Treść nie była jeszcze indeksowana.'
         version_rows=''.join(f"<tr><td>v{x['version_no']}</td><td>{esc(str(x['created_at'])[:16])}</td><td>{esc(x['original_name'])}</td><td>{esc(x['created_by'])}</td><td><form method='post' action='/document/{did}/version/{x['id']}/restore' onsubmit=\"return confirm('Przywrócić tę wersję pliku? Bieżący plik zostanie wcześniej zachowany jako kolejna wersja.');\"><button class='btn small'>Przywróć</button></form></td></tr>" for x in versions)
         versions_card=f"<div class='card'><h2>Historia wersji pliku</h2><p class='small muted'>Poprzedni plik jest automatycznie zachowywany przed każdą podmianą.</p><table><tr><th>Wersja</th><th>Data</th><th>Plik</th><th>Autor</th><th></th></tr>{version_rows or '<tr><td colspan=5>Brak starszych wersji.</td></tr>'}</table></div>"
-        body=f'''<div class="topbar"><div><h1>Edytuj dokument</h1><div class="sub">{esc(d['signature'] or d['case_title'])}</div></div></div><div class="card"><form method="post" enctype="multipart/form-data" action="/document/{did}/update" class="form-grid" data-autosave="1"><input type="hidden" name="case_id" value="{d['case_id']}"><input type="hidden" name="return_to" value="/case/{d['case_id']}?tab=documents"><div><label>Data dokumentu</label><input type="date" name="doc_date" value="{esc(d['doc_date'])}"></div><div><label>Data wpływu</label><input type="date" name="received_date" value="{esc(d['received_date'])}"></div><div><label>Data doręczenia</label><input type="date" name="delivered_date" value="{esc(row_get(d,'delivered_date',''))}"></div><div><label>Rodzaj</label><select name="doc_type">{opts}</select></div><div><label>Status dokumentu</label><select name="doc_status">{status_opts}</select></div><div><label>Nadawca</label><input name="sender" value="{esc(row_get(d,'sender',''))}"></div><div><label>Autor dokumentu</label><input name="document_author" value="{esc(row_get(d,'document_author',''))}"></div><div><label>Tagi</label><input name="tags" value="{esc(row_get(d,'tags',''))}" placeholder="np. dowód, odpowiedź, pilne"></div><div class="full"><label>Powiązane zadanie / termin</label><select name="linked_task_id">{''.join(task_opts)}</select></div><div class="full"><label>Tytuł</label><input name="title" required value="{esc(d['title'])}"></div><div class="full"><label>Opis</label><textarea name="description">{esc(d['description'])}</textarea></div><div class="full"><label>Podmień / dodaj plik</label><input type="file" name="file"><div class="small muted">{current} Wybranie nowego pliku automatycznie zachowa poprzednią wersję. {idx}</div><label style="font-weight:500"><input style="width:auto" type="checkbox" name="allow_duplicate" value="1"> Zezwól na identyczny plik, jeśli świadomie chcę duplikat</label></div><div class="full"><button class="btn primary">Zapisz zmiany</button> <a class="btn" href="/case/{d['case_id']}?tab=documents">Anuluj</a></div></form></div><br>{versions_card}'''
+        attachment_rows=''.join(f"<div class='document-attachment-item'><span>📎 <a href='/document/{x['id']}/open'><b>{esc(x['title'])}</b></a><small class='muted'> · {esc(x['original_name'] or 'bez pliku')}</small></span><span><a class='btn small' href='/document/{x['id']}/edit'>Edytuj</a> <form class='inline' method='post' action='/document/{x['id']}/delete' onsubmit=\"return confirm('Przenieść ten załącznik do Kosza?');\"><input type='hidden' name='case_id' value='{d['case_id']}'><input type='hidden' name='return_to' value='/document/{did}/edit'><button class='btn small danger'>Do kosza</button></form></span></div>" for x in children)
+        attachments_field='' if row_get(d,'parent_document_id',None) else f'''<div class="full"><label>Dodaj kolejne załączniki</label><input type="file" name="attachments[]" multiple><div class="small muted">Możesz wskazać kilka plików naraz. Zostaną dopisane pod tym dokumentem bez usuwania obecnych załączników.</div></div>'''
+        attachment_content=attachment_rows or "<div class='empty'>Brak załączników. Dodaj je w formularzu powyżej.</div>"
+        attachments_card='' if row_get(d,'parent_document_id',None) else f"<br><div class='card'><h2>Załączniki ({len(children)})</h2><div class='document-attachment-list'>{attachment_content}</div></div>"
+        body=f'''<div class="topbar"><div><h1>Edytuj dokument</h1><div class="sub">{esc(d['signature'] or d['case_title'])}</div></div></div><div class="card"><form method="post" enctype="multipart/form-data" action="/document/{did}/update" class="form-grid"><input type="hidden" name="case_id" value="{d['case_id']}"><input type="hidden" name="return_to" value="/case/{d['case_id']}?tab=documents"><div><label>Data dokumentu</label><input type="date" name="doc_date" value="{esc(d['doc_date'])}"></div><div><label>Data wpływu</label><input type="date" name="received_date" value="{esc(d['received_date'])}"></div><div><label>Data doręczenia</label><input type="date" name="delivered_date" value="{esc(row_get(d,'delivered_date',''))}"></div><div><label>Rodzaj</label><select name="doc_type">{opts}</select></div><div><label>Status dokumentu</label><select name="doc_status">{status_opts}</select></div><div><label>Nadawca</label><input name="sender" value="{esc(row_get(d,'sender',''))}"></div><div><label>Autor dokumentu</label><input name="document_author" value="{esc(row_get(d,'document_author',''))}"></div><div><label>Tagi</label><input name="tags" value="{esc(row_get(d,'tags',''))}" placeholder="np. dowód, odpowiedź, pilne"></div><div class="full"><label>Powiązane zadanie / termin</label><select name="linked_task_id">{''.join(task_opts)}</select></div><div class="full"><label>Tytuł</label><input name="title" required value="{esc(d['title'])}"></div><div class="full"><label>Opis</label><textarea name="description">{esc(d['description'])}</textarea></div><div class="full"><label>Podmień / dodaj plik główny</label><input type="file" name="file"><div class="small muted">{current} Wybranie nowego pliku automatycznie zachowa poprzednią wersję. {idx}</div><label style="font-weight:500"><input style="width:auto" type="checkbox" name="allow_duplicate" value="1"> Zezwól na identyczny plik, jeśli świadomie chcę duplikat</label></div>{attachments_field}<div class="full"><button class="btn primary">Zapisz zmiany</button> <a class="btn" href="/case/{d['case_id']}?tab=documents">Anuluj</a></div></form></div>{attachments_card}<br>{versions_card}'''
         self.send_html(layout("Edycja dokumentu",body,"documents"))
 
     def document_update(self,did,f,files):
         a=self.current_author(f)
+        title=(f.get('title','') or '').strip()
+        if not title:
+            return self.send_html(layout('Brak tytułu',f"<div class='error'>Tytuł dokumentu jest wymagany.</div><a class='btn' href='/document/{did}/edit'>Wróć</a>",'documents'),400)
+        main_upload=files.get('file') if isinstance(files,dict) else None
+        if isinstance(main_upload,list): main_upload=main_upload[0] if main_upload else None
+        attachment_files=files.get('attachments[]',[]) if isinstance(files,dict) else []
+        if isinstance(attachment_files,tuple): attachment_files=[attachment_files]
+        attachment_files=[x for x in attachment_files if x and x[0]]
+        indexed_ids=[]
         with db() as con:
             d=con.execute("SELECT * FROM documents WHERE id=?",(did,)).fetchone()
             if not d: return self.send_error(404)
             if case_read_only(con,d['case_id']): return self.send_error(403,'Sprawa zakończona jest tylko do odczytu.')
-            stored=d['stored_name']; original=d['original_name']; newdata=None
-            if 'file' in files and files['file'][0]:
-                original=safe_filename(files['file'][0]); newdata=files['file'][1]; h=sha256_bytes(newdata)
-                dup=con.execute("SELECT d.id,d.title,d.case_id,c.title case_title,c.signature,c.internal_signature FROM documents d JOIN cases c ON c.id=d.case_id WHERE d.file_hash=? AND d.id<>? LIMIT 1",(h,did)).fetchone()
-                if dup and not f.get('allow_duplicate'):
-                    label=primary_signature_text(dup['case_id'],dup['signature'],dup['internal_signature'])
-                    body=f"<div class='conflict-box'><h1>Identyczny dokument już istnieje</h1><p>Ten sam plik (SHA-256) jest już podpięty jako <b>{esc(dup['title'])}</b> w sprawie <a href='/case/{dup['case_id']}'>{esc(label)}</a>.</p><p>Jeśli to celowe, wróć i zaznacz opcję <b>„Zezwól na identyczny plik”</b>.</p><a class='btn' href='/document/{did}/edit'>Wróć</a></div>"
-                    return self.send_html(layout('Wykryto duplikat',body,'documents'),409)
-                folder=FILES_DIR/f"sprawa_{d['case_id']}"; folder.mkdir(parents=True,exist_ok=True)
-                newstored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"; atomic_write_bytes(folder/newstored,newdata)
-                oldstored=stored; stored=newstored
-            else: oldstored=''
+            if row_get(d,'parent_document_id',None): attachment_files=[]
+            cid=d['case_id']; stored=d['stored_name']; original=d['original_name']; newdata=None; oldstored=''
+            if main_upload and main_upload[0]:
+                original=safe_filename(main_upload[0]); newdata=main_upload[1]
+
+            # Wszystkie konflikty sprawdzamy przed zapisaniem pierwszego pliku,
+            # aby częściowo wykonana edycja nie zostawiła osieroconych załączników.
+            upload_hashes=[]
+            if newdata is not None: upload_hashes.append(('plik główny',sha256_bytes(newdata),did))
+            upload_hashes.extend((safe_filename(x[0]),sha256_bytes(x[1]),None) for x in attachment_files)
+            if not f.get('allow_duplicate'):
+                seen=set()
+                for label_text,file_hash,excluded_id in upload_hashes:
+                    if file_hash in seen:
+                        body=f"<div class='conflict-box'><h1>Powtórzony plik</h1><p>Plik <b>{esc(label_text)}</b> został wybrany więcej niż raz.</p><a class='btn' href='/document/{did}/edit'>Wróć</a></div>"
+                        return self.send_html(layout('Wykryto duplikat',body,'documents'),409)
+                    seen.add(file_hash)
+                    sql="SELECT d.id,d.title,d.case_id,c.signature,c.internal_signature FROM documents d JOIN cases c ON c.id=d.case_id WHERE d.file_hash=?"
+                    params=[file_hash]
+                    if excluded_id: sql+=' AND d.id<>?'; params.append(excluded_id)
+                    dup=con.execute(sql+' LIMIT 1',params).fetchone()
+                    if dup:
+                        case_label=primary_signature_text(dup['case_id'],dup['signature'],dup['internal_signature'])
+                        body=f"<div class='conflict-box'><h1>Identyczny dokument już istnieje</h1><p>Plik <b>{esc(label_text)}</b> jest już zapisany jako <b>{esc(dup['title'])}</b> w sprawie <a href='/case/{dup['case_id']}'>{esc(case_label)}</a>.</p><p>Jeśli to celowe, wróć i zaznacz „Zezwól na identyczny plik”.</p><a class='btn' href='/document/{did}/edit'>Wróć</a></div>"
+                        return self.send_html(layout('Wykryto duplikat',body,'documents'),409)
+
+            folder=FILES_DIR/f"sprawa_{cid}"; folder.mkdir(parents=True,exist_ok=True)
+            if newdata is not None:
+                oldstored=stored
+                newstored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original}"
+                atomic_write_bytes(folder/newstored,newdata); stored=newstored
             try: linked=int(f.get('linked_task_id') or 0) or None
             except Exception: linked=None
-            if linked and not con.execute('SELECT 1 FROM tasks WHERE id=? AND case_id=?',(linked,d['case_id'])).fetchone(): linked=None
+            if linked and not con.execute('SELECT 1 FROM tasks WHERE id=? AND case_id=?',(linked,cid)).fetchone(): linked=None
             new_values={
                 'doc_date':f.get('doc_date',''),'received_date':f.get('received_date',''),'delivered_date':f.get('delivered_date',''),
-                'doc_type':f.get('doc_type','Inne'),'doc_status':f.get('doc_status','Aktywny'),'title':f.get('title','').strip(),
+                'doc_type':f.get('doc_type','Inne'),'doc_status':f.get('doc_status','Aktywny'),'title':title,
                 'description':f.get('description','').strip(),'sender':f.get('sender','').strip(),
                 'document_author':f.get('document_author','').strip(),'tags':f.get('tags','').strip(),'linked_task_id':linked
             }
@@ -5631,24 +5761,39 @@ class Handler(BaseHTTPRequestHandler):
                 details=(details+'\n'+f"• Powiązane zadanie / termin: {_change_value(old_t['title'] if old_t else '—')} → {_change_value(new_t['title'] if new_t else '—')}").strip()
             if newdata is not None:
                 details=(details+'\n'+f"• Plik: {_change_value(d['original_name'])} → {_change_value(original)}").strip()
-            con.execute("UPDATE documents SET doc_date=?,received_date=?,delivered_date=?,doc_type=?,doc_status=?,title=?,description=?,sender=?,document_author=?,tags=?,linked_task_id=?,stored_name=?,original_name=?,updated_by=? WHERE id=?",
-                        (new_values['doc_date'],new_values['received_date'],new_values['delivered_date'],new_values['doc_type'],new_values['doc_status'],new_values['title'],new_values['description'],new_values['sender'],new_values['document_author'],new_values['tags'],linked,stored,original,a,did)); cid=d['case_id']
-            if newdata is not None:
-                # Zachowujemy poprzedni plik zanim bieżący rekord zacznie wskazywać
-                # nowy. Historia wersji jest częścią akt i trafia do snapshotów.
                 save_document_file_version(con,did,a)
+            con.execute("UPDATE documents SET doc_date=?,received_date=?,delivered_date=?,doc_type=?,doc_status=?,title=?,description=?,sender=?,document_author=?,tags=?,linked_task_id=?,stored_name=?,original_name=?,updated_by=? WHERE id=?",
+                        (new_values['doc_date'],new_values['received_date'],new_values['delivered_date'],new_values['doc_type'],new_values['doc_status'],title,new_values['description'],new_values['sender'],new_values['document_author'],new_values['tags'],linked,stored,original,a,did))
+            if newdata is not None:
                 con.execute("UPDATE documents SET file_hash=?,extracted_text='',indexed_at='',ocr_status='kolejka' WHERE id=?",(sha256_bytes(newdata),did))
+                indexed_ids.append(did)
                 if oldstored:
-                    try: (FILES_DIR/f"sprawa_{cid}"/oldstored).unlink(missing_ok=True)
+                    try: (folder/oldstored).unlink(missing_ok=True)
                     except Exception: pass
             else:
                 try:
                     cur=con.execute('SELECT * FROM documents WHERE id=?',(did,)).fetchone(); con.execute('DELETE FROM document_fts WHERE document_id=?',(did,)); con.execute('INSERT INTO document_fts(document_id,case_id,title,filename,body) VALUES(?,?,?,?,?)',(did,cid,cur['title'],cur['original_name'],cur['extracted_text']))
                 except sqlite3.DatabaseError: pass
+
+            next_order=int(con.execute('SELECT COALESCE(MAX(attachment_order),0)+1 FROM documents WHERE parent_document_id=?',(did,)).fetchone()[0])
+            for offset,item in enumerate(attachment_files):
+                aname=safe_filename(item[0]); adata=item[1]
+                astored=f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{aname}"
+                atomic_write_bytes(folder/astored,adata)
+                atitle=Path(aname).stem or f"Załącznik {next_order+offset}"
+                acur=con.execute('''INSERT INTO documents(case_id,doc_date,received_date,delivered_date,doc_type,doc_status,title,description,
+                    sender,document_author,tags,linked_task_id,stored_name,original_name,parent_document_id,attachment_order,
+                    created_by,updated_by,file_hash,ocr_status) VALUES(?,?,?,?,?,'Aktywny',?,'',?,?,?,?,?,?,?,?,?,?,?,'kolejka')''',
+                    (cid,new_values['doc_date'],new_values['received_date'],new_values['delivered_date'],'Załącznik',atitle,
+                     new_values['sender'],new_values['document_author'],'załącznik',linked,astored,aname,did,next_order+offset,a,a,sha256_bytes(adata)))
+                indexed_ids.append(acur.lastrowid)
+                audit(con,cid,'document',acur.lastrowid,'Dodano załącznik do dokumentu',f"Dokument: {_change_value(title)}\nPlik: {_change_value(aname)}",a)
+            if attachment_files:
+                details=(details+'\n'+f"• Dodano załączniki: {len(attachment_files)}").strip()
             if details:
                 action='Edytowano pismo' if new_values['doc_type'] in PLEADING_DOC_TYPES else 'Edytowano dokument'
                 audit(con,cid,'document',did,action,details,a)
-        if newdata is not None: enqueue_document_index(did)
+        for indexed_id in indexed_ids: enqueue_document_index(indexed_id)
         target=(f.get('return_to','') or '').strip()
         self.redirect(target if target.startswith('/') else f"/case/{cid}")
 
@@ -5848,7 +5993,8 @@ class Handler(BaseHTTPRequestHandler):
             for ch in children:
                 move_to_trash(con,'document',ch['id'],a)
             move_to_trash(con,'document',did,a)
-        self.redirect(f'/case/{cid}')
+        target=(f.get('return_to','') or '').strip()
+        self.redirect(target if target.startswith('/') else f'/case/{cid}?tab=documents')
 
     def document_missing_page(self,d,message=''):
         did=d['id']; state,p,why=document_state(d)
@@ -5882,7 +6028,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def document_view(self,did,qs=None):
         with db() as con:
-            d=con.execute("SELECT d.*,c.title case_title,c.signature,c.internal_signature FROM documents d JOIN cases c ON c.id=d.case_id WHERE d.id=?",(did,)).fetchone()
+            d=con.execute("SELECT d.*,c.title case_title,c.signature,c.internal_signature,c.status case_status,c.closed_edit_unlocked FROM documents d JOIN cases c ON c.id=d.case_id WHERE d.id=?",(did,)).fetchone()
             parent=con.execute("SELECT id,title FROM documents WHERE id=?",(row_get(d,'parent_document_id',0),)).fetchone() if d and row_get(d,'parent_document_id',0) else None
             children=con.execute("SELECT id,title,original_name,stored_name FROM documents WHERE parent_document_id=? ORDER BY attachment_order,id",(did,)).fetchall() if d else []
         if not d: return self.send_error(404)
@@ -5893,7 +6039,9 @@ class Handler(BaseHTTPRequestHandler):
         desktop_actions=''
         if DESKTOP_MODE and LOCAL_MODE:
             desktop_actions=f"<form method='post' action='/document/{did}/open-default' style='display:inline'><button class='btn'>Otwórz w programie domyślnym</button></form> <form method='post' action='/document/{did}/open-folder' style='display:inline'><button class='btn'>Otwórz folder dokumentu</button></form>"
-        toolbar=f"<a class='btn' href='/case/{d['case_id']}#documents'>← Wróć do sprawy</a> <a class='btn' href='/documents'>Dokumenty</a> <a class='btn primary' href='/document/{did}/download'>Pobierz</a> {desktop_actions}"
+        editable=not (d['case_status']=='closed' and not int(d['closed_edit_unlocked'] or 0))
+        edit_action=f"<a class='btn' href='/document/{did}/edit'>Edytuj / dodaj załączniki</a>" if editable else ''
+        toolbar=f"<a class='btn' href='/case/{d['case_id']}?tab=documents'>← Wróć do sprawy</a> <a class='btn' href='/documents'>Dokumenty</a> {edit_action} <a class='btn primary' href='/document/{did}/download'>Pobierz</a> {desktop_actions}"
         max_chars=160_000; bodytxt,status=self._preview_text_now(d,p,ext)
         def text_preview(label):
             if not bodytxt:
