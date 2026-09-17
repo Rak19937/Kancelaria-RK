@@ -1,9 +1,0 @@
-RK KANCELARIA 0.12.15 DESKTOP
-
-- Dokumenty otwierają się wewnątrz okna RK KANCELARIA, bez nowej karty/przeglądarki.
-- PDF: podgląd osadzony w oknie Desktop.
-- Obrazy: podgląd w oknie Desktop.
-- DOCX/TXT/RTF/MD/CSV/LOG: podgląd tekstowy z indeksu.
-- Na ekranie logowania w trybie Desktop jest przycisk „Zamknij program”.
-- Zamknięcie wykonuje końcowy autosave i zamyka backend.
-- Baza danych nie wymaga migracji.

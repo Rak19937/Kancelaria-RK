@@ -1,9 +1,0 @@
-RK KANCELARIA 0.15.2
-
-1. Rozpakuj CAŁY ZIP do zwykłego folderu (np. Dokumenty\RK_KANCELARIA_0.15.2).
-2. Nie uruchamiaj plików BAT bezpośrednio z podglądu ZIP.
-3. Uruchom INSTALUJ_TRYB_DESKTOP.bat.
-4. Po instalacji uruchom RK KANCELARIA DESKTOP.bat.
-5. W razie problemu uruchom SPRAWDZ_TRYB_DESKTOP.bat.
-
-Dane programu nie są w folderze wersji. Pozostają w %LOCALAPPDATA%\RK_KANCELARIA\Dane.

@@ -1,8 +1,0 @@
-RK KANCELARIA 0.15.1
-===================
-
-Najpierw: INSTALUJ_TRYB_DESKTOP.bat
-Potem:    RK KANCELARIA DESKTOP.bat
-
-0.15.1 naprawia problem instalatora 0.15.0 z Pythonem 3.14 i automatycznie naprawia niepełny Runtime Desktop.
-Nie kasuj folderu %LOCALAPPDATA%\RK_KANCELARIA — tam mogą znajdować się dane/runtime programu.
