@@ -1,6 +1,6 @@
-/* RK KANCELARIA DEV9 PWA — cache wyłącznie statycznego interfejsu.
+/* RK KANCELARIA 0.3.0-dev4 PWA — cache wyłącznie statycznego interfejsu.
    Dane spraw, HTML, API i dokumenty zawsze idą przez sieć i nie są zapisywane offline. */
-const CACHE='rk-kancelaria-static-0.3.0-dev2';
+const CACHE='rk-kancelaria-static-0.3.0-dev4';
 const STATIC=[
   '/assets/rk_app.css',
   '/assets/rk_app.js',

@@ -36,21 +36,21 @@ def main() -> int:
             con.execute(f"PRAGMA user_version={app.SCHEMA_VERSION}")
 
         with sqlite3.connect(app.DB_PATH) as con:
-            assert con.execute('PRAGMA user_version').fetchone()[0] == 320
+            assert con.execute('PRAGMA user_version').fetchone()[0] == app.SCHEMA_VERSION
             assert con.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
             assert con.execute('SELECT principal_cents FROM case_claims').fetchone()[0] == 2_750_057
 
         raw,_=app.create_data_snapshot_zip()
         with zipfile.ZipFile(io.BytesIO(raw)) as z:
             meta=json.loads(z.read('snapshot.json'))
-            assert meta['schema_version'] == 320
+            assert meta['schema_version'] == app.SCHEMA_VERSION
             names=set(z.namelist())
             assert f'dokumenty/sprawa_{cid}/{stored}' in names
             assert any(x.startswith(f'dokumenty/sprawa_{cid}/wersje_dokumentu_{did}/') for x in names)
 
         assert app.money_to_cents('27 500,57') == 2_750_057
         assert '27 500,57' in app.fmt_money(2_750_057)
-        print('OK: CASE WORKSPACE schema 320, kwoty, wersje dokumentów i snapshot')
+        print(f'OK: CASE WORKSPACE schema {app.SCHEMA_VERSION}, kwoty, wersje dokumentów i snapshot')
     return 0
 
 

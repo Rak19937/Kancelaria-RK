@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RK KANCELARIA 0.3.0-dev3 — CASE WORKSPACE.
+"""RK KANCELARIA 0.3.0-dev4 — UI & PERFORMANCE.
 
 Czytelny widok sprawy dla laika, globalna linia czasu, kalendarz i alerty,
 relacje „co z czego wynika”, generowane podsumowania oraz lokalna biblioteka prawa.
@@ -58,8 +58,8 @@ from rk_smart import (
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.3.0-dev3"
-SCHEMA_VERSION = 320
+VERSION = "0.3.0-dev4"
+SCHEMA_VERSION = 321
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
 APP_MODE = RUNTIME_PATHS.mode
@@ -101,6 +101,8 @@ DESKTOP_EXIT_FLAG = RUNTIME_PATHS.desktop_exit_flag
 _INDEX_QUEUE: "queue.Queue[tuple[int,bool]]" = queue.Queue()
 _INDEX_WORKER_STARTED = False
 _INDEX_WORKER_LOCK = threading.Lock()
+_ASSET_CACHE: dict[str, tuple[int, int, bytes, str, str]] = {}
+_ASSET_CACHE_LOCK = threading.Lock()
 
 
 def _looks_like_sqlite(path: Path) -> bool:
@@ -502,9 +504,9 @@ try:
 except ValueError:
     AUTO_SHUTDOWN_GRACE = 0.7
 try:
-    CLIENT_STALE_SECONDS = max(3, int(os.getenv("SPRAWNIK_CLIENT_STALE_SECONDS", "5")))
+    CLIENT_STALE_SECONDS = max(10, int(os.getenv("SPRAWNIK_CLIENT_STALE_SECONDS", "25")))
 except ValueError:
-    CLIENT_STALE_SECONDS = 5
+    CLIENT_STALE_SECONDS = 25
 _CLIENT_LOCK = threading.Lock()
 _CLIENT_TABS: dict[str, float] = {}
 _CLIENT_SEEN = False
@@ -540,7 +542,7 @@ def auto_shutdown_monitor(server: ThreadingHTTPServer) -> None:
     if not AUTO_SHUTDOWN:
         return
     while True:
-        time.sleep(0.1)
+        time.sleep(0.5)
         now = time.monotonic()
         with _CLIENT_LOCK:
             stale = [k for k, v in _CLIENT_TABS.items() if now - v > CLIENT_STALE_SECONDS]
@@ -590,12 +592,15 @@ RELATION_TYPES = {
 def db():
     """Transakcyjne, krótko żyjące połączenie SQLite."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(DB_PATH, timeout=15)
+    con = sqlite3.connect(DB_PATH, timeout=15, cached_statements=256)
     con.row_factory = sqlite3.Row
     try:
         con.execute("PRAGMA foreign_keys = ON")
         con.execute("PRAGMA busy_timeout = 15000")
         con.execute("PRAGMA synchronous = NORMAL")
+        con.execute("PRAGMA temp_store = MEMORY")
+        con.execute("PRAGMA cache_size = -32768")
+        con.execute("PRAGMA mmap_size = 134217728")
         yield con
         con.commit()
     except Exception:
@@ -1278,9 +1283,13 @@ def init_db() -> None:
             pass
 
         con.execute("CREATE INDEX IF NOT EXISTS idx_cases_status_nextdate ON cases(status,next_date)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_cases_nextdate ON cases(next_date,id)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status_due_case ON tasks(status,due_date,case_id)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_events_date_case ON events(event_date,case_id)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_process_events_date_case ON process_events(event_date,case_id)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_process_events_nextdate_case ON process_events(next_date,case_id)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_docs_status_case ON documents(doc_status,case_id)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_writing_projects_status_due ON writing_projects(status,due_date,updated_at)")
 
         # Warstwa 0.3: czytelny widok sprawy, alerty, relacje i lokalna biblioteka prawa.
         # CREATE IF NOT EXISTS + INSERT OR IGNORE zachowują pełną zgodność z danymi DEV9.
@@ -1419,7 +1428,7 @@ def client_presence_script() -> str:
   }catch(e){}
   function heartbeat(){fetch('/system/heartbeat?tab='+encodeURIComponent(tabId),{method:'GET',cache:'no-store',credentials:'same-origin'}).catch(()=>{});}
   heartbeat();
-  const hb=setInterval(heartbeat,1000);
+  const hb=setInterval(heartbeat,8000);
   window.addEventListener('pagehide',()=>{
     clearInterval(hb);
     try{navigator.sendBeacon('/system/closing?tab='+encodeURIComponent(tabId),'');}catch(e){}
@@ -2530,14 +2539,13 @@ def layout(title: str, body: str, active: str = "") -> str:
             ("/cases?mine=1", "◎", "Moje sprawy", "my_cases"),
             ("/tasks", "✓", "Zadania", "tasks"),
             ("/documents", "▤", "Dokumenty", "documents"),
-            ("/drafts", "✎", "Projekty pism", "drafts"),
+            ("/drafts", "✎", "Pisma", "drafts"),
         ]),
         ("WIĘCEJ", [
             ("/cases/closed", "□", "Sprawy zakończone", "closed_cases"),
             ("/entities", "♙", "Kartoteka podmiotów", "entities"),
             ("/checklists", "☑", "Checklisty", "checklists"),
             ("/views", "☆", "Moje widoki", "views"),
-            ("/draft/templates", "▣", "Szablony pism", "draft_templates"),
             ("/tags", "#", "Tagi", "tags"),
             ("/law", "¶", "Prawo", "law"),
             ("/search", "⌕", "Wyszukiwarka", "search"),
@@ -2585,6 +2593,16 @@ def layout(title: str, body: str, active: str = "") -> str:
 <div class="program-author">AUTOR PROGRAMU<b>{APP_AUTHOR}</b></div>
 </aside><main class="main">{startup_notice}{body}</main></div><a class="global-add" href="/quick-add" title="Dodaj czynność" aria-label="Dodaj czynność">＋</a><div id="autosaveStatus" class="autosave-status"></div>
 <script src="/assets/rk_app.js?v={VERSION}" defer></script></body></html>"""
+
+
+def writing_tabs(active: str) -> str:
+    """Jeden moduł Pisma z dwoma widokami, bez dublowania pozycji w menu."""
+    return (
+        "<nav class='module-tabs' aria-label='Widoki modułu Pisma'>"
+        f"<a class='module-tab {'active' if active == 'projects' else ''}' href='/drafts'>Projekty</a>"
+        f"<a class='module-tab {'active' if active == 'templates' else ''}' href='/drafts?view=templates'>Szablony</a>"
+        "</nav>"
+    )
 
 def badge(status: str) -> str:
     return f'<span class="badge {STATUS_BADGES.get(status,"gray")}">{esc(STATUS_LABELS.get(status,status))}</span>'
@@ -2915,17 +2933,31 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_asset(self, name: str):
         safe = Path(name).name
-        # CSS/JS są utrzymywane w jednym źródle w katalogu aplikacji; katalog
-        # assets pozostaje fallbackiem dla buildów i starszych paczek.
-        root_candidate = BASE_DIR / safe
-        path = root_candidate if safe in {'rk_app.css','rk_app.js'} and root_candidate.is_file() else BASE_DIR / 'assets' / safe
+        # Wszystkie zasoby interfejsu mają jedno źródło. Dawne duplikaty z
+        # katalogu głównego powodowały rozjazdy stylów między ekranami.
+        path = BASE_DIR / 'assets' / safe
         if not path.is_file():
             return self.send_error(404)
-        data = path.read_bytes()
-        ctype = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
+        stat = path.stat()
+        cache_key = str(path)
+        with _ASSET_CACHE_LOCK:
+            cached = _ASSET_CACHE.get(cache_key)
+            if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+                _, _, data, ctype, etag = cached
+            else:
+                data = path.read_bytes()
+                ctype = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
+                etag = '"' + hashlib.sha256(data).hexdigest()[:20] + '"'
+                _ASSET_CACHE[cache_key] = (stat.st_mtime_ns, stat.st_size, data, ctype, etag)
+        if self.headers.get('If-None-Match') == etag:
+            self.send_response(304)
+            self.send_header('ETag', etag)
+            self.end_headers()
+            return
         self.send_response(200)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(data)))
+        self.send_header('ETag', etag)
         if safe == 'service-worker.js':
             self.send_header('Cache-Control','no-cache, no-store, must-revalidate')
             self.send_header('Service-Worker-Allowed','/')
@@ -3146,9 +3178,12 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"/external-signature/\d+/edit", path): return self.external_signature_edit(int(path.split("/")[2]))
             if path == "/tasks": return self.tasks_page(qs)
             if path == "/views": return self.saved_views_page()
-            if path == "/drafts": return self.drafts_page(qs)
+            if path == "/drafts":
+                if (qs.get('view') or ['projects'])[0] == 'templates':
+                    return self.draft_templates_page()
+                return self.drafts_page(qs)
             if path == "/draft/new": return self.draft_new_page(qs)
-            if path == "/draft/templates": return self.draft_templates_page()
+            if path == "/draft/templates": return self.redirect('/drafts?view=templates')
             if re.fullmatch(r"/draft/\d+", path): return self.draft_view(int(path.split("/")[2]))
             if re.fullmatch(r"/draft/\d+/edit", path): return self.draft_edit_page(int(path.split("/")[2]))
             if re.fullmatch(r"/draft/\d+/download", path): return self.draft_download(int(path.split("/")[2]))
@@ -4753,7 +4788,7 @@ class Handler(BaseHTTPRequestHandler):
         cf = f"&case_id={case_filter}" if case_filter else ''
         body = f"""<div class='topbar'><div><h1>Kalendarz kancelarii</h1><div class='sub'>Rozprawy, terminy, zadania, monity i alerty w jednym miejscu.</div></div><div><a class='btn' href='/calendar?month={prev.strftime('%Y-%m')}{cf}'>←</a> <b class='calendar-month-title'>{first.strftime('%m.%Y')}</b> <a class='btn' href='/calendar?month={nxt.strftime('%Y-%m')}{cf}'>→</a></div></div>
         <div class='card'><form method='get' action='/calendar' class='form-grid compact-form'><input type='hidden' name='month' value='{first.strftime('%Y-%m')}'><div class='full'><label>Filtr sprawy</label><select name='case_id' onchange='this.form.submit()'>{case_opts}</select></div></form></div>
-        <div class='calendar-weekdays'>{''.join(f'<div>{x}</div>' for x in ['Pon','Wt','Śr','Czw','Pt','Sob','Niedz'])}</div><div class='calendar-grid'>{''.join(cells)}</div>
+        <section class='calendar-board'><div class='calendar-weekdays'>{''.join(f'<div>{x}</div>' for x in ['Pon','Wt','Śr','Czw','Pt','Sob','Niedz'])}</div><div class='calendar-grid'>{''.join(cells)}</div></section>
         <div class='card'><h2>Dodaj wpis</h2><div class='small muted' style='margin-bottom:10px'>Monit, zadanie, termin procesowy i płatność utworzą automatycznie powiązane zadanie. Rozprawa, posiedzenie i mediacja pozostaną wpisem kalendarza.</div><form method='post' action='/alert/create' class='form-grid'><input type='hidden' name='return_to' value='/calendar?month={first.strftime('%Y-%m')}'><div><label>Sprawa</label><select name='case_id'>{case_opts}</select></div><div><label>Data *</label><input type='date' name='alert_date' required></div><div><label>Rodzaj</label><select name='alert_type'>{type_opts}</select></div><div><label>Priorytet</label><select name='priority'>{prio_opts}</select></div><div class='full'><label>Nazwa *</label><input name='title' required></div><div><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></div>"""
         self.send_html(layout('Kalendarz', body, 'calendar'))
 
@@ -6722,7 +6757,8 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError,ConnectionResetError,OSError): pass
 
     def draft_case_options(self, selected=None):
-        with db() as con: rows=con.execute("SELECT * FROM cases ORDER BY status='closed', title COLLATE NOCASE").fetchall()
+        with db() as con:
+            rows=con.execute("SELECT id,signature,internal_signature,title FROM cases ORDER BY status='closed', title COLLATE NOCASE").fetchall()
         opts=["<option value=''>— bez przypisanej sprawy —</option>"]
         for c in rows:
             label=(c['signature'] or c['internal_signature'] or c['title'])+' — '+c['title']
@@ -6745,13 +6781,13 @@ class Handler(BaseHTTPRequestHandler):
             due=f"<span class='pill'>Termin: {fmt_date(r['due_date'])}</span>" if r['due_date'] else ''
             cards.append(f"<div class='entity-card'><div class='case-control-bar'><span class='pill'>{esc(r['status'])}</span>{due}</div><h3 style='margin:8px 0 4px'><a class='case-link' href='/draft/{r['id']}'>{esc(r['title'])}</a></h3><div class='small muted'>{esc(case_label)} · {esc(r['doc_type'])}</div>{file_info}<div class='small muted' style='margin-top:7px'>Autor: {esc(r['created_by'])} · zmiana: {esc(str(r['updated_at'])[:16])}</div></div>")
         status_opts="<option value=''>Wszystkie statusy</option>"+''.join(f"<option {'selected' if status==x else ''}>{x}</option>" for x in ['Roboczy','Do weryfikacji','Do podpisu','Gotowy','Złożony','Archiwalny'])
-        body=f"""<div class='topbar'><div><h1>Projekty pism</h1><div class='sub'>Robocze pisma, wersje, szablony i dokumenty oczekujące na podpis.</div></div><div><a class='btn' href='/draft/templates'>Szablony pism</a> <a class='btn primary' href='/draft/new'>+ Nowy projekt</a></div></div><div class='card'><form method='get' class='searchbar'><input name='q' value='{esc(q)}' placeholder='Szukaj projektu, treści lub sprawy…'><select name='status'>{status_opts}</select><label style='white-space:nowrap'><input type='checkbox' style='width:auto' name='mine' value='1' {'checked' if mine else ''}> Moje</label><button class='btn'>Filtruj</button></form></div><br><div class='entity-grid'>{''.join(cards) if cards else '<div class="card empty">Brak projektów pism.</div>'}</div>"""
-        self.send_html(layout('Projekty pism',body,'drafts'))
+        body=f"""<div class='topbar'><div><h1>Pisma</h1><div class='sub'>Projekty, ich wersje i szablony w jednym module.</div></div><a class='btn primary' href='/draft/new'>+ Nowy projekt</a></div>{writing_tabs('projects')}<div class='card'><form method='get' class='searchbar'><input name='q' value='{esc(q)}' placeholder='Szukaj projektu, treści lub sprawy…'><select name='status'>{status_opts}</select><label style='white-space:nowrap'><input type='checkbox' style='width:auto' name='mine' value='1' {'checked' if mine else ''}> Moje</label><button class='btn'>Filtruj</button></form></div><br><div class='entity-grid'>{''.join(cards) if cards else '<div class="card empty">Brak projektów pism.</div>'}</div>"""
+        self.send_html(layout('Pisma',body,'drafts'))
 
     def draft_new_page(self,qs=None,message=''):
         case_id=int(((qs or {}).get('case_id') or ['0'])[0] or 0) or None
         msg=f"<div class='notice'>{esc(message)}</div>" if message else ''
-        body=f"""<div class='topbar'><div><h1>Nowy projekt pisma</h1><div class='sub'>Projekt może być przypisany do sprawy albo istnieć niezależnie.</div></div><div><a class='btn' href='/draft/templates'>Użyj szablonu</a> <a class='btn' href='/drafts'>Wróć</a></div></div>{msg}<div class='card'><form method='post' enctype='multipart/form-data' action='/draft/create' class='form-grid'><div class='full'><label>Tytuł *</label><input name='title' required></div><div><label>Sprawa</label><select name='case_id'>{self.draft_case_options(case_id)}</select></div><div><label>Rodzaj pisma</label><input name='doc_type' value='Pismo procesowe'></div><div><label>Status</label><select name='status'>{''.join(f'<option>{x}</option>' for x in ['Roboczy','Do weryfikacji','Do podpisu','Gotowy','Złożony','Archiwalny'])}</select></div><div><label>Termin</label><input type='date' name='due_date'></div><div class='full'><label>Treść / roboczy tekst</label><textarea name='content' style='min-height:260px'></textarea></div><div class='full'><label>Notatki</label><textarea name='notes'></textarea></div><div class='full'><label>Plik roboczy (opcjonalnie)</label><input type='file' name='file'></div><div class='full'><button class='btn primary'>Utwórz projekt</button></div></form></div>"""
+        body=f"""<div class='topbar'><div><h1>Nowy projekt pisma</h1><div class='sub'>Projekt może być przypisany do sprawy albo istnieć niezależnie.</div></div><div><a class='btn' href='/drafts?view=templates'>Użyj szablonu</a> <a class='btn' href='/drafts'>Wróć</a></div></div>{msg}<div class='card'><form method='post' enctype='multipart/form-data' action='/draft/create' class='form-grid'><div class='full'><label>Tytuł *</label><input name='title' required></div><div><label>Sprawa</label><select name='case_id'>{self.draft_case_options(case_id)}</select></div><div><label>Rodzaj pisma</label><input name='doc_type' value='Pismo procesowe'></div><div><label>Status</label><select name='status'>{''.join(f'<option>{x}</option>' for x in ['Roboczy','Do weryfikacji','Do podpisu','Gotowy','Złożony','Archiwalny'])}</select></div><div><label>Termin</label><input type='date' name='due_date'></div><div class='full'><label>Treść / roboczy tekst</label><textarea name='content' style='min-height:260px'></textarea></div><div class='full'><label>Notatki</label><textarea name='notes'></textarea></div><div class='full'><label>Plik roboczy (opcjonalnie)</label><input type='file' name='file'></div><div class='full'><button class='btn primary'>Utwórz projekt</button></div></form></div>"""
         self.send_html(layout('Nowy projekt pisma',body,'drafts'))
 
     def draft_create(self,f,files):
@@ -6834,8 +6870,8 @@ class Handler(BaseHTTPRequestHandler):
             cards.append(f"<div class='entity-card'><div class='case-control-bar'><span class='pill'>{esc(t['doc_type'])}</span>{delete}</div><h3>{esc(t['name'])}</h3><pre class='template-preview'>{preview}</pre>{create}</div>")
         placeholders='{{SĄD}}, {{SYGNATURA}}, {{SYGNATURA_WEWNĘTRZNA}}, {{KLIENT}}, {{TYTUŁ_SPRAWY}}, {{PRZEDMIOT}}, {{STRONY}}, {{DATA}}, {{PEŁNOMOCNIK}}'
         cards_html=''.join(cards) or '<div class="empty">Brak szablonów.</div>'
-        body=f"""<div class='topbar'><div><h1>Szablony pism</h1><div class='sub'>Najpierw wybierasz istniejący szablon. Formularz nowego szablonu pozostaje schowany.</div></div><div><button class='btn primary' type='button' data-open-details='new-draft-template'>+ Nowy szablon</button> <a class='btn' href='/drafts'>Projekty pism</a></div></div>{msg}<div class='card'><h2>Dostępne szablony</h2><div class='entity-grid'>{cards_html}</div></div><div class='module-spacer'></div><details class='card add-panel' id='new-draft-template'><summary><span class='add-panel-plus'>＋</span><span><b>Dodaj szablon pisma</b><small>Zaawansowane pola są widoczne dopiero po otwarciu.</small></span></summary><div class='add-panel-body'><form method='post' action='/draft/template/create'><label>Nazwa *</label><input name='name' required><label>Rodzaj pisma</label><input name='doc_type' value='Pismo procesowe'><label>Treść szablonu</label><textarea name='content' rows='18' placeholder='np. {{SĄD}}&#10;Sygn. {{SYGNATURA}}&#10;&#10;...'></textarea><div class='small muted'>Dostępne pola: {esc(placeholders)}</div><details class='advanced-fields'><summary>Więcej opcji</summary><label>Notatki</label><textarea name='notes'></textarea></details><button class='btn primary'>Zapisz szablon</button></form></div></details>"""
-        self.send_html(layout('Szablony pism',body,'drafts'))
+        body=f"""<div class='topbar'><div><h1>Pisma</h1><div class='sub'>Projekty, ich wersje i szablony w jednym module.</div></div><button class='btn primary' type='button' data-open-details='new-draft-template'>+ Nowy szablon</button></div>{writing_tabs('templates')}{msg}<div class='card'><h2>Szablony</h2><div class='small muted' style='margin-bottom:12px'>Wybierz szablon, aby od razu utworzyć z niego projekt przypisany do sprawy.</div><div class='entity-grid'>{cards_html}</div></div><div class='module-spacer'></div><details class='card add-panel' id='new-draft-template'><summary><span class='add-panel-plus'>＋</span><span><b>Dodaj szablon pisma</b><small>Zaawansowane pola są widoczne dopiero po otwarciu.</small></span></summary><div class='add-panel-body'><form method='post' action='/draft/template/create'><label>Nazwa *</label><input name='name' required><label>Rodzaj pisma</label><input name='doc_type' value='Pismo procesowe'><label>Treść szablonu</label><textarea name='content' rows='18' placeholder='np. {{SĄD}}&#10;Sygn. {{SYGNATURA}}&#10;&#10;...'></textarea><div class='small muted'>Dostępne pola: {esc(placeholders)}</div><details class='advanced-fields'><summary>Więcej opcji</summary><label>Notatki</label><textarea name='notes'></textarea></details><button class='btn primary'>Zapisz szablon</button></form></div></details>"""
+        self.send_html(layout('Pisma · Szablony',body,'drafts'))
 
     def draft_template_create(self,f):
         name=(f.get('name') or '').strip(); a=self.current_author(f)
@@ -6846,7 +6882,7 @@ class Handler(BaseHTTPRequestHandler):
                 immutable_audit(con,None,'draft_template',cur.lastrowid,'Dodano szablon pisma',name,a)
         except sqlite3.IntegrityError:
             return self.draft_templates_page('Szablon o tej nazwie już istnieje.')
-        self.redirect('/draft/templates')
+        self.redirect('/drafts?view=templates')
 
     def draft_template_delete(self,tid,f):
         a=self.current_author(f)
@@ -6854,7 +6890,7 @@ class Handler(BaseHTTPRequestHandler):
             t=con.execute('SELECT * FROM draft_templates WHERE id=?',(tid,)).fetchone()
             if t:
                 con.execute('DELETE FROM draft_templates WHERE id=?',(tid,)); immutable_audit(con,None,'draft_template',tid,'Usunięto szablon pisma',t['name'],a)
-        self.redirect('/draft/templates')
+        self.redirect('/drafts?view=templates')
 
     def draft_from_template(self,f):
         a=self.current_author(f)

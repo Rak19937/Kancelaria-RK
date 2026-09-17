@@ -1,4 +1,4 @@
-# RK KANCELARIA 0.3.0-dev3
+# RK KANCELARIA 0.3.0-dev4
 
 **CASE WORKSPACE** — zakładkowy warsztat prowadzenia sprawy.
 
@@ -55,3 +55,13 @@ Migracja DEV9/DEV2 → DEV3 jest addytywna. Nie usuwa starych spraw, dokumentów
 
 Dokumentacja zmian: `CHANGELOG_0.3.0-dev3_CASE_WORKSPACE.txt`
 Testy: `TESTY_0.3.0-dev3.txt`
+
+## DEV4 — interfejs i wydajność
+- naprawiony siedmiokolumnowy kalendarz w wersji Portable,
+- jeden moduł **Pisma** obejmujący projekty i szablony,
+- jedno źródło CSS/JS w katalogu `assets`, bez rozjeżdżających się duplikatów,
+- cache zasobów, rzadsze żądania w tle i dodatkowe indeksy SQLite,
+- uporządkowane repozytorium bez historycznych notatek i powielonych plików.
+
+Dokumentacja zmian: `CHANGELOG_0.3.0-dev4_UI_PERFORMANCE.txt`
+Test regresji: `TEST_UI_PERFORMANCE_DEV4.py`
