@@ -1,4 +1,4 @@
-# RK KANCELARIA 0.3.2-dev1
+# RK KANCELARIA 0.3.4-dev1
 
 **CASE WORKSPACE** — zakładkowy warsztat prowadzenia sprawy.
 
@@ -97,3 +97,13 @@ wymagają każdorazowego sprawdzenia i zatwierdzenia przez użytkownika.
 - Wyszukiwarka: wynik dokumentu otwiera bezpośrednio dokument.
 - Podpowiedzi i dane demonstracyjne są neutralne; nie zawierają przykładów rzeczywistych spraw.
 - Przed instalacją wykonaj kopię Data. Testy na osobnej kopii bazy.
+
+
+## Centrum decyzji — 0.3.4-dev1
+
+- Lokalna, regułowa analiza tekstu istniejących dokumentów i projektów pism.
+- Propozycje czynności, monitów i sprawdzenia terminów do poprawienia, odrzucenia lub zatwierdzenia.
+- Powiązanie zapisanych zadań ze źródłem w historii, bez wysyłania danych do sieci.
+- Przed wpisaniem terminu procesowego trzeba ręcznie potwierdzić daty, podstawę i sposób wyliczenia.
+- OCR skanów i transkrypcja nagrań nie są zgadywane; gdy nie ma tekstu, wymagana jest ręczna ocena.
+- Addytywna migracja schematu SQLite do wersji 325. Nie dotyka plików użytkownika podczas kompilacji.

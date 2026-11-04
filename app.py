@@ -47,6 +47,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from http.cookies import SimpleCookie
 
 from rk_unified_preview import render_preview, serve_local_file, serve_pdf_page, serve_tiff_as_png
+from rk_action_center import ActionCenterMixin, ensure_action_center_schema
 from rk_document_hub import DocumentHubMixin, case_document_rows, ensure_document_hub_schema
 from rk_inbox import InboxMixin, ensure_inbox_schema
 from rk_paths import resolve_runtime_paths, installed_data_dir
@@ -61,8 +62,8 @@ from rk_smart import (
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.3.3-dev1"
-SCHEMA_VERSION = 324
+VERSION = "0.3.4-dev1"
+SCHEMA_VERSION = 325
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
 APP_MODE = RUNTIME_PATHS.mode
@@ -1299,6 +1300,7 @@ def init_db() -> None:
         ensure_smart_schema(con)
         ensure_inbox_schema(con)
         ensure_document_hub_schema(con)
+        ensure_action_center_schema(con)
         # Scala stare osobne monity/alerty i zadania. Operacja jest idempotentna.
         reconcile_task_alerts(con)
 
@@ -2509,6 +2511,7 @@ def layout(title: str, body: str, active: str = "") -> str:
             ("/documents", "▤", "Dokumenty", "documents"),
             ("/powers", "§", "Pełnomocnictwa", "powers"),
             ("/inbox", "✉", "Skrzynka wpływu", "inbox"),
+            ("/workflow", "☑", "Centrum decyzji", "workflow"),
             ("/drafts", "✎", "Pisma", "drafts"),
         ]),
         ("WIĘCEJ", [
@@ -2851,7 +2854,7 @@ def open_containing_folder(path: Path) -> tuple[bool,str]:
     except Exception as exc: return False,str(exc)
 
 
-class Handler(DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
+class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
     server_version = f"{APP_NAME}/{VERSION}"
 
     def handle_one_request(self):
@@ -3181,6 +3184,8 @@ class Handler(DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
             if re.fullmatch(r"/powers/\d+/edit",path): return self.power_edit_page(int(path.split("/")[2]))
             if re.fullmatch(r"/document/\d+/links",path): return self.document_links_page(int(path.split("/")[2]))
             if path == "/inbox": return self.inbox_page()
+            if path == "/workflow": return self.action_center_page()
+            if re.fullmatch(r"/workflow/review/\d+",path): return self.action_center_review_page(int(path.split("/")[3]))
             if re.fullmatch(r"/inbox/\d+/file", path): return self.inbox_file(int(path.split("/")[2]))
             if re.fullmatch(r"/inbox/\d+", path): return self.inbox_review(int(path.split("/")[2]))
             if path == "/tags": return self.tags_page(qs)
@@ -3309,6 +3314,12 @@ class Handler(DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
             if re.fullmatch(r"/document/\d+/link",path): return self.document_link_add(int(path.split("/")[2]),fields)
             if re.fullmatch(r"/document/\d+/unlink",path): return self.document_link_remove(int(path.split("/")[2]),fields)
             if path == "/inbox/upload": return self.inbox_upload(fields, files)
+            if re.fullmatch(r"/workflow/analyze/(document|draft)/\d+",path):
+                return self.action_center_analyze(path.split("/")[3],int(path.split("/")[4]),fields)
+            if re.fullmatch(r"/workflow/review/\d+/decide",path):
+                return self.action_center_decide(int(path.split("/")[3]),fields)
+            if re.fullmatch(r"/workflow/review/\d+/add",path):
+                return self.action_center_add(int(path.split("/")[3]),fields)
             if re.fullmatch(r"/inbox/\d+/approve", path): return self.inbox_approve(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/inbox/\d+/discard", path): return self.inbox_discard(int(path.split("/")[2]), fields)
             if path == "/view/save": return self.saved_view_save(fields)
@@ -6064,6 +6075,9 @@ class Handler(DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
         edit_action=f"<a class='btn' href='/document/{did}/edit'>Edytuj / dodaj załączniki</a>" if editable else ''
         toolbar=f"<a class='btn' href='/case/{d['case_id']}?tab=documents'>← Wróć do sprawy</a> <a class='btn' href='/documents'>Dokumenty</a> {edit_action} <a class='btn primary' href='/document/{did}/download'>Pobierz</a> {desktop_actions}"
         toolbar += f" <a class='btn' href='/document/{did}/links'>Powiązania spraw</a>"
+        toolbar += (f" <form method='post' action='/workflow/analyze/document/{did}' "
+                    "style='display:inline'><button class='btn primary'>Zaproponuj czynności</button></form>"
+                    " <a class='btn' href='/workflow'>Centrum decyzji</a>")
         max_chars=160_000; bodytxt,status=self._preview_text_now(d,p,ext)
         def text_preview(label):
             if not bodytxt:
@@ -6988,6 +7002,8 @@ class Handler(DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
         msg=f"<div class='notice'>{esc(message)}</div>" if message else ''
         case_html=f"<a href='/case/{d['case_id']}'>{esc(d['signature'] or d['internal_signature'] or d['case_title'])}</a>" if d['case_id'] else '—'
         file_buttons=f"<a class='btn' href='/draft/{did}/download'>Pobierz plik</a>" if d['stored_name'] else ''
+        center_action=(f"<form method='post' action='/workflow/analyze/draft/{did}' "
+                       "style='display:inline'><button class='btn primary'>Zaproponuj czynności</button></form>")
         draft_preview=''
         if d['stored_name']:
             filename=d['stored_name']
@@ -7004,7 +7020,7 @@ class Handler(DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
             restore=f"<form method='post' action='/draft/{did}/version/{v['id']}/restore' style='display:inline' onsubmit=\"return confirm('Przywrócić tę wersję jako bieżącą? Bieżący stan zostanie zachowany w historii.');\"><button class='btn small'>Przywróć</button></form>"
             version_rows.append(f"<tr><td>v{v['version_no']}</td><td>{esc(str(v['created_at'])[:16])}</td><td>{esc(v['created_by'])}</td><td>{esc(v['change_note'])}{file_label}</td><td>{restore}</td></tr>")
         versions_html=''.join(version_rows) or '<tr><td colspan=5>Brak zapisanych wersji.</td></tr>'
-        body=f"""<div class='topbar'><div><h1>{esc(d['title'])}</h1><div class='sub'>{case_html} · {esc(d['doc_type'])} · {esc(d['status'])}</div></div><div><a class='btn' href='/draft/{did}/edit'>Edytuj</a> {file_buttons} {to_doc}</div></div>{msg}<div class='grid'><div class='card span8'><h2>Treść projektu</h2>{content}{draft_preview}</div><div class='card span4'><h2>Informacje</h2><p><b>Status:</b> {esc(d['status'])}<br><b>Termin:</b> {fmt_date(d['due_date']) if d['due_date'] else '—'}<br><b>Plik:</b> {esc(d['original_name']) or '—'}<br><b>Autor:</b> {esc(d['created_by'])}<br><b>Ostatnia zmiana:</b> {esc(str(d['updated_at'])[:16])}</p><h3>Notatki</h3><div style='white-space:pre-wrap'>{esc(d['notes']) or '—'}</div><hr><form method='post' action='/draft/{did}/archive'><button class='btn'>Archiwizuj projekt</button></form></div><div class='card span12'><div class='section-head'><div><h2>Historia wersji</h2><div class='small muted'>Każdy zapis tworzy wersję tekstu i kopię pliku roboczego, jeśli plik istnieje.</div></div></div><table><tr><th>Wersja</th><th>Data</th><th>Autor</th><th>Opis</th><th></th></tr>{versions_html}</table></div></div>"""
+        body=f"""<div class='topbar'><div><h1>{esc(d['title'])}</h1><div class='sub'>{case_html} · {esc(d['doc_type'])} · {esc(d['status'])}</div></div><div><a class='btn' href='/draft/{did}/edit'>Edytuj</a> {file_buttons} {center_action} {to_doc}</div></div>{msg}<div class='grid'><div class='card span8'><h2>Treść projektu</h2>{content}{draft_preview}</div><div class='card span4'><h2>Informacje</h2><p><b>Status:</b> {esc(d['status'])}<br><b>Termin:</b> {fmt_date(d['due_date']) if d['due_date'] else '—'}<br><b>Plik:</b> {esc(d['original_name']) or '—'}<br><b>Autor:</b> {esc(d['created_by'])}<br><b>Ostatnia zmiana:</b> {esc(str(d['updated_at'])[:16])}</p><h3>Notatki</h3><div style='white-space:pre-wrap'>{esc(d['notes']) or '—'}</div><hr><form method='post' action='/draft/{did}/archive'><button class='btn'>Archiwizuj projekt</button></form></div><div class='card span12'><div class='section-head'><div><h2>Historia wersji</h2><div class='small muted'>Każdy zapis tworzy wersję tekstu i kopię pliku roboczego, jeśli plik istnieje.</div></div></div><table><tr><th>Wersja</th><th>Data</th><th>Autor</th><th>Opis</th><th></th></tr>{versions_html}</table></div></div>"""
         self.send_html(layout('Projekt pisma',body,'drafts'))
 
     def draft_edit_page(self,did,message=''):
