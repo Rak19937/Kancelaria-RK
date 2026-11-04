@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 env:
-  PYTHONIOENCODING: uft-8
+  PYTHONIOENCODING: utf-8
   PYTHONUFT8: '1'
 
 jobs:
