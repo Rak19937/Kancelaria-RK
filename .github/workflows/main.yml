@@ -12,7 +12,7 @@ permissions:
 
 env:
   PYTHONIOENCODING: utf-8
-  PYTHONUFT8: '1'
+  PYTHONUTF8: '1'
 
 jobs:
   build-windows:
