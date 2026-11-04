@@ -47,10 +47,16 @@ jobs:
           python RK_AKTUALIZACJA_ZBIORCZA.py .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Zintegruj lokalny podglad zalacznikow
+        shell: pwsh
+        run: |
+          python ZASTOSUJ_PODGLAD.py .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Test zrodel przed buildem
         shell: pwsh
         run: |
-          python -m py_compile app.py rk_inbox.py rk_document_hub.py RK_STABILIZACJA.py RK_AKTUALIZACJA_ZBIORCZA.py RK_WYCZYSC_PODPOWIEDZI.py desktop.py rk_paths.py rk_sync.py RK_KANCELARIA_DESKTOP.pyw
+          python -m py_compile app.py rk_inbox.py rk_document_hub.py rk_unified_preview.py ZASTOSUJ_PODGLAD.py RK_STABILIZACJA.py RK_AKTUALIZACJA_ZBIORCZA.py RK_WYCZYSC_PODPOWIEDZI.py desktop.py rk_paths.py rk_sync.py RK_KANCELARIA_DESKTOP.pyw
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python TEST_TRUE_PORTABLE_PATHS.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -70,12 +76,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python TEST_AKTUALIZACJA_ZBIORCZA.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python TEST_UNIFIED_PREVIEW.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python RK_KANCELARIA_DESKTOP.pyw --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # Po przejściu testów utrwala integrację i neutralne podpowiedzi w main.
-      # Nie zmienia danych użytkownika. Przy blokadzie GitHub źródła zostają
-      # tylko w runnerze, ale budowa Portable może zostać dokończona.
+      # Po przejściu testów zapisuje aktualne źródła w main.
       - name: Zapisz przetestowane i oczyszczone źródła na main
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         continue-on-error: true
@@ -83,10 +89,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app.py README.md
+          git add app.py rk_inbox.py README.md
           git diff --cached --quiet
           if ($LASTEXITCODE -ne 0) {
-            git commit -m "RK KANCELARIA 0.3.2-dev1: integrate modules and clean examples"
+            git commit -m "RK KANCELARIA 0.3.3-dev1: local file preview, audio and video"
             if ($LASTEXITCODE -ne 0) { throw "Nie udało się zapisać commita" }
             git push origin HEAD:main
             if ($LASTEXITCODE -ne 0) { throw "GitHub zablokował zapis źródeł; build jest kontynuowany" }
