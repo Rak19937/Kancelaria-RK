@@ -1,42 +1,39 @@
-# RK KANCELARIA 0.3.3-dev1 — wspólny podgląd załączników
+# RK KANCELARIA 0.3.4-dev1 — Centrum decyzji
 
-Aktualizacja **nakłada się na sprawdzoną wersję 0.3.2-dev1**. NIE kopiuj ZIP bezpośrednio do katalogu `Data`. Oryginały dokumentów, projekty i baza SQLite pozostają bez zmian.
+## Zawartość paczki
 
-## Dokładne wgranie przez stronę GitHub
+| Plik | Miejsce w repozytorium GitHub |
+|---|---|
+| `rk_action_center.py` | główny katalog repozytorium |
+| `ZASTOSUJ_OBIEG.py` | główny katalog repozytorium |
+| `TEST_ACTION_CENTER.py` | główny katalog repozytorium |
+| `TEST_AKTUALIZACJA_ZBIORCZA.py` | główny katalog repozytorium — **zastąpić** istniejący test |
+| `.github/workflows/main.yml` | **właśnie ten katalog `.github/workflows/`** — zastąpić istniejący plik |
 
-Repozytorium: `Rak19937/Kancelaria-RK`, gałąź `main`.
+## Wgranie
 
-1. Rozpakuj ten ZIP na komputerze.
-2. W **głównym katalogu repozytorium**, przez `Add file` → `Upload files`, wgraj **TRZY** pliki Python (obok `app.py`):
-   - `rk_unified_preview.py` — obsługa formatów i bezpieczne strumieniowanie;
-   - `ZASTOSUJ_PODGLAD.py` — jednorazowy, idempotentny integrator;
-   - `TEST_UNIFIED_PREVIEW.py` — dodatkowe testy.
-3. Zatwierdź zmiany (`Commit changes`). **Może wystartować stary workflow** — wynik tej przejściowej kompilacji nie jest wynikiem aktualizacji podglądu.
-4. W GitHubie otwórz **`.github/workflows/main.yml`** (wewnątrz folderu `.github/workflows`, **NIE `main.yml` w katalogu głównym**). Kliknij ołówek i **zastąp całą zawartość** tekstem pliku `.github/workflows/main.yml` z tej paczki. Zatwierdź `Commit changes`.
-5. Otwórz zakładkę `Actions`. W nowym przebiegu mają pojawić się kroki **`Zintegruj lokalny podglad zalacznikow`** i test **`TEST_UNIFIED_PREVIEW.py`**. Po zielonym przebiegu pobierz artefakt `RK-KANCELARIA-WINDOWS-PORTABLE`.
-6. Rozpakuj na próbę do osobnego folderu, bez podmieniania używanego na co dzień Portable. Przetestuj na niesensytywnych plikach.
+1. **Nie modyfikuj obecnej wersji Portable i nie przenoś plików `Data`.** Zachowaj działającą wersję 0.3.3-dev1.
+2. Otwórz repozytorium `Rak19937/Kancelaria-RK`, gałąź `main`.
+3. Wgraj cztery pliki `.py` z paczki do **głównego katalogu repozytorium**, zastępując `TEST_AKTUALIZACJA_ZBIORCZA.py`. Zapisz commit.
+4. W GitHubie wejdź do `.github/workflows/main.yml`. Zastąp **całą zawartość** zawartością pliku z paczki. Zapisz commit. **Nie wgrywaj `main.yml` do głównego katalogu repozytorium.**
+5. Otwórz **Actions → Build RK KANCELARIA Windows Portable**, wybierz **najnowszy** przebieg (nie wcześniejszy uruchomiony po wgraniu czterech plików).
+6. Po zielonym wyniku: **Artifacts → RK-KANCELARIA-WINDOWS-PORTABLE**. Nową paczkę rozpakuj do osobnego folderu.
 
-## Obsługiwane podglądy
+## Co zmienia aktualizacja
 
-- **PDF**: wyświetlanie stron, nawigacja i powiększanie; wszystkie trzy moduły.
-- **Word DOCX**: czytelny podgląd akapitów, pogrubień, nagłówków i tabel (bez gwarancji identycznej paginacji, przypisów i obrazów Worda). **Starszy DOC**: informacja o ograniczeniu + oryginał do otwarcia.
-- **ODT, RTF, TXT, MD, CSV, JSON, XML, EML**: bezpieczny podgląd tekstu; HTML nigdy nie jest wykonywany jako strona.
-- **Excel XLSX/XLSM, ODS**: tabele (limit 4 arkusze, 120 wierszy i 18 kolumn); bez wykonywania makr/formuł.
-- **PowerPoint PPTX**: tekst slajdów, nie pełna grafika.
-- **Obrazy**: PNG, JPG/JPEG, GIF, WebP, BMP oraz TIFF (lokalna konwersja do PNG).
-- **Audio**: MP3, WAV, OGG/OGA, M4A, AAC, FLAC, OPUS, WMA. Odtwarzanie wbudowane zależy od kodeków dostępnych w Qt/Windows.
-- **Wideo**: MP4/M4V, WebM, MOV, AVI, MKV, WMV, MPEG/MPG. Największą zgodność mają MP4 (H.264/AAC) i WebM; inne pliki pozostają dostępne jako oryginały.
-- **ZIP**: bezpieczny spis plików, bez ich rozpakowywania.
-- **Inne formaty**: komunikat i pobranie oryginału.
+- Nowy element menu **Centrum decyzji**: propozycje z dokumentów i projektów oraz oczekujące pisma ze Skrzynki wpływu.
+- Na ekranach istniejących dokumentów i projektów pojawia się przycisk **Zaproponuj czynności**.
+- Regułowe propozycje: sprawdzenie zobowiązań sądu, doręczeń, posiedzeń, płatności, mediacji, opinii biegłych i literalnych wzmianek o terminach.
+- Możliwość edytowania opisów, rodzaju i priorytetu; wpisania źródła, dat i sposobu obliczenia; dodawania propozycji ręcznie, odrzucenia albo zatwierdzenia.
+- Zapis zadania wyłącznie po zaznaczeniu propozycji i świadomym zatwierdzeniu; historia działań zachowana.
+- **Brak automatycznego liczenia terminów.** Przy wyborze „Termin procesowy” program wymaga ręcznie zweryfikowanych dat początkowej i końcowej, podstawy i sposobu obliczenia.
+- Jeśli dokument zmieni się po analizie, zatwierdzenie zostanie zablokowane do ponownej analizy.
+- Migracja tworzy nowe tabele i zwiększa schemat SQLite do **325**. Integrator **nie dotyka danych użytkownika** na GitHubie; uruchamiany EXE doda tabele po uruchomieniu na danej bazie.
 
-## Ograniczenia i bezpieczeństwo
+## Ograniczenia
 
-- Podgląd jest **lokalny**, nie wymaga Microsoft Office ani usług chmurowych. Oryginały nie są modyfikowane, a do nowych podglądów nie są dodawane kopie do bazy.
-- Przeglądarka w oknie programu pobiera fragmenty pliku lokalnie w celu wyświetlenia/odtworzenia; nie oznacza to ręcznego zapisywania drugiej kopii na dysku.
-- Obowiązuje dotychczasowy limit formularza serwera: **256 MB** na żądanie, a w `Skrzynce wpływu` **20 MB** na plik. Duże filmy nie mogą być importowane tą metodą bez osobnej aktualizacji mechanizmu uploadu.
-- Testów Python jest 10 i przeszły lokalnie. Przed opublikowaniem nie wykonano pełnej kompilacji EXE ani pełnego testu manualnego na Windows — potwierdzi je dopiero GitHub Actions.
-- Nie dodawaj rzeczywistych akt, nagrań i danych klientów do repozytorium GitHub. Pliki spraw mają pozostać w lokalnym `Data`.
+To **lokalny silnik regułowy**, a nie językowy model AI czy samodzielna analiza prawna. Nie rozstrzyga o dopuszczalności środka zaskarżenia, nie oblicza terminu procesowego, nie wysyła korespondencji, nie wystawia monitów automatycznie. Dla nagrań nie zgaduje transkrypcji, a skany wymagają OCR. Gdy tekst nie jest dostępny, pokazuje propozycję ręcznej analizy.
 
-## W razie błędu kompilacji
+Pierwsze testy najlepiej wykonać na przykładowej sprawie w **oddzielnym folderze Portable**. Dopiero po ich pomyślnym wyniku i wykonaniu pełnego backupu rozważ podłączenie bazy rzeczywistej.
 
-W `Actions` → nieudany przebieg → krok z czerwonym `X` → skopiuj 20–40 ostatnich linii logu. Błąd kompilacji nie oznacza usunięcia danych lokalnych. Gdy nowy workflow działa poprawnie, zapisuje zintegrowane `app.py` i `rk_inbox.py` do `main` (gdy uprawnienia repozytorium na to pozwalają).
+**Testy lokalne:** `python TEST_ACTION_CENTER.py` (13 testów); pełny build Windows i testy integracyjne są wykonywane po commitach w Actions.
