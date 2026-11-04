@@ -1,51 +1,42 @@
-# RK KANCELARIA 0.3.2-dev1 — instrukcja zbiorczej aktualizacji
+# RK KANCELARIA 0.3.3-dev1 — wspólny podgląd załączników
 
-**Paczka zastępuje wcześniejszy ZIP stabilizacyjny 0.3.1 i osobny skrypt czyszczący. Nie trzeba wgrywać wcześniejszych paczek.**
+Aktualizacja **nakłada się na sprawdzoną wersję 0.3.2-dev1**. NIE kopiuj ZIP bezpośrednio do katalogu `Data`. Oryginały dokumentów, projekty i baza SQLite pozostają bez zmian.
 
-Punkt wyjścia: `Rak19937/Kancelaria-RK`, gałąź `main` z 4 listopada 2026 r. Pierwotną bazą rozwojową projektu była wersja Portable z 17 września 2026 r.; źródła `main` są w wersji 0.3.0-dev6 i zawierają osobno `rk_inbox.py` oraz `AKTUALIZUJ_KOD.py`. Zbiorcza aktualizacja wykorzystuje te istniejące pliki.
+## Dokładne wgranie przez stronę GitHub
 
-## Co zawiera aktualizacja
+Repozytorium: `Rak19937/Kancelaria-RK`, gałąź `main`.
 
-1. **Skrzynka wpływu** — uruchomienie istniejącego modułu `rk_inbox.py` i weryfikacja człowieka przed zapisaniem propozycji czynności.
-2. **Pełnomocnictwa** — osobny rejestr dokumentów, mocodawców, pełnomocników, zakresu, dat i statusów; wpis rejestru opiera się na dokumencie już zapisanym w sprawie. Można go zmienić albo usunąć z rejestru bez kasowania pliku.
-3. **Wiele spraw — jeden dokument** — tabela powiązań `document_case_links`: jedna kopia fizyczna dokumentu, wiele powiązanych spraw. Karta sprawy pokazuje dokumenty współdzielone. Strona dokumentu ma przycisk „Powiązania spraw”. Globalny katalog ma osobną sekcję współdzielonych dokumentów.
-4. **Bezpieczne usuwanie** — brak możliwości przypadkowego skasowania dokumentu współdzielonego lub jego sprawy źródłowej bez wcześniejszego usunięcia powiązań. Odłączenie z dodatkowej sprawy nie usuwa oryginału.
-5. **Wyszukiwanie** — dotychczasowa wyszukiwarka działa nadal, a trafienie dokumentu prowadzi bezpośrednio do jego podglądu. Rejestr pełnomocnictw ma własne pole wyszukiwania.
-6. **Neutralne przykłady** — usunięcie rzeczywistych przykładów z formularza nowej sprawy, pola tagów oraz opcjonalnego zbioru demonstracyjnego; **nie usuwamy rzeczywistych wpisów z bazy użytkownika**.
-7. **O programie i warunki korzystania** — widok o autorze, `LICENSE.txt`, aktualizacja README.
-8. **Testy** — istniejące regresje programu, testy nowego katalogu, kontrola połączeń modułów i self-test Portable.
+1. Rozpakuj ten ZIP na komputerze.
+2. W **głównym katalogu repozytorium**, przez `Add file` → `Upload files`, wgraj **TRZY** pliki Python (obok `app.py`):
+   - `rk_unified_preview.py` — obsługa formatów i bezpieczne strumieniowanie;
+   - `ZASTOSUJ_PODGLAD.py` — jednorazowy, idempotentny integrator;
+   - `TEST_UNIFIED_PREVIEW.py` — dodatkowe testy.
+3. Zatwierdź zmiany (`Commit changes`). **Może wystartować stary workflow** — wynik tej przejściowej kompilacji nie jest wynikiem aktualizacji podglądu.
+4. W GitHubie otwórz **`.github/workflows/main.yml`** (wewnątrz folderu `.github/workflows`, **NIE `main.yml` w katalogu głównym**). Kliknij ołówek i **zastąp całą zawartość** tekstem pliku `.github/workflows/main.yml` z tej paczki. Zatwierdź `Commit changes`.
+5. Otwórz zakładkę `Actions`. W nowym przebiegu mają pojawić się kroki **`Zintegruj lokalny podglad zalacznikow`** i test **`TEST_UNIFIED_PREVIEW.py`**. Po zielonym przebiegu pobierz artefakt `RK-KANCELARIA-WINDOWS-PORTABLE`.
+6. Rozpakuj na próbę do osobnego folderu, bez podmieniania używanego na co dzień Portable. Przetestuj na niesensytywnych plikach.
 
-## Jak wgrać na GitHub — jeden pakiet
+## Obsługiwane podglądy
 
-1. **Najpierw rozważ ustawienie repozytorium na PRIVATE.** W publicznej historii projektu są starsze przykłady oparte na rzeczywistych sprawach; oczyszczenie bieżącego kodu **nie usuwa historii Git**.
-2. Rozpakuj ten ZIP. **Nie wrzucaj samego ZIP-a na `main`.**
-3. Do głównego katalogu repozytorium `Rak19937/Kancelaria-RK` wgraj wszystkie poniższe pliki, zachowując ich nazwy:
-   - `RK_AKTUALIZACJA_ZBIORCZA.py`
-   - `RK_STABILIZACJA.py`
-   - `RK_WYCZYSC_PODPOWIEDZI.py`
-   - `rk_document_hub.py`
-   - `TEST_STABILIZACJA.py`
-   - `TEST_DOCUMENT_HUB.py`
-   - `TEST_AKTUALIZACJA_ZBIORCZA.py`
-   - `LICENSE.txt`
-4. Otwórz istniejący `.github/workflows/main.yml` na GitHubie i **zamień całą jego treść** treścią pliku o tej samej ścieżce z archiwum. Nie myl go z `main.yml` w katalogu głównym.
-5. Zatwierdź przesłane zmiany na `main`. Uruchomi się workflow **Build RK KANCELARIA Windows Portable**. Integrator wykona poprawki podczas jednego przebiegu; nie trzeba osobno uruchamiać skryptów z poprzedniej paczki.
-6. Workflow spróbuje zapisać przetestowany i oczyszczony kod `app.py` oraz `README.md` do `main`. Jeżeli GitHub zablokuje zapis, kompilacja może się nadal udać, **ale kod źródłowy na `main` zostanie stary**. Sprawdź log tego kroku i ostatni commit.
-7. Tylko jeśli wszystkie testy i kompilacja zakończą się sukcesem, pobierz z **Actions → Artifacts** paczkę `RK-KANCELARIA-WINDOWS-PORTABLE`.
+- **PDF**: wyświetlanie stron, nawigacja i powiększanie; wszystkie trzy moduły.
+- **Word DOCX**: czytelny podgląd akapitów, pogrubień, nagłówków i tabel (bez gwarancji identycznej paginacji, przypisów i obrazów Worda). **Starszy DOC**: informacja o ograniczeniu + oryginał do otwarcia.
+- **ODT, RTF, TXT, MD, CSV, JSON, XML, EML**: bezpieczny podgląd tekstu; HTML nigdy nie jest wykonywany jako strona.
+- **Excel XLSX/XLSM, ODS**: tabele (limit 4 arkusze, 120 wierszy i 18 kolumn); bez wykonywania makr/formuł.
+- **PowerPoint PPTX**: tekst slajdów, nie pełna grafika.
+- **Obrazy**: PNG, JPG/JPEG, GIF, WebP, BMP oraz TIFF (lokalna konwersja do PNG).
+- **Audio**: MP3, WAV, OGG/OGA, M4A, AAC, FLAC, OPUS, WMA. Odtwarzanie wbudowane zależy od kodeków dostępnych w Qt/Windows.
+- **Wideo**: MP4/M4V, WebM, MOV, AVI, MKV, WMV, MPEG/MPG. Największą zgodność mają MP4 (H.264/AAC) i WebM; inne pliki pozostają dostępne jako oryginały.
+- **ZIP**: bezpieczny spis plików, bez ich rozpakowywania.
+- **Inne formaty**: komunikat i pobranie oryginału.
 
-## Bardzo ważne: wersja na laptopie i dane
+## Ograniczenia i bezpieczeństwo
 
-- **Nie podmieniaj na razie wersji używanej na laptopie.** Nowy ZIP to wersja testowa.
-- Przed uruchomieniem nowej wersji zachowaj poza testowanym katalogiem niezależną kopię całego folderu `Data` (baza, pliki, kopie).
-- Testuj na osobnej kopii programu z odrębnym folderem `Data` i wyłącznie na danych fikcyjnych.
-- Skrypt aktualizacyjny modyfikuje źródła (`app.py` i `README.md`), a nie dane klientów.
-- Nowe tabele SQLite powstają przy pierwszym uruchomieniu nowszej wersji; starszy program nie musi rozumieć ich semantyki. **Nie zakładaj, że obie wersje mogą bezpiecznie pracować równolegle na jednej bazie.**
-- Dopiero po udanych testach działania, powiązań i odtwarzania kopii można rozważyć zamianę wersji.
+- Podgląd jest **lokalny**, nie wymaga Microsoft Office ani usług chmurowych. Oryginały nie są modyfikowane, a do nowych podglądów nie są dodawane kopie do bazy.
+- Przeglądarka w oknie programu pobiera fragmenty pliku lokalnie w celu wyświetlenia/odtworzenia; nie oznacza to ręcznego zapisywania drugiej kopii na dysku.
+- Obowiązuje dotychczasowy limit formularza serwera: **256 MB** na żądanie, a w `Skrzynce wpływu` **20 MB** na plik. Duże filmy nie mogą być importowane tą metodą bez osobnej aktualizacji mechanizmu uploadu.
+- Testów Python jest 10 i przeszły lokalnie. Przed opublikowaniem nie wykonano pełnej kompilacji EXE ani pełnego testu manualnego na Windows — potwierdzi je dopiero GitHub Actions.
+- Nie dodawaj rzeczywistych akt, nagrań i danych klientów do repozytorium GitHub. Pliki spraw mają pozostać w lokalnym `Data`.
 
-## Ważne ograniczenia
+## W razie błędu kompilacji
 
-- Pełnomocnictwo dodajemy **najpierw do dokumentów wybranej sprawy**, potem wybieramy je w rejestrze „Pełnomocnictwa”. To nadal ten sam fizyczny plik.
-- Połączenie ze sprawą **nie stwierdza automatycznie umocowania** w tej sprawie — prawnik musi zweryfikować zakres pełnomocnictwa.
-- Współdzielone dokumenty pojawią się w głównym widoku karty sprawy i oddzielnej sekcji globalnego katalogu; starsze alternatywne widoki mogą nadal pokazywać tylko dokumenty źródłowe.
-- Nie dodajemy AI ani funkcji oceny strategii procesowej.
-- Testy w tym ZIP nie zastępują kompilacji na Windows i ręcznych testów aplikacji.
+W `Actions` → nieudany przebieg → krok z czerwonym `X` → skopiuj 20–40 ostatnich linii logu. Błąd kompilacji nie oznacza usunięcia danych lokalnych. Gdy nowy workflow działa poprawnie, zapisuje zintegrowane `app.py` i `rk_inbox.py` do `main` (gdy uprawnienia repozytorium na to pozwalają).
