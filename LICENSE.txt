@@ -1,0 +1,38 @@
+RK KANCELARIA — INFORMACJA LICENCYJNA
+Wersja rozwojowa, 4 listopada 2026 r.
+
+Projekt i rozwój: Robert Kłosowski
+© 2026 Robert Kłosowski — w zakresie przysługujących praw.
+
+1. STATUS PROJEKTU
+RK KANCELARIA jest oprogramowaniem w fazie rozwoju i testów.
+Nie jest obecnie udostępniane na licencji open source. Sam fakt publicznej
+widoczności repozytorium nie stanowi udzielenia powszechnej licencji na
+rozpowszechnianie chronionych elementów programu.
+
+2. ZAKRES KORZYSTANIA
+Własne korzystanie z programu oraz testy przeprowadzane za zgodą osoby
+rozwijającej projekt są dozwolone w uzgodnionym zakresie. W odniesieniu do
+chronionych elementów projektu nie udziela się niniejszym ogólnego zezwolenia
+na odpłatne rozpowszechnianie, sublicencjonowanie ani oferowanie programu
+innym podmiotom bez odrębnego uzgodnienia z uprawnionym.
+
+3. KOMPONENTY ZEWNĘTRZNE
+Program może wykorzystywać biblioteki, narzędzia i inne elementy osób
+trzecich. Są one objęte właściwymi licencjami, które mają pierwszeństwo
+w zakresie tych elementów. Niniejszy plik nie ogranicza uprawnień
+wynikających z tych licencji ani przepisów prawa.
+
+4. ELEMENTY WYGENEROWANE PRZEZ AI
+Niniejsza informacja nie przesądza, czy i w jakim zakresie poszczególne
+elementy programu podlegają ochronie prawa autorskiego. Zastrzeżenia praw
+dotyczą wyłącznie praw rzeczywiście przysługujących uprawnionemu.
+
+5. ODPOWIEDZIALNOŚĆ I WERYFIKACJA
+Program jest narzędziem pomocniczym. Może zawierać błędy, w szczególności
+przy odczytywaniu dokumentów oraz proponowaniu działań i terminów.
+Nie zastępuje weryfikacji przez prawnika. Nie wyłącza to odpowiedzialności,
+której nie można wyłączyć na mocy bezwzględnie obowiązujących przepisów.
+
+6. PRZYSZŁE LICENCJONOWANIE
+Warunki ewentualnego udostępniania komercyjnego zostaną określone odrębnie.

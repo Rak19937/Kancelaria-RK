@@ -4,16 +4,16 @@ on:
   workflow_dispatch:
   push:
     branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
 
-# Pozwala automatycznie zapisać poprawiony app.py na main/master po testach.
-# Jeżeli regulamin repozytorium blokuje automatyczny push, build dalej działa.
 permissions:
   contents: write
 
 jobs:
   build-windows:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     steps:
       - name: Pobierz kod
@@ -37,27 +37,62 @@ jobs:
           python -m pip install -r requirements_desktop.txt
           python -m pip install "pyinstaller>=6.10,<7"
 
-      - name: Zastosuj aktualizacje Skrzynka wplywu
+      - name: Jednoetapowa integracja stabilizacji i katalogu dokumentów
         shell: pwsh
         run: |
-          python AKTUALIZUJ_KOD.py .
+          python RK_AKTUALIZACJA_ZBIORCZA.py .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test zrodel przed buildem
         shell: pwsh
         run: |
-          python -m py_compile app.py rk_inbox.py desktop.py rk_paths.py rk_sync.py RK_KANCELARIA_DESKTOP.pyw
+          python -m py_compile app.py rk_inbox.py rk_document_hub.py RK_STABILIZACJA.py RK_AKTUALIZACJA_ZBIORCZA.py RK_WYCZYSC_PODPOWIEDZI.py desktop.py rk_paths.py rk_sync.py RK_KANCELARIA_DESKTOP.pyw
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python TEST_TRUE_PORTABLE_PATHS.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python TEST_CASE_WORKSPACE.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python TEST_UI_PERFORMANCE_DEV4.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python TEST_CASE_RELATIONS_DOCUMENTS_DEV5.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python TEST_CLOSED_CASE_ACTIONS_DEV6.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python TEST_INBOX_REVIEW.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python TEST_STABILIZACJA.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python TEST_DOCUMENT_HUB.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python TEST_AKTUALIZACJA_ZBIORCZA.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python RK_KANCELARIA_DESKTOP.pyw --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Po przejściu testów utrwala integrację i neutralne podpowiedzi w main.
+      # Nie zmienia danych użytkownika. Przy blokadzie GitHub źródła zostają
+      # tylko w runnerze, ale budowa Portable może zostać dokończona.
+      - name: Zapisz przetestowane i oczyszczone źródła na main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py README.md
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "RK KANCELARIA 0.3.2-dev1: integrate modules and clean examples"
+            if ($LASTEXITCODE -ne 0) { throw "Nie udało się zapisać commita" }
+            git push origin HEAD:main
+            if ($LASTEXITCODE -ne 0) { throw "GitHub zablokował zapis źródeł; build jest kontynuowany" }
+          } else {
+            Write-Host "Źródła już są zaktualizowane."
+          }
 
       - name: Zbuduj prawdziwe EXE na Windows
         shell: pwsh
-        run: |
-          python -m PyInstaller --noconfirm --clean RK_KANCELARIA_PORTABLE.spec
+        run: python -m PyInstaller --noconfirm --clean RK_KANCELARIA_PORTABLE.spec
 
       - name: Dodaj znacznik Portable i katalog danych
         shell: pwsh
@@ -67,6 +102,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$out\Data" | Out-Null
           Set-Content -Path "$out\portable.flag" -Value "RK KANCELARIA PORTABLE" -Encoding ascii
           Copy-Item -Force README_TRUE_PORTABLE.txt "$out\README_TRUE_PORTABLE.txt"
+          Copy-Item -Force LICENSE.txt "$out\LICENSE.txt"
           Copy-Item -Force SYNCHRONIZUJ.bat "$out\SYNCHRONIZUJ.bat"
           Copy-Item -Force SYNCHRONIZUJ.vbs "$out\SYNCHRONIZUJ.vbs"
 
@@ -85,7 +121,8 @@ jobs:
             "$out\RK KANCELARIA.exe",
             "$out\_internal",
             "$out\portable.flag",
-            "$out\Data"
+            "$out\Data",
+            "$out\LICENSE.txt"
           )
           foreach ($p in $must) {
             if (!(Test-Path $p)) { throw "Brakuje: $p" }
@@ -98,28 +135,6 @@ jobs:
           $zip = "RK_KANCELARIA_WINDOWS_PORTABLE.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "dist\RK KANCELARIA PORTABLE\*" -DestinationPath $zip -CompressionLevel Optimal
-
-      # Opcjonalny zapis app.py i README.md. Jest to funkcja wygody,
-      # a nie warunek budowania nowej wersji programu.
-      - name: Zapisz poprawione zrodla w repozytorium
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app.py README.md
-          $changed = git diff --cached --name-only
-          if ($changed) {
-            git commit -m "Integrate RK KANCELARIA inbox 0.3.1-dev1"
-            if ($LASTEXITCODE -ne 0) { throw "Nie udało się utworzyć commita" }
-            git push origin "HEAD:${{ github.ref_name }}"
-            if ($LASTEXITCODE -ne 0) {
-              Write-Warning "GitHub odmówił automatycznego zapisu app.py. Build będzie kontynuowany na zaktualizowanych źródłach w runnerze."
-              exit 0
-            }
-          } else {
-            Write-Host "Zrodla sa juz zaktualizowane; nie tworze nowego commita."
-          }
 
       - name: Udostepnij gotowa paczke
         uses: actions/upload-artifact@v4
