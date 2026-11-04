@@ -17,9 +17,12 @@ import uuid
 from datetime import date
 from pathlib import Path
 from urllib.parse import quote
+from rk_unified_preview import render_preview, serve_local_file
 
-ALLOWED_SUFFIXES = {'.pdf', '.docx', '.txt', '.rtf', '.png', '.jpg', '.jpeg',
-                    '.bmp', '.tif', '.tiff', '.webp'}
+ALLOWED_SUFFIXES = {'.pdf','.doc','.docx','.odt','.rtf','.txt','.md','.csv','.xlsx','.xlsm','.ods','.pptx',
+                    '.png','.jpg','.jpeg','.bmp','.gif','.tif','.tiff','.webp',
+                    '.mp3','.wav','.ogg','.oga','.m4a','.aac','.flac','.opus',
+                    '.mp4','.m4v','.webm','.mov','.avi','.mkv','.wmv','.mpg','.mpeg','.eml','.zip'}
 MAX_INBOX_BYTES = 20 * 1024 * 1024
 ACTION_TYPES = ('Zadanie', 'Monit', 'Termin procesowy', 'Płatność')
 SIGNATURE_RE = re.compile(
@@ -173,8 +176,8 @@ class InboxMixin:
         <div class='sub'>Lokalny OCR i propozycje czynności. Dokument ani zadania nie trafiają do sprawy bez Twojego zatwierdzenia.</div></div></div>
         <div class='card'><h2>Dodaj pismo do weryfikacji</h2>
         <form method='post' action='/inbox/upload' enctype='multipart/form-data'>
-        <label>Plik (PDF, DOCX, obraz lub TXT/RTF; maks. 20 MB)</label>
-        <input type='file' name='file' required accept='.pdf,.docx,.txt,.rtf,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp'>
+        <label>Załącznik (pisma, zdjęcia, audio, wideo i inne; maks. 20 MB)</label>
+        <input type='file' name='file' required accept='.pdf,.doc,.docx,.odt,.rtf,.txt,.md,.csv,.xlsx,.xlsm,.ods,.pptx,.png,.jpg,.jpeg,.bmp,.gif,.tif,.tiff,.webp,.mp3,.wav,.ogg,.oga,.m4a,.aac,.flac,.opus,.mp4,.m4v,.webm,.mov,.avi,.mkv,.wmv,.mpg,.mpeg,.eml,.zip'>
         <p class='small muted'>Analiza działa lokalnie. Data końcowa terminu, adresat zobowiązania i przypisanie sprawy zawsze wymagają ręcznej kontroli.</p>
         <button class='btn primary'>Odczytaj i przygotuj propozycje</button></form></div>
         <div class='card'><h2>Oczekujące ({len(rows)})</h2><div class='table-scroll'>
@@ -259,11 +262,9 @@ class InboxMixin:
                 <input name='act_{idx}_title' maxlength='500' value='{escape(p.get('title',''))}'></div>
                 <div><label>Priorytet</label><select name='act_{idx}_priority'>
                 <option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div></div></div>""")
-        ext = Path(row['original_name']).suffix.lower()
-        preview = (f"<iframe src='/inbox/{item_id}/file' title='Podgląd oryginału' "
-                   "style='width:100%;height:530px;border:1px solid #bbb' sandbox></iframe>"
-                   if ext == '.pdf' else (f"<img src='/inbox/{item_id}/file' alt='Oryginał' style='max-width:100%' />"
-                   if ext in {'.png', '.jpg', '.jpeg', '.webp', '.bmp'} else ''))
+        preview = render_preview(a.FILES_DIR / '_inbox' / row['stored_name'], row['original_name'],
+            f'/inbox/{item_id}/file',pdf_pages_base=f'/preview/inbox/{item_id}/page',
+            image_url=f'/preview/inbox/{item_id}/image')
         snippet = escape(row['extracted_text'][:20000]) or 'Brak tekstu. Zobacz oryginał.'
         body = f"""<div class='topbar'><div><h1>Sprawdź pismo przed przyjęciem</h1>
         <div class='sub'>{escape(row['original_name'])} · OCR: {escape(row['ocr_status'])}</div></div>
@@ -271,7 +272,7 @@ class InboxMixin:
         <div class='notice'><b>Wymagana kontrola:</b> {escape(warning)}
         Terminy i monity nie otrzymują automatycznej daty, nawet gdy dokument podaje liczbę dni.</div>
         <div class='card'><h2>Oryginalny dokument</h2>
-        <a class='btn small' href='/inbox/{item_id}/file' target='_blank' rel='noopener'>Otwórz oryginał</a>
+        <a class='btn small' href='/inbox/{item_id}/file?download=1'>Pobierz oryginał</a>
         {preview}<details><summary>Odczytany tekst (może być błędny)</summary>
         <pre style='white-space:pre-wrap;max-height:400px;overflow:auto'>{snippet}</pre></details></div>
         <form method='post' action='/inbox/{item_id}/approve'>
@@ -297,30 +298,17 @@ class InboxMixin:
         return self.send_html(a.layout('Weryfikacja pisma', body, 'inbox'))
 
     def inbox_file(self, item_id: int):
-        a = self._app()
+        a=self._app()
         with a.db() as con:
-            row = con.execute("SELECT original_name, stored_name,status FROM inbox_items WHERE id=?", (item_id,)).fetchone()
-        if not row or row['status'] != 'pending':
+            row=con.execute('SELECT original_name,stored_name,status FROM inbox_items WHERE id=?',(item_id,)).fetchone()
+        if not row or row['status']!='pending' or not row['stored_name']:
             return self.send_error(404)
-        p = a.FILES_DIR / '_inbox' / row['stored_name']
-        if not p.is_file():
-            return self.send_error(404)
-        ctype = mimetypes.guess_type(row['original_name'])[0] or 'application/octet-stream'
-        # Nie renderuj aktywnych formatów jako HTML. Wszystkie suffixy są na allowliście.
-        if ctype not in {'application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'image/bmp'}:
-            ctype = 'application/octet-stream'
-        self.send_response(200)
-        self.send_header('Content-Type', ctype)
-        self.send_header('Content-Length', str(p.stat().st_size))
-        self.send_header('Content-Disposition', f"inline; filename*=UTF-8''{quote(row['original_name'])}")
-        self.send_header('Cache-Control', 'no-store')
-        self.send_header('X-Content-Type-Options', 'nosniff')
-        self.end_headers()
-        try:
-            with p.open('rb') as f:
-                shutil.copyfileobj(f, self.wfile, 1024 * 1024)
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
+        stored=row['stored_name']
+        folder=(a.FILES_DIR/'_inbox').resolve()
+        if Path(stored).name!=stored:return self.send_error(404)
+        p=(folder/stored).resolve()
+        if p.parent!=folder or not p.is_file():return self.send_error(404)
+        return serve_local_file(self,p,row['original_name'] or p.name)
 
     def inbox_approve(self, item_id: int, fields):
         a = self._app()

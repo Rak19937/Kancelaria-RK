@@ -46,6 +46,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from http.cookies import SimpleCookie
 
+from rk_unified_preview import render_preview, serve_local_file, serve_pdf_page, serve_tiff_as_png
 from rk_document_hub import DocumentHubMixin, case_document_rows, ensure_document_hub_schema
 from rk_inbox import InboxMixin, ensure_inbox_schema
 from rk_paths import resolve_runtime_paths, installed_data_dir
@@ -60,7 +61,7 @@ from rk_smart import (
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.3.2-dev1"
+VERSION = "0.3.3-dev1"
 SCHEMA_VERSION = 324
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
@@ -3173,6 +3174,7 @@ class Handler(DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
             if path == "/draft/templates": return self.redirect('/drafts?view=templates')
             if re.fullmatch(r"/draft/\d+", path): return self.draft_view(int(path.split("/")[2]))
             if re.fullmatch(r"/draft/\d+/edit", path): return self.draft_edit_page(int(path.split("/")[2]))
+            if re.fullmatch(r"/draft/\d+/file", path): return self.draft_inline_file(int(path.split("/")[2]))
             if re.fullmatch(r"/draft/\d+/download", path): return self.draft_download(int(path.split("/")[2]))
             if path == "/documents": return self.documents_page(qs)
             if path == "/powers": return self.powers_page(qs)
@@ -3189,6 +3191,9 @@ class Handler(DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
             if re.fullmatch(r"/document/\d+/download", path): return self.document_file(int(path.split("/")[2]), download=True)
             if re.fullmatch(r"/document/\d+/file", path): return self.document_file(int(path.split("/")[2]), download=False)
             if re.fullmatch(r"/document/\d+/page/\d+", path): return self.document_pdf_page(int(path.split("/")[2]), int(path.split("/")[4]))
+            mm=re.fullmatch(r"/preview/(document|draft|inbox)/(\d+)/(?:page/(\d+)|image)",path)
+            if mm: return self.unified_preview_asset(mm.group(1),int(mm.group(2)),
+                "page" if mm.group(3) else "image",int(mm.group(3)) if mm.group(3) else None)
             self.send_error(404)
         except Exception as e:
             log_app_exception(path, e)
@@ -6078,13 +6083,9 @@ class Handler(DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
                 <script>let rkPage=1,rkPages={pages},rkScale=1; function rkShow(){{let i=document.getElementById('rkPdfPageInput');rkPage=Math.max(1,Math.min(rkPages,parseInt(i.value||rkPage)));i.value=rkPage;let img=document.getElementById('rkPdfPage');img.style.display='inline-block';document.getElementById('rkPdfError').style.display='none';img.src='/document/{did}/page/'+rkPage+'?zoom='+rkScale.toFixed(1);document.getElementById('rkZoomLabel').textContent=Math.round(rkScale*100)+'%';}} function rkPrevPage(){{if(rkPage>1){{rkPage--;document.getElementById('rkPdfPageInput').value=rkPage;rkShow();}}}} function rkNextPage(){{if(rkPage<rkPages){{rkPage++;document.getElementById('rkPdfPageInput').value=rkPage;rkShow();}}}} function rkGoPage(){{rkShow();}} function rkZoom(d){{rkScale=Math.max(.6,Math.min(2.4,rkScale+d));rkShow();}}</script></div>"""
             except Exception as exc:
                 log_app_exception(f'/document/{did}/pdf-open',exc); preview=f"<div class='error'><b>Nie można otworzyć PDF w podglądzie.</b><br>{esc(str(exc))}</div>"+text_preview('Tekst odzyskany z PDF / OCR')
-        elif ext in {'.docx','.txt','.md','.csv','.log','.rtf'}: preview=text_preview('Podgląd tekstowy dokumentu')
-        elif ext in {'.xlsx','.xlsm'}: preview=text_preview('Podgląd arkusza kalkulacyjnego (wartości komórek)')
-        elif ext in {'.png','.jpg','.jpeg','.gif','.webp','.bmp','.tif','.tiff'}:
-            try: size=p.stat().st_size
-            except OSError: size=0
-            preview=(f"<div class='doc-native-view' style='text-align:center;background:#eef1ef;padding:18px;overflow:auto;max-height:calc(100vh - 260px)'><img src='/document/{did}/file' alt='{esc(d['title'])}' style='max-width:100%;height:auto;box-shadow:0 4px 20px rgba(0,0,0,.18)'></div>" if size<=25*1024*1024 else f"<div class='notice'>Obraz ma {size/1024/1024:.1f} MB. Automatyczny podgląd wyłączono, aby nie zamrozić okna. Użyj „Otwórz w programie domyślnym” lub „Pobierz”.</div>")
-        else: preview=text_preview(f'Format {ext or "bez rozszerzenia"} nie ma własnego stabilnego podglądu')
+        else:
+            preview=render_preview(p,d['original_name'] or p.name,f'/document/{did}/file',
+                pdf_pages_base=f'/document/{did}/page',image_url=f'/preview/document/{did}/image')
         family_html=''
         if parent:
             family_html=f"<div class='card document-family'><span class='attachment-label'>📎 Załącznik</span> do pisma: <a href='/document/{parent['id']}/open'><b>{esc(parent['title'])}</b></a></div>"
@@ -6105,18 +6106,7 @@ class Handler(DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
         if state!='ok' or not p:
             if download: return self.send_html(layout('Brak pliku',f"<div class='card'><h1>Nie można pobrać dokumentu</h1><p>{esc(why)}</p><a class='btn' href='/document/{did}/open'>Przejdź do naprawy pliku</a></div>",'documents'),404)
             return self.send_error(404,why)
-        ctype=mimetypes.guess_type(d['original_name'] or p.name)[0] or 'application/octet-stream'
-        try: size=p.stat().st_size
-        except OSError: return self.send_error(404)
-        self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(size)); dispo='attachment' if download else 'inline'
-        self.send_header('Content-Disposition',f"{dispo}; filename*=UTF-8''{quote(d['original_name'] or p.name)}"); self.send_header('X-Content-Type-Options','nosniff'); self.send_header('Cache-Control','private, max-age=60'); self.end_headers()
-        try:
-            with p.open('rb') as fh:
-                while True:
-                    chunk=fh.read(1024*1024)
-                    if not chunk: break
-                    self.wfile.write(chunk)
-        except (BrokenPipeError,ConnectionResetError,OSError): pass
+        return serve_local_file(self,p,d['original_name'] or p.name,download=download)
 
     def document_relocate(self,did,f,files):
         a=self.current_author(f)
@@ -6998,6 +6988,14 @@ class Handler(DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
         msg=f"<div class='notice'>{esc(message)}</div>" if message else ''
         case_html=f"<a href='/case/{d['case_id']}'>{esc(d['signature'] or d['internal_signature'] or d['case_title'])}</a>" if d['case_id'] else '—'
         file_buttons=f"<a class='btn' href='/draft/{did}/download'>Pobierz plik</a>" if d['stored_name'] else ''
+        draft_preview=''
+        if d['stored_name']:
+            filename=d['stored_name']
+            p=(DRAFTS_DIR/filename).resolve()
+            if Path(filename).name==filename and p.parent==DRAFTS_DIR.resolve():
+                draft_preview=render_preview(p,d['original_name'] or filename,f'/draft/{did}/file',
+                    pdf_pages_base=f'/preview/draft/{did}/page',image_url=f'/preview/draft/{did}/image')
+            else: draft_preview="<div class='error'>Nieprawidłowa ścieżka pliku projektu.</div>"
         to_doc=f"<form method='post' action='/draft/{did}/to-document' style='display:inline'><button class='btn primary'>Dodaj do dokumentów sprawy</button></form>" if d['case_id'] else ''
         content=f"<pre class='doc-text-preview' style='white-space:pre-wrap'>{esc(d['content'])}</pre>" if d['content'] else "<div class='empty'>Brak treści roboczej w programie.</div>"
         version_rows=[]
@@ -7006,7 +7004,7 @@ class Handler(DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
             restore=f"<form method='post' action='/draft/{did}/version/{v['id']}/restore' style='display:inline' onsubmit=\"return confirm('Przywrócić tę wersję jako bieżącą? Bieżący stan zostanie zachowany w historii.');\"><button class='btn small'>Przywróć</button></form>"
             version_rows.append(f"<tr><td>v{v['version_no']}</td><td>{esc(str(v['created_at'])[:16])}</td><td>{esc(v['created_by'])}</td><td>{esc(v['change_note'])}{file_label}</td><td>{restore}</td></tr>")
         versions_html=''.join(version_rows) or '<tr><td colspan=5>Brak zapisanych wersji.</td></tr>'
-        body=f"""<div class='topbar'><div><h1>{esc(d['title'])}</h1><div class='sub'>{case_html} · {esc(d['doc_type'])} · {esc(d['status'])}</div></div><div><a class='btn' href='/draft/{did}/edit'>Edytuj</a> {file_buttons} {to_doc}</div></div>{msg}<div class='grid'><div class='card span8'><h2>Treść projektu</h2>{content}</div><div class='card span4'><h2>Informacje</h2><p><b>Status:</b> {esc(d['status'])}<br><b>Termin:</b> {fmt_date(d['due_date']) if d['due_date'] else '—'}<br><b>Plik:</b> {esc(d['original_name']) or '—'}<br><b>Autor:</b> {esc(d['created_by'])}<br><b>Ostatnia zmiana:</b> {esc(str(d['updated_at'])[:16])}</p><h3>Notatki</h3><div style='white-space:pre-wrap'>{esc(d['notes']) or '—'}</div><hr><form method='post' action='/draft/{did}/archive'><button class='btn'>Archiwizuj projekt</button></form></div><div class='card span12'><div class='section-head'><div><h2>Historia wersji</h2><div class='small muted'>Każdy zapis tworzy wersję tekstu i kopię pliku roboczego, jeśli plik istnieje.</div></div></div><table><tr><th>Wersja</th><th>Data</th><th>Autor</th><th>Opis</th><th></th></tr>{versions_html}</table></div></div>"""
+        body=f"""<div class='topbar'><div><h1>{esc(d['title'])}</h1><div class='sub'>{case_html} · {esc(d['doc_type'])} · {esc(d['status'])}</div></div><div><a class='btn' href='/draft/{did}/edit'>Edytuj</a> {file_buttons} {to_doc}</div></div>{msg}<div class='grid'><div class='card span8'><h2>Treść projektu</h2>{content}{draft_preview}</div><div class='card span4'><h2>Informacje</h2><p><b>Status:</b> {esc(d['status'])}<br><b>Termin:</b> {fmt_date(d['due_date']) if d['due_date'] else '—'}<br><b>Plik:</b> {esc(d['original_name']) or '—'}<br><b>Autor:</b> {esc(d['created_by'])}<br><b>Ostatnia zmiana:</b> {esc(str(d['updated_at'])[:16])}</p><h3>Notatki</h3><div style='white-space:pre-wrap'>{esc(d['notes']) or '—'}</div><hr><form method='post' action='/draft/{did}/archive'><button class='btn'>Archiwizuj projekt</button></form></div><div class='card span12'><div class='section-head'><div><h2>Historia wersji</h2><div class='small muted'>Każdy zapis tworzy wersję tekstu i kopię pliku roboczego, jeśli plik istnieje.</div></div></div><table><tr><th>Wersja</th><th>Data</th><th>Autor</th><th>Opis</th><th></th></tr>{versions_html}</table></div></div>"""
         self.send_html(layout('Projekt pisma',body,'drafts'))
 
     def draft_edit_page(self,did,message=''):
@@ -7108,6 +7106,48 @@ class Handler(DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
             save_draft_version(con,did,a,f"Przywrócono wersję v{v['version_no']}")
             audit(con,d['case_id'],'writing_project',did,'Przywrócono wersję projektu',f"Wersja: v{v['version_no']}",a)
         self.redirect(f'/draft/{did}')
+
+    def draft_inline_file(self,did):
+        with db() as con: d=con.execute('SELECT * FROM writing_projects WHERE id=?',(did,)).fetchone()
+        if not d or not d['stored_name']: return self.send_error(404)
+        stored=d['stored_name']
+        if Path(stored).name!=stored: return self.send_error(404)
+        p=(DRAFTS_DIR/stored).resolve()
+        if p.parent!=DRAFTS_DIR.resolve() or not p.is_file(): return self.send_error(404)
+        return serve_local_file(self,p,d['original_name'] or p.name)
+
+    def unified_preview_asset(self,kind,rid,part,page_no=None):
+        # Każda trasa trafia tutaj dopiero po require_auth() w do_GET.
+        if kind=='document':
+            with db() as con: d=con.execute('SELECT * FROM documents WHERE id=?',(rid,)).fetchone()
+            if not d:return self.send_error(404)
+            state,p,_=document_state(d)
+            if state!='ok':return self.send_error(404)
+            name=d['original_name'] or p.name
+        elif kind=='draft':
+            with db() as con: d=con.execute('SELECT stored_name,original_name FROM writing_projects WHERE id=?',(rid,)).fetchone()
+            if not d or not d['stored_name']:return self.send_error(404)
+            stored=d['stored_name']
+            if Path(stored).name!=stored:return self.send_error(404)
+            p=(DRAFTS_DIR/stored).resolve()
+            if p.parent!=DRAFTS_DIR.resolve() or not p.is_file():return self.send_error(404)
+            name=d['original_name'] or p.name
+        elif kind=='inbox':
+            with db() as con: d=con.execute('SELECT stored_name,original_name,status FROM inbox_items WHERE id=?',(rid,)).fetchone()
+            if not d or d['status']!='pending' or not d['stored_name']:return self.send_error(404)
+            stored=d['stored_name']
+            folder=(FILES_DIR/'_inbox').resolve()
+            if Path(stored).name!=stored:return self.send_error(404)
+            p=(folder/stored).resolve()
+            if p.parent!=folder or not p.is_file():return self.send_error(404)
+            name=d['original_name'] or p.name
+        else:return self.send_error(404)
+        ext=Path(name).suffix.lower()
+        if part=='page' and ext=='.pdf' and page_no:
+            return serve_pdf_page(self,p,page_no)
+        if part=='image' and ext in {'.tif','.tiff'}:
+            return serve_tiff_as_png(self,p)
+        return self.send_error(404)
 
     def draft_download(self,did):
         with db() as con: d=con.execute('SELECT * FROM writing_projects WHERE id=?',(did,)).fetchone()
