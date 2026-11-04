@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
 import http.cookiejar
 import os
 import sqlite3
@@ -12,7 +13,6 @@ import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parent
 
@@ -73,7 +73,9 @@ def main() -> int:
             opener.open(urllib.request.Request(base + "/setup",data=setup),timeout=10).read()
 
             db_path=Path(tmp) / "sprawnik.sqlite3"
-            with sqlite3.connect(db_path) as con:
+            # sqlite3.Connection.__exit__ nie zamyka połączenia. Zewnętrzne closing
+            # zapobiega WinError 32 podczas sprzątania TemporaryDirectory na Windows.
+            with contextlib.closing(sqlite3.connect(db_path)) as con:
                 first=con.execute("INSERT INTO cases(title,signature,status) VALUES('Sprawa główna','I C 1/26','active')").lastrowid
                 duplicate=con.execute("INSERT INTO cases(title,signature,status) VALUES('Duplikat sprawy','I C 1/26','closed')").lastrowid
                 folder=Path(tmp) / "dokumenty" / f"sprawa_{first}"
@@ -89,21 +91,21 @@ def main() -> int:
             }).encode()
             relation_html=opener.open(urllib.request.Request(base + f"/case/{first}/relation",data=relation_data),timeout=10).read().decode("utf-8")
             assert "Powiązane sprawy" in relation_html and "Duplikat sprawy" in relation_html
-            with sqlite3.connect(db_path) as con:
+            with contextlib.closing(sqlite3.connect(db_path)) as con:
                 assert con.execute("SELECT COUNT(*) FROM case_relations WHERE source_case_id=?",(first,)).fetchone()[0] == 1
 
             fields={
                 "case_id":str(first),"return_to":f"/case/{first}?tab=documents",
                 "doc_date":"2026-09-17","received_date":"","delivered_date":"",
                 "doc_type":"Pismo procesowe","doc_status":"Aktywny","sender":"Sąd",
-                "document_author":"Karina","tags":"test","linked_task_id":"",
+                "document_author":"Autor testowy","tags":"test","linked_task_id":"",
                 "title":"Pismo testowe po edycji","description":"dodano brakujący załącznik",
             }
             body,content_type=multipart(fields,[("attachments[]","zalacznik-a.txt",b"zalacznik A"),("attachments[]","zalacznik-b.txt",b"zalacznik B")])
             req=urllib.request.Request(base + f"/document/{did}/update",data=body,headers={"Content-Type":content_type})
             result=opener.open(req,timeout=15).read().decode("utf-8")
             assert "Dokumenty" in result
-            with sqlite3.connect(db_path) as con:
+            with contextlib.closing(sqlite3.connect(db_path)) as con:
                 children=con.execute("SELECT title,original_name FROM documents WHERE parent_document_id=? ORDER BY attachment_order",(did,)).fetchall()
                 assert [x[1] for x in children] == ["zalacznik-a.txt","zalacznik-b.txt"]
 
@@ -112,7 +114,7 @@ def main() -> int:
             replace_body,replace_type=multipart(fields,[("file","pismo-nowe.txt",b"nowa wersja")])
             replace_req=urllib.request.Request(base + f"/document/{did}/update",data=replace_body,headers={"Content-Type":replace_type})
             opener.open(replace_req,timeout=15).read()
-            with sqlite3.connect(db_path) as con:
+            with contextlib.closing(sqlite3.connect(db_path)) as con:
                 version=con.execute("SELECT stored_name,original_name FROM document_versions WHERE document_id=? ORDER BY version_no DESC LIMIT 1",(did,)).fetchone()
                 current=con.execute("SELECT original_name FROM documents WHERE id=?",(did,)).fetchone()[0]
             assert version and version[1] == "pismo.txt" and current == "pismo-nowe.txt"
@@ -125,16 +127,20 @@ def main() -> int:
             assert "Usuń sprawę" in confirm_html and "USUŃ" in confirm_html
             delete_data=urllib.parse.urlencode({"confirmation":"USUŃ","acknowledge":"1"}).encode()
             opener.open(urllib.request.Request(base + f"/case/{duplicate}/delete",data=delete_data),timeout=30).read()
-            with sqlite3.connect(db_path) as con:
+            with contextlib.closing(sqlite3.connect(db_path)) as con:
                 assert con.execute("SELECT COUNT(*) FROM cases WHERE id=?",(duplicate,)).fetchone()[0] == 0
             snapshots=list((Path(tmp) / "backup_przed_usunieciem_sprawy").glob("*.zip"))
             assert snapshots and snapshots[0].stat().st_size > 0
         finally:
             proc.terminate()
             try: proc.wait(timeout=5)
-            except subprocess.TimeoutExpired: proc.kill()
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            if proc.stderr:
+                proc.stderr.close()
         if proc.returncode not in (0,1,-15):
-            raise AssertionError(proc.stderr.read() if proc.stderr else f"Kod serwera: {proc.returncode}")
+            raise AssertionError(f"Kod serwera: {proc.returncode}")
 
     print("TEST_CASE_RELATIONS_DOCUMENTS_DEV5: OK")
     return 0

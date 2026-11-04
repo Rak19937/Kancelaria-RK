@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
 import http.cookiejar
 import os
 import sqlite3
@@ -11,7 +12,6 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parent
 
@@ -48,7 +48,8 @@ def main() -> int:
             opener.open(urllib.request.Request(base + "/setup",data=setup),timeout=10).read()
 
             db_path=Path(tmp) / "sprawnik.sqlite3"
-            with sqlite3.connect(db_path) as con:
+            # Jawne zamykanie połączeń pozwala na usunięcie testowej bazy pod Windows.
+            with contextlib.closing(sqlite3.connect(db_path)) as con:
                 cid=con.execute("INSERT INTO cases(title,signature,status,closed_edit_unlocked) VALUES('Sprawa zakończona','I C 10/26','closed',0)").lastrowid
                 con.execute("INSERT INTO documents(case_id,title,doc_type,description,doc_status) VALUES(?,?,?,?,?)",(cid,'Dokument rozwijany','Postanowienie','Pełny opis dokumentu','Aktywny'))
                 con.commit()
@@ -74,11 +75,11 @@ def main() -> int:
                 "next_step":"","next_date":"","notes":"","lead_user_id":"","tags":"",
             }).encode()
             opener.open(urllib.request.Request(base + f"/case/{cid}/update",data=update),timeout=10).read()
-            with sqlite3.connect(db_path) as con:
+            with contextlib.closing(sqlite3.connect(db_path)) as con:
                 assert con.execute("SELECT title FROM cases WHERE id=?",(cid,)).fetchone()[0].endswith("poprawiona")
 
             opener.open(urllib.request.Request(base + f"/case/{cid}/reopen",data=b""),timeout=10).read()
-            with sqlite3.connect(db_path) as con:
+            with contextlib.closing(sqlite3.connect(db_path)) as con:
                 status=con.execute("SELECT status FROM cases WHERE id=?",(cid,)).fetchone()[0]
                 audit_count=con.execute("SELECT COUNT(*) FROM audit_log WHERE case_id=? AND action='Przywrócono sprawę do aktywnych'",(cid,)).fetchone()[0]
             assert status == "active" and audit_count == 1
@@ -88,9 +89,13 @@ def main() -> int:
         finally:
             proc.terminate()
             try: proc.wait(timeout=5)
-            except subprocess.TimeoutExpired: proc.kill()
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            if proc.stderr:
+                proc.stderr.close()
         if proc.returncode not in (0,1,-15):
-            raise AssertionError(proc.stderr.read() if proc.stderr else f"Kod serwera: {proc.returncode}")
+            raise AssertionError(f"Kod serwera: {proc.returncode}")
 
     print("TEST_CLOSED_CASE_ACTIONS_DEV6: OK")
     return 0
