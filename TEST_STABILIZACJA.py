@@ -16,9 +16,19 @@ class StabilitySmokeTests(unittest.TestCase):
         ast.parse(self.src, filename='app.py')
 
     def test_inbox_wired(self):
+        # Przy rozszerzaniu Handler o nowe moduły nie zakładaj konkretnej
+        # kolejności klas bazowych ani liczby mixinów. Weryfikuj strukturę AST.
+        tree = ast.parse(self.src, filename='app.py')
+        handlers = [node for node in tree.body
+                    if isinstance(node, ast.ClassDef) and node.name == 'Handler']
+        self.assertEqual(len(handlers), 1, 'Oczekiwano jednej klasy Handler')
+        bases = {base.id for base in handlers[0].bases if isinstance(base, ast.Name)}
+        for required_base in ('DocumentHubMixin', 'InboxMixin', 'BaseHTTPRequestHandler'):
+            with self.subTest(handler_base=required_base):
+                self.assertIn(required_base, bases)
+
         for marker in (
             'from rk_inbox import InboxMixin, ensure_inbox_schema',
-            'class Handler(InboxMixin, BaseHTTPRequestHandler):',
             'ensure_inbox_schema(con)',
             '("/inbox", "✉", "Skrzynka wpływu", "inbox")',
             'if path == "/inbox": return self.inbox_page()',
