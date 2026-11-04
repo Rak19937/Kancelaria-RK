@@ -46,6 +46,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from http.cookies import SimpleCookie
 
+from rk_document_hub import DocumentHubMixin, case_document_rows, ensure_document_hub_schema
+from rk_inbox import InboxMixin, ensure_inbox_schema
 from rk_paths import resolve_runtime_paths, installed_data_dir
 from rk_smart import (
     ACTIONABLE_ALERT_TYPES, ALERT_PRIORITIES, ALERT_TYPES, LAW_REGISTRY, RELATION_TYPES as SMART_RELATION_TYPES,
@@ -58,8 +60,8 @@ from rk_smart import (
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.3.0-dev6"
-SCHEMA_VERSION = 322
+VERSION = "0.3.2-dev1"
+SCHEMA_VERSION = 324
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
 APP_MODE = RUNTIME_PATHS.mode
@@ -570,7 +572,7 @@ STATUS_BADGES = {
     "suspended": "gray",
     "closed": "green",
 }
-DOC_TYPES = ["Pismo procesowe", "Wniosek", "Apelacja", "Zażalenie", "Odpowiedź", "Postanowienie", "Wyrok", "Uzasadnienie", "Opinia biegłego", "Dowód", "Korespondencja", "Załącznik", "Inne"]
+DOC_TYPES = ["Pismo procesowe", "Wniosek", "Apelacja", "Zażalenie", "Odpowiedź", "Postanowienie", "Wyrok", "Uzasadnienie", "Opinia biegłego", "Dowód", "Korespondencja", "Pełnomocnictwo", "Załącznik", "Inne"]
 PLEADING_DOC_TYPES = {"Pismo procesowe", "Wniosek", "Apelacja", "Zażalenie", "Odpowiedź"}
 DOC_STATUSES = ["Aktywny", "Roboczy", "Draft", "Do podpisu", "Podpisany", "Wysłany", "Złożone", "Złożony", "Doręczone", "Doręczony", "Oczekiwanie na odpowiedź", "Archiwalne", "Archiwalny"]
 EVENT_TYPES = ["Czynność", "Rozprawa", "Posiedzenie", "Mediacja", "Orzeczenie", "Wpływ pisma", "Wysłanie pisma", "Doręczenie", "Telefon", "Notatka"]
@@ -1294,6 +1296,8 @@ def init_db() -> None:
         # Warstwa 0.3: czytelny widok sprawy, alerty, relacje i lokalna biblioteka prawa.
         # CREATE IF NOT EXISTS + INSERT OR IGNORE zachowują pełną zgodność z danymi DEV9.
         ensure_smart_schema(con)
+        ensure_inbox_schema(con)
+        ensure_document_hub_schema(con)
         # Scala stare osobne monity/alerty i zadania. Operacja jest idempotentna.
         reconcile_task_alerts(con)
 
@@ -1444,53 +1448,15 @@ def auth_layout(title: str, body: str) -> str:
     <style>body{{margin:0;font-family:Inter,system-ui,-apple-system,'Segoe UI',sans-serif;background:linear-gradient(145deg,#061a2b,#0a3932);min-height:100vh;display:grid;place-items:center;color:#142720}}.box{{width:min(440px,calc(100% - 32px));background:#fff;border-radius:16px;padding:28px;box-shadow:0 20px 60px rgba(0,0,0,.32);border:1px solid #d6b46a}}.brand{{text-align:center;margin-bottom:22px}}.brand img{{width:86px;height:86px;border-radius:18px;border:1px solid #d6b46a}}h1{{margin:12px 0 4px;color:#0a3932;font-family:Georgia,serif}}.sub{{color:#677b75;font-size:14px;margin-bottom:20px}}label{{display:block;font-size:12px;font-weight:700;margin:12px 0 5px;color:#405b54}}input{{width:100%;box-sizing:border-box;padding:11px;border:1px solid #cad8d2;border-radius:8px;font:inherit}}button{{width:100%;margin-top:18px;padding:11px;border:0;border-radius:8px;background:linear-gradient(135deg,#0d5b4b,#083d35);color:white;font-weight:750;cursor:pointer}}.error{{padding:10px 12px;border-radius:8px;background:#fee2e2;color:#991b1b;margin-bottom:12px}}.note{{padding:10px 12px;border-radius:8px;background:#f7edcf;color:#76591f;margin-bottom:12px;font-size:13px}}.author{{text-align:center;color:#8b7a50;font-size:11px;margin-top:20px;letter-spacing:.04em}}</style></head><body><div class='box'><div class='brand'><img src='/assets/rk_kancelaria_logo.png' alt='RK'><h1>{APP_NAME}</h1><div class='sub'>Baza spraw · v{VERSION}</div></div>{body}<div class='author'>AUTOR PROGRAMU · {APP_AUTHOR}</div></div><script>{client_presence_script()}</script></body></html>"""
 
 def seed_demo(con: sqlite3.Connection) -> None:
+    """Fikcyjne dane demonstracyjne, wyłącznie po świadomym włączeniu demo."""
     cases = [
-        ("III Ca 1054/26", "Ochrona przed przemocą – Aśka / Michał Sobol", "Sąd Okręgowy w Katowicach", "", "rodzinna / przemoc domowa", "Środki ochrony przed przemocą domową", "waiting", "Wniosek o uzasadnienie postanowienia; następnie analiza apelacji i uzasadnienia", "2026-09-07", "02.09.2026 SO zmienił postanowienie SR i zastosował środki ochronne."),
-        ("III Nsm 284/25", "Sprawa rodzinna dotycząca Alicji", "Sąd Rejonowy w Tychach", "III Wydział Rodzinny i Nieletnich", "rodzinna", "Miejsce zamieszkania, kontakty, władza rodzicielska", "suspended", "Po uzasadnieniu III Ca 1054/26 – przedłożyć postanowienie wraz z uzasadnieniem", "", "Draft pisma w zawieszeniu do czasu uzyskania uzasadnienia SO."),
-        ("", "Alimenty Alicji", "", "III RC", "alimenty", "Alimenty na rzecz Alicji", "waiting", "Przedłożyć postanowienie III Ca 1054/26 z uzasadnieniem; czekać na SO ws. zabezpieczenia i wezwanie do PIT", "", "Pismo w zawieszeniu. Oczekiwanie na rozstrzygnięcie II instancji w przedmiocie zabezpieczenia oraz wezwanie do przedłożenia PIT."),
-        ("III RC 181/26", "Alimenty Kariny", "Sąd Rejonowy w Tychach", "III Wydział Rodzinny i Nieletnich", "alimenty", "Alimenty pełnoletniego dziecka", "waiting", "Oczekiwanie na postanowienie SO rozpoznające zażalenie na zabezpieczenie", "", "Postanowienie II instancji może pojawić się w najbliższych dniach."),
-        ("", "Cecylia Kłosowska przeciwko Michałowi Sobolowi – zapłata", "", "", "cywilna", "Zapłata za bezumowne korzystanie z lokalu i opłaty", "active", "Ustalić, czy odbędzie się kolejna mediacja; przygotować się do rozprawy", "2026-09-30", "Roszczenie główne ok. 27 500,57 zł + odsetki. Mediacja 25.08.2026; możliwy kolejny termin 14–15.09.2026."),
-        ("", "Zachowek po babci", "", "", "cywilna / spadkowa", "Zachowek", "waiting", "Czekać na dalszy ruch sądu po opinii biegłego", "", "21.08.2026 wpłynęła opinia biegłego wraz z aktami."),
-        ("", "Sprawa karna – podsłuch / art. 267 k.k.", "", "", "karna", "Podejrzenie czynu z art. 267 § 3 i § 4 k.k.", "waiting", "Oczekiwanie na dalsze czynności Policji / prokuratury", "", "Postępowanie przygotowawcze w toku."),
+        ("I C 123/26", "Przykładowa sprawa o zapłatę", "Sąd Rejonowy", "cywilna", "Zapłata wynikająca z umowy", "active", "Sprawdzić dokumenty", "Wyłącznie fikcyjny przykład."),
+        ("III RC 456/26", "Przykładowa sprawa rodzinna", "Sąd Rejonowy", "rodzinna", "Świadczenia alimentacyjne", "waiting", "Oczekiwać na korespondencję", "Wyłącznie fikcyjny przykład."),
     ]
-    ids = []
-    for c in cases:
-        cur = con.execute(
-            "INSERT INTO cases(signature,title,court,department,category,subject,status,next_step,next_date,notes) VALUES(?,?,?,?,?,?,?,?,?,?)", c
-        )
-        ids.append(cur.lastrowid)
-
-    # parties
-    parties = [
-        (ids[0], "Aśka", "wnioskodawczyni", ""), (ids[0], "Michał Sobol", "uczestnik", ""),
-        (ids[1], "Alicja", "małoletnia", ""), (ids[1], "Aśka", "matka", ""), (ids[1], "Michał Sobol", "ojciec", ""),
-        (ids[2], "Alicja", "uprawniona", ""), (ids[2], "Michał Sobol", "zobowiązany / strona", ""),
-        (ids[3], "Karina", "powódka", ""),
-        (ids[4], "Cecylia Kłosowska", "powódka", ""), (ids[4], "Michał Sobol", "pozwany", ""),
-    ]
-    con.executemany("INSERT INTO parties(case_id,name,role,notes) VALUES(?,?,?,?)", parties)
-
-    events = [
-        (ids[0], "2026-09-02", "Orzeczenie", "Postanowienie Sądu Okręgowego", "Zmiana postanowienia SR i zastosowanie środków ochronnych."),
-        (ids[0], "2026-09-07", "Wysłanie pisma", "Plan: wniosek o uzasadnienie", "Wniosek o sporządzenie i doręczenie uzasadnienia postanowienia SO."),
-        (ids[4], "2026-08-25", "Mediacja", "Pierwsza mediacja", "Propozycja pozwanego ok. 1 000 zł."),
-        (ids[4], "2026-09-30", "Rozprawa", "Rozprawa", "Najbliższy znany termin rozprawy."),
-        (ids[5], "2026-08-21", "Wpływ pisma", "Wpływ opinii biegłego", "Opinia biegłego wpłynęła wraz z aktami."),
-    ]
-    con.executemany("INSERT INTO events(case_id,event_date,event_type,title,description) VALUES(?,?,?,?,?)", events)
-
-    tasks = [
-        (ids[0], "Wysłać wniosek o uzasadnienie", "2026-09-07", "open", "high", "", ""),
-        (ids[0], "Po uzasadnieniu: analiza apelacja → orzeczenie → uzasadnienie", "", "open", "high", "Doręczenie uzasadnienia", "Wypisać mocne i słabe strony oraz które zarzuty apelacji zostały uwzględnione."),
-        (ids[1], "Przedłożyć postanowienie SO wraz z uzasadnieniem", "", "open", "high", "Doręczenie uzasadnienia III Ca 1054/26", "Pismo pozostaje w zawieszeniu."),
-        (ids[2], "Przedłożyć postanowienie SO wraz z uzasadnieniem", "", "open", "high", "Doręczenie uzasadnienia III Ca 1054/26", ""),
-        (ids[2], "Sprawdzić rozstrzygnięcie SO ws. zabezpieczenia", "", "open", "normal", "", ""),
-        (ids[2], "Sprawdzić wezwanie do przedłożenia PIT", "", "open", "normal", "", ""),
-        (ids[3], "Sprawdzić postanowienie SO ws. naszego zażalenia", "", "open", "high", "", ""),
-        (ids[4], "Potwierdzić, czy odbędzie się druga mediacja", "2026-09-10", "open", "normal", "", "Potencjalne terminy 14–15.09.2026."),
-        (ids[4], "Przygotować się do rozprawy", "2026-09-30", "open", "high", "", ""),
-    ]
-    con.executemany("INSERT INTO tasks(case_id,title,due_date,status,priority,depends_on,notes) VALUES(?,?,?,?,?,?,?)", tasks)
+    con.executemany(
+        "INSERT INTO cases(signature,title,court,category,subject,status,next_step,notes) VALUES(?,?,?,?,?,?,?,?)",
+        cases,
+    )
 
 
 def esc(s) -> str:
@@ -2540,6 +2506,8 @@ def layout(title: str, body: str, active: str = "") -> str:
             ("/cases?mine=1", "◎", "Moje sprawy", "my_cases"),
             ("/tasks", "✓", "Zadania", "tasks"),
             ("/documents", "▤", "Dokumenty", "documents"),
+            ("/powers", "§", "Pełnomocnictwa", "powers"),
+            ("/inbox", "✉", "Skrzynka wpływu", "inbox"),
             ("/drafts", "✎", "Pisma", "drafts"),
         ]),
         ("WIĘCEJ", [
@@ -2555,6 +2523,7 @@ def layout(title: str, body: str, active: str = "") -> str:
             ("/history", "↺", "Historia zmian", "history"),
             ("/trash", "⌫", "Kosz", "trash"),
             ("/backups", "⛁", "Kopie bezpieczeństwa", "backups"),
+            ("/about", "ⓘ", "O programie", "about"),
         ]),
     ]
     if user and user['role'] == 'admin':
@@ -2881,7 +2850,7 @@ def open_containing_folder(path: Path) -> tuple[bool,str]:
     except Exception as exc: return False,str(exc)
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
     server_version = f"{APP_NAME}/{VERSION}"
 
     def handle_one_request(self):
@@ -2891,6 +2860,21 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             try: log_slow_request(getattr(self,'path','(brak ścieżki)'),time.perf_counter()-started)
             except Exception: pass
+
+    def about_page(self):
+        body = (
+            "<div class='topbar'><div><h1>O programie</h1>"
+            f"<div class='sub'>{esc(APP_NAME)} · wersja {esc(VERSION)}</div></div></div>"
+            "<div class='card'><h2>RK KANCELARIA</h2>"
+            "<p>System wspomagający organizację pracy kancelarii prawnej.</p>"
+            "<p><b>Projekt i rozwój:</b> Robert Kłosowski</p>"
+            "<p>© 2026 Robert Kłosowski — w zakresie przysługujących praw.</p>"
+            "<p><b>Status:</b> wersja rozwojowa. Oprogramowanie wspomaga pracę, "
+            "lecz nie zastępuje samodzielnej oceny prawnej ani weryfikacji terminów.</p>"
+            "<p>Korzystanie z komponentów zewnętrznych podlega ich własnym licencjom. "
+            "Zasady korzystania opisano w pliku LICENSE.txt dołączonym do programu.</p></div>"
+        )
+        return self.send_html(layout('O programie', body, 'about'))
 
     def log_message(self, format, *args):
         # mniej hałaśliwy terminal
@@ -3164,6 +3148,7 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"/case/\d+/export/package", path): return self.case_export_package(int(path.split("/")[2]))
             if path == "/trash": return self.trash_page(qs)
             if path == "/history": return self.history_page(qs)
+            if path == "/about": return self.about_page()
             if path == "/backups": return self.backups_page()
             if re.fullmatch(r"/case/\d+/history", path): return self.case_history_page(int(path.split("/")[2]))
             if re.fullmatch(r"/process-event/\d+/edit", path): return self.process_event_edit(int(path.split("/")[2]))
@@ -3190,6 +3175,12 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"/draft/\d+/edit", path): return self.draft_edit_page(int(path.split("/")[2]))
             if re.fullmatch(r"/draft/\d+/download", path): return self.draft_download(int(path.split("/")[2]))
             if path == "/documents": return self.documents_page(qs)
+            if path == "/powers": return self.powers_page(qs)
+            if re.fullmatch(r"/powers/\d+/edit",path): return self.power_edit_page(int(path.split("/")[2]))
+            if re.fullmatch(r"/document/\d+/links",path): return self.document_links_page(int(path.split("/")[2]))
+            if path == "/inbox": return self.inbox_page()
+            if re.fullmatch(r"/inbox/\d+/file", path): return self.inbox_file(int(path.split("/")[2]))
+            if re.fullmatch(r"/inbox/\d+", path): return self.inbox_review(int(path.split("/")[2]))
             if path == "/tags": return self.tags_page(qs)
             if path == "/search": return self.search_page(qs)
             if path == "/backup": return self.backup()
@@ -3308,6 +3299,13 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"/deadline-suggestion/\d+/accept", path): return self.deadline_suggestion_accept(int(path.split("/")[2]), fields)
             if path == "/case/create": return self.case_create(fields)
             if path == "/task/create": return self.task_add_global(fields)
+            if path == "/powers/save": return self.power_save(fields)
+            if path == "/powers/remove": return self.power_remove(fields)
+            if re.fullmatch(r"/document/\d+/link",path): return self.document_link_add(int(path.split("/")[2]),fields)
+            if re.fullmatch(r"/document/\d+/unlink",path): return self.document_link_remove(int(path.split("/")[2]),fields)
+            if path == "/inbox/upload": return self.inbox_upload(fields, files)
+            if re.fullmatch(r"/inbox/\d+/approve", path): return self.inbox_approve(int(path.split("/")[2]), fields)
+            if re.fullmatch(r"/inbox/\d+/discard", path): return self.inbox_discard(int(path.split("/")[2]), fields)
             if path == "/view/save": return self.saved_view_save(fields)
             if re.fullmatch(r"/view/\d+/delete", path): return self.saved_view_delete(int(path.split('/')[2]), fields)
             if path == "/deadline/create": return self.deadline_create(fields)
@@ -4039,16 +4037,16 @@ class Handler(BaseHTTPRequestHandler):
         entity_opts='<option value="">— wybierz z kartoteki —</option>'+''.join(f"<option value='{e['id']}'>{esc(entity_display(e))}{' · PESEL '+esc(e['pesel']) if e['pesel'] else ''}{' · NIP '+esc(e['nip']) if e['nip'] else ''}</option>" for e in entities)
         body=f"""<div class='topbar'><div><h1>Nowa sprawa</h1><div class='sub'>Na początek wystarczą podstawowe informacje. Resztę możesz uzupełnić później.</div></div><div><a class='btn' href='/case/import'>Importuj sprawę</a></div></div>
         <div class='card friendly-form'><form method='post' action='/case/create' class='form-grid'>
-        <div class='full'><label>Nazwa sprawy * <span class='help-dot' title='Krótka nazwa robocza, np. Kłosowska przeciwko Sobol'>?</span></label><input name='title' required autofocus placeholder='np. Kłosowska przeciwko Sobol'></div>
-        <div class='full important-field'><label>Czego dotyczy sprawa? / Przedmiot * <span class='help-dot' title='Jedno krótkie zdanie, po którym każdy od razu rozumie sprawę.'>?</span></label><input name='subject' required placeholder='np. zapłata za bezumowne korzystanie z lokalu'><div class='small muted'>To zdanie będzie widoczne na liście i w nagłówku sprawy.</div></div>
-        <div><label>Klient — kartoteka</label><select name='client_entity_id'>{entity_opts}</select></div><div><label>Klient — wpis tekstowy</label><input name='client' placeholder='np. Cecylia Kłosowska'></div>
+        <div class='full'><label>Nazwa sprawy * <span class='help-dot' title='Krótka nazwa robocza, np. sprawa o zapłatę'>?</span></label><input name='title' required autofocus placeholder='np. Spółka A przeciwko Spółce B'></div>
+        <div class='full important-field'><label>Czego dotyczy sprawa? / Przedmiot * <span class='help-dot' title='Jedno krótkie zdanie, po którym każdy od razu rozumie sprawę.'>?</span></label><input name='subject' required placeholder='np. zapłata wynikająca z umowy'><div class='small muted'>To zdanie będzie widoczne na liście i w nagłówku sprawy.</div></div>
+        <div><label>Klient — kartoteka</label><select name='client_entity_id'>{entity_opts}</select></div><div><label>Klient — wpis tekstowy</label><input name='client' placeholder='np. Klient A'></div>
         <div class='full'><label>Co trzeba zrobić dalej?</label><input name='next_step' placeholder='np. przygotować odpowiedź na pozew'></div><div><label>Termin następnej czynności</label><input type='date' name='next_date'></div><div><label>Status</label><select name='status'>{opts}</select></div>
         <details class='advanced-fields full'><summary>Więcej informacji — sygnatury, sąd, prowadzący, druga strona…</summary><div class='form-grid'>
-        <div><label>Sygnatura sądowa</label><input name='signature'></div><div><label>Sygnatura wewnętrzna</label><input name='internal_signature' placeholder='np. RK/ALI/001/26'></div>
+        <div><label>Sygnatura sądowa</label><input name='signature'></div><div><label>Sygnatura wewnętrzna</label><input name='internal_signature' placeholder='np. RK/2026/001'></div>
         <div><label>Przeciwnik / druga strona — kartoteka</label><select name='opponent_entity_id'>{entity_opts}</select></div><div><label>Prowadzący sprawę</label><select name='lead_user_id'>{lead_opts}</select></div>
         <div class='full'><label>Czekamy na / powód oczekiwania</label><input name='waiting_for' placeholder='np. sąd, klient, przeciwnik, urząd'></div>
         <div><label>Sąd / organ</label><input name='court'></div><div><label>Wydział</label><input name='department'></div><div><label>Kategoria</label><input name='category' placeholder='np. cywilna, rodzinna, karna'></div>
-        <div class='full'><label>Tagi</label><input name='tags' placeholder='np. Alicja, zabezpieczenie, pilne'><div class='small muted'>Oddzielaj przecinkiem lub średnikiem.</div></div>
+        <div class='full'><label>Tagi</label><input name='tags' placeholder='np. pilne, do analizy, termin'><div class='small muted'>Oddzielaj przecinkiem lub średnikiem.</div></div>
         <div class='full'><label>Notatki</label><textarea name='notes'></textarea></div></div></details>
         <div class='full form-actions'><button class='btn primary'>Utwórz sprawę</button> <a class='btn' href='/cases'>Anuluj</a></div></form></div>"""
         self.send_html(layout('Nowa sprawa',body,'cases'))
@@ -4333,8 +4331,7 @@ class Handler(BaseHTTPRequestHandler):
                                  LEFT JOIN users u ON u.id=t.assigned_user_id WHERE t.case_id=?
                                  ORDER BY t.status,CASE WHEN t.due_date='' THEN 1 ELSE 0 END,t.due_date,t.id""",(cid,)).fetchall()
             alerts=con.execute("SELECT * FROM alerts WHERE case_id=? AND status='open' ORDER BY alert_date,id",(cid,)).fetchall()
-            docs=con.execute("""SELECT * FROM documents WHERE case_id=?
-                                ORDER BY COALESCE(NULLIF(delivered_date,''),NULLIF(received_date,''),NULLIF(doc_date,''),created_at) DESC,id DESC""",(cid,)).fetchall()
+            docs=case_document_rows(con,cid)
             doc_events=con.execute("""SELECT de.*,d.title document_title FROM document_events de JOIN documents d ON d.id=de.document_id
                                       WHERE de.case_id=? AND de.is_archived=0 ORDER BY de.event_date DESC,de.id DESC""",(cid,)).fetchall()
             strategy=con.execute('SELECT * FROM case_strategy WHERE case_id=?',(cid,)).fetchone()
@@ -4438,9 +4435,12 @@ class Handler(BaseHTTPRequestHandler):
                 sender=esc(d['sender']) or '—'
                 author=esc(row_get(d,'document_author','')) or '—'
                 disclosure=f"""<details class='document-disclosure'><summary><span>{esc(d['title'])}</span>{parent}</summary><div class='document-disclosure-body'><div><b>Rodzaj dokumentu:</b> {esc(d['doc_type']) or '—'}</div><div><b>Opis:</b> {description}</div><div class='small muted'>Nadawca: {sender} · autor: {author}</div><a class='btn small' href='/document/{d['id']}/open'>Otwórz dokument</a></div></details>"""
-                rows.append(f"<tr><td>{fmt_date(d['doc_date'])}<div class='small muted'>wpływ {fmt_date(d['received_date'])} · doręczenie {fmt_date(d['delivered_date'])}</div></td><td>{disclosure}</td><td>{state}</td><td><a class='btn small' href='/document/{d['id']}/edit'>Edytuj</a></td></tr>")
+                doc_actions = (f"<a class='btn small' href='/document/{d['id']}/edit'>Edytuj</a>"
+                               if d['case_id'] == cid else "<span class='small muted'>Dokument współdzielony</span>")
+                doc_actions += f" <a class='btn small' href='/document/{d['id']}/links'>Powiązania</a>"
+                rows.append(f"<tr><td>{fmt_date(d['doc_date'])}<div class='small muted'>wpływ {fmt_date(d['received_date'])} · doręczenie {fmt_date(d['delivered_date'])}</div></td><td>{disclosure}</td><td>{state}</td><td>{doc_actions}</td></tr>")
             add='' if readonly else f"""<details class='card smart-add'><summary>+ Dodaj dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid'><input type='hidden' name='return_to' value='/case/{cid}?tab=documents'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{''.join(f'<option>{esc(x)}</option>' for x in DOC_TYPES)}</select></div><div class='full'><label>Tytuł</label><input name='title' required></div><div><label>Nadawca</label><input name='sender'></div><div><label>Status</label><select name='doc_status'>{''.join(f'<option>{esc(x)}</option>' for x in DOC_STATUSES)}</select></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><label>Plik</label><input type='file' name='file'></div><div class='full'><label>Załączniki</label><input type='file' name='attachments[]' multiple></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"""
-            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Dokumenty</h2><div class='muted'>Dokumenty i załączniki wyłącznie tej sprawy.</div></div><a class='btn' href='/documents?case_id={cid}'>Widok globalny</a></div>{add}<div class='card table-scroll'><table><tr><th>Daty</th><th>Dokument</th><th>Status</th><th></th></tr>{''.join(rows) or '<tr><td colspan=4>Brak dokumentów.</td></tr>'}</table></div></section>"
+            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Dokumenty</h2><div class='muted'>Dokumenty sprawy i powiązane dokumenty bez kopiowania plików.</div></div><a class='btn' href='/documents?case_id={cid}'>Widok globalny</a></div>{add}<div class='card table-scroll'><table><tr><th>Daty</th><th>Dokument</th><th>Status</th><th></th></tr>{''.join(rows) or '<tr><td colspan=4>Brak dokumentów.</td></tr>'}</table></div></section>"
 
         elif tab=='tasks':
             task_rows=[]
@@ -5385,6 +5385,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def case_delete(self,cid,f):
         with db() as con:
+            shared=con.execute("SELECT 1 FROM documents d JOIN document_case_links l ON l.document_id=d.id WHERE d.case_id=? LIMIT 1",(cid,)).fetchone()
+            if shared:
+                return self.send_html(layout("Sprawa z dokumentami współdzielonymi",
+                    "<div class='card'><h1>Nie można usunąć sprawy źródłowej</h1>"
+                    "<p>Najpierw odłącz dokumenty współdzielone w ich kartach. Nie usunięto żadnych danych.</p></div>",
+                    "cases"),409)
+        with db() as con:
             c=con.execute('SELECT * FROM cases WHERE id=?',(cid,)).fetchone()
         if not c: return self.send_error(404)
         if c['status']!='closed':
@@ -5988,6 +5995,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
     def document_delete(self,did,f):
+        with db() as con:
+            shared=con.execute("SELECT 1 FROM document_case_links WHERE document_id=? LIMIT 1",(did,)).fetchone()
+            if shared:
+                body=f"<div class='card'><h1>Dokument jest współdzielony</h1>" + \
+                    f"<p>Najpierw odłącz go od dodatkowych spraw. Oryginalny plik nie został usunięty.</p>" + \
+                    f"<a class='btn primary' href='/document/{did}/links'>Powiązania dokumentu</a></div>"
+                return self.send_html(layout("Dokument współdzielony",body,"documents"),409)
         cid=int(f.get('case_id','0') or 0); a=self.current_author(f)
         with db() as con:
             row=con.execute("SELECT case_id FROM documents WHERE id=?",(did,)).fetchone(); cid=row['case_id'] if row else cid
@@ -6044,6 +6058,7 @@ class Handler(BaseHTTPRequestHandler):
         editable=True
         edit_action=f"<a class='btn' href='/document/{did}/edit'>Edytuj / dodaj załączniki</a>" if editable else ''
         toolbar=f"<a class='btn' href='/case/{d['case_id']}?tab=documents'>← Wróć do sprawy</a> <a class='btn' href='/documents'>Dokumenty</a> {edit_action} <a class='btn primary' href='/document/{did}/download'>Pobierz</a> {desktop_actions}"
+        toolbar += f" <a class='btn' href='/document/{did}/links'>Powiązania spraw</a>"
         max_chars=160_000; bodytxt,status=self._preview_text_now(d,p,ext)
         def text_preview(label):
             if not bodytxt:
@@ -6260,6 +6275,11 @@ class Handler(BaseHTTPRequestHandler):
         with db() as con:
             rows=con.execute(sql,params).fetchall()
             doc_sig_map=load_external_signature_map(con,[r['case_id'] for r in rows])
+            shared_doc_rows=con.execute("""SELECT d.id,d.title,c.id case_id,c.title case_title,c.signature
+                    FROM document_case_links l JOIN documents d ON d.id=l.document_id
+                    JOIN cases c ON c.id=l.case_id
+                    WHERE (?='' OR d.title LIKE ? OR d.original_name LIKE ? OR c.title LIKE ? OR c.signature LIKE ?)
+                    ORDER BY l.created_at DESC LIMIT 150""",(q,f'%{q}%',f'%{q}%',f'%{q}%',f'%{q}%')).fetchall()
         opts=''.join(f"<option value='{esc(x)}' {'selected' if dtype==x else ''}>{esc(x)}</option>" for x in DOC_TYPES)
         status_filter_opts=''.join(f"<option value='{esc(x)}' {'selected' if dstatus==x else ''}>{esc(x)}</option>" for x in DOC_STATUSES)
         doc_form_opts=''.join(f"<option>{esc(x)}</option>" for x in DOC_TYPES)
@@ -6309,10 +6329,16 @@ class Handler(BaseHTTPRequestHandler):
             quick_form=f"""<details><summary>+ Szybko dodaj dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid' style='margin-top:10px'><input type='hidden' name='return_to' value='/documents'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_form_opts}</select></div><div><label>Status</label><select name='doc_status'>{doc_status_form_opts}</select></div><div><label>Nadawca</label><input name='sender'></div><div><label>Autor dokumentu</label><input name='document_author'></div><div><label>Tagi</label><input name='tags' placeholder='np. dowód, pilne'></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Pismo / dokument główny</label><input type='file' name='file'><label style='font-weight:500'><input style='width:auto' type='checkbox' name='allow_duplicate' value='1'> Zezwól na identyczny plik</label></div><div class='full'><label>Załączniki do pisma</label><input type='file' name='attachments[]' multiple><div class='small muted'>Każdy plik zostanie zapisany jako załącznik tego dokumentu.</div></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"""
             folders.append(f"""<details class='doc-case-folder'{open_attr} id='docs-{cid}'><summary><span class='doc-chevron'>›</span><div class='doc-folder-main'><div class='doc-folder-title'>{esc(primary)} · {esc(internal)} — {esc(first['case_title'])}</div><div class='doc-folder-sub'>{client or 'Kliknij, aby rozwinąć dokumenty sprawy'}</div></div><span class='doc-count'>{len(docs)} dok.</span><span class='doc-latest'>najnowszy: {latest}</span></summary><div class='doc-folder-body'><div class='doc-folder-actions'><a class='btn small' href='/case/{cid}'>Karta sprawy</a></div><div class='doc-type-toolbar'>{type_buttons}</div>{quick_form}{''.join(year_html)}</div></details>""")
         folders_html=''.join(folders) or '<div class="empty">Brak dokumentów.</div>'
+        shared_rows=''.join(f"<tr><td><a href='/document/{r['id']}/open'>{esc(r['title'])}</a></td>"
+                            f"<td><a href='/case/{r['case_id']}?tab=documents'>{esc(r['signature'] or r['case_title'])}</a></td>"
+                            f"<td><a class='btn small' href='/document/{r['id']}/links'>Powiązania</a></td></tr>"
+                            for r in shared_doc_rows)
+        shared_panel=("<div class='card'><h2>Dokumenty powiązane z dodatkowymi sprawami</h2>"
+                      "<table><tr><th>Dokument</th><th>Sprawa</th><th>Akcje</th></tr>"+shared_rows+"</table></div>") if shared_rows else ''
         order_desc='primary' if order=='desc' else ''; order_asc='primary' if order=='asc' else ''; hidden_q=f"&q={quote(q)}" if q else ''; hidden_type=f"&type={quote(dtype)}" if dtype else ''; hidden_status=f"&status={quote(dstatus)}" if dstatus else ''
         script="""<script>function filterDocs(folderId,type,btn){const f=document.getElementById(folderId);if(!f)return;f.querySelectorAll('.doc-type-filter').forEach(x=>x.classList.remove('active'));btn.classList.add('active');f.querySelectorAll('.doc-filter-row').forEach(r=>{r.style.display=(!type||r.dataset.docType===type)?'':'none'});f.querySelectorAll('.year-folder').forEach(y=>{const visible=[...y.querySelectorAll('.doc-filter-row')].some(r=>r.style.display!=='none');y.style.display=visible?'':'none';});}</script>"""
         save_view=self._save_view_form(self.path)
-        body=f"""<div class='topbar'><div><h1>Dokumenty</h1><div class='sub'>{len(groups)} teczek spraw · {len(rows)} dokumentów. Teczka → rok → dokument.</div></div><div><a class='btn primary' href='/quick-add'>+ Dokument</a> <a class='btn' href='/cases'>Wybierz sprawę</a></div></div><details class='card filter-panel'><summary>Filtry dokumentów</summary><form class='form-grid' method='get' style='margin-top:12px'><input type='hidden' name='order' value='{order}'><div><label>Szukaj</label><input name='q' value='{esc(q)}' placeholder='Tytuł, plik, sygnatura, autor…'></div><div><label>Rodzaj</label><select name='type'><option value=''>Wszystkie</option>{opts}</select></div><div><label>Status</label><select name='status'><option value=''>Wszystkie statusy</option>{status_filter_opts}</select></div><div class='full'><button class='btn'>Filtruj</button> <a class='btn' href='/documents'>Wyczyść</a> <a class='btn' href='/documents?status=Do%20podpisu'>Do podpisu</a></div></form></details>{save_view}<br><div class='doc-toolbar'><div class='small muted'>W każdej teczce możesz dodatkowo filtrować typ dokumentu bez przeładowania strony.</div><div class='doc-toolbar-actions'><a class='btn small {order_desc}' href='/documents?order=desc{hidden_q}{hidden_type}{hidden_status}'>Najnowsze najpierw</a><a class='btn small {order_asc}' href='/documents?order=asc{hidden_q}{hidden_type}{hidden_status}'>Najstarsze najpierw</a><button class='btn small' type='button' onclick="document.querySelectorAll('.doc-case-folder').forEach(x=>x.open=true)">Rozwiń wszystkie</button><button class='btn small' type='button' onclick="document.querySelectorAll('.doc-case-folder').forEach(x=>x.open=false)">Zwiń wszystkie</button></div></div><div class='doc-folders'>{folders_html}</div>{script}"""
+        body=f"""<div class='topbar'><div><h1>Dokumenty</h1><div class='sub'>{len(groups)} teczek spraw · {len(rows)} dokumentów. Teczka → rok → dokument.</div></div><div><a class='btn primary' href='/quick-add'>+ Dokument</a> <a class='btn' href='/inbox'>Skrzynka wpływu</a> <a class='btn' href='/cases'>Wybierz sprawę</a></div></div><details class='card filter-panel'><summary>Filtry dokumentów</summary><form class='form-grid' method='get' style='margin-top:12px'><input type='hidden' name='order' value='{order}'><div><label>Szukaj</label><input name='q' value='{esc(q)}' placeholder='Tytuł, plik, sygnatura, autor…'></div><div><label>Rodzaj</label><select name='type'><option value=''>Wszystkie</option>{opts}</select></div><div><label>Status</label><select name='status'><option value=''>Wszystkie statusy</option>{status_filter_opts}</select></div><div class='full'><button class='btn'>Filtruj</button> <a class='btn' href='/documents'>Wyczyść</a> <a class='btn' href='/documents?status=Do%20podpisu'>Do podpisu</a></div></form></details>{save_view}<br><div class='doc-toolbar'><div class='small muted'>W każdej teczce możesz dodatkowo filtrować typ dokumentu bez przeładowania strony.</div><div class='doc-toolbar-actions'><a class='btn small {order_desc}' href='/documents?order=desc{hidden_q}{hidden_type}{hidden_status}'>Najnowsze najpierw</a><a class='btn small {order_asc}' href='/documents?order=asc{hidden_q}{hidden_type}{hidden_status}'>Najstarsze najpierw</a><button class='btn small' type='button' onclick="document.querySelectorAll('.doc-case-folder').forEach(x=>x.open=true)">Rozwiń wszystkie</button><button class='btn small' type='button' onclick="document.querySelectorAll('.doc-case-folder').forEach(x=>x.open=false)">Zwiń wszystkie</button></div></div><div class='doc-folders'>{folders_html}</div>{shared_panel}{script}"""
         self.send_html(layout('Dokumenty',body,'documents'))
 
     def note_add(self,cid,f):
@@ -6604,7 +6630,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 rows=con.execute("SELECT t.name,COUNT(ct.case_id) cnt FROM tags t LEFT JOIN case_tags ct ON ct.tag_id=t.id GROUP BY t.id,t.name ORDER BY t.name").fetchall()
         items=''.join(f"<tr><td><a class='tag' href='/cases?tag={quote(r['name'])}'>{esc(r['name'])}</a></td><td>{r['cnt']}</td><td><a class='btn small' href='/cases?tag={quote(r['name'])}'>Pokaż sprawy</a></td></tr>" for r in rows) or '<tr><td colspan=3>Brak tagów.</td></tr>'
-        body=f"""<div class='topbar'><div><h1>Tagi</h1><div class='sub'>Wyszukuj tagi i przechodź do wszystkich spraw oznaczonych danym tagiem.</div></div></div><div class='card'><form class='searchbar'><input name='q' value='{esc(q)}' placeholder='np. Alicja, zabezpieczenie, Sobol'><button class='btn primary'>Szukaj tagu</button></form></div><br><div class='card'><table><tr><th>Tag</th><th>Liczba spraw</th><th></th></tr>{items}</table></div>"""
+        body=f"""<div class='topbar'><div><h1>Tagi</h1><div class='sub'>Wyszukuj tagi i przechodź do wszystkich spraw oznaczonych danym tagiem.</div></div></div><div class='card'><form class='searchbar'><input name='q' value='{esc(q)}' placeholder='np. termin, pilne, do analizy'><button class='btn primary'>Szukaj tagu</button></form></div><br><div class='card'><table><tr><th>Tag</th><th>Liczba spraw</th><th></th></tr>{items}</table></div>"""
         self.send_html(layout('Tagi',body,'tags'))
 
     def case_export_page(self,cid):
@@ -6642,14 +6668,16 @@ class Handler(BaseHTTPRequestHandler):
                 results += [('Strona',r['case_id'],r['name'],f"{r['role']} · {r['case_title']} · autor: {r['created_by']}") for r in con.execute("SELECT p.*,c.title case_title FROM parties p JOIN cases c ON c.id=p.case_id WHERE p.name LIKE ? OR p.role LIKE ? OR p.notes LIKE ? OR p.created_by LIKE ? OR p.updated_by LIKE ?",(like,)*5)]
                 results += [('Zdarzenie',r['case_id'],r['title'],f"{fmt_date(r['event_date'])} · {r['description']} · autor: {r['created_by']}") for r in con.execute("SELECT * FROM events WHERE title LIKE ? OR description LIKE ? OR event_type LIKE ? OR created_by LIKE ? OR updated_by LIKE ?",(like,)*5)]
                 results += [('Zadanie',r['case_id'],r['title'],f"{fmt_date(r['due_date'])} · {r['depends_on']} · autor: {r['created_by']}") for r in con.execute("SELECT t.* FROM tasks t WHERE t.title LIKE ? OR t.notes LIKE ? OR t.depends_on LIKE ? OR t.created_by LIKE ? OR t.updated_by LIKE ? OR EXISTS (SELECT 1 FROM users u WHERE u.id=t.assigned_user_id AND (u.author_name LIKE ? OR u.function LIKE ?))",(like,)*7)]
-                results += [('Dokument',r['case_id'],r['title'],f"{r['doc_type']} · {r['doc_status']} · dokument: {fmt_date(r['doc_date'])} · wpływ: {fmt_date(r['received_date'])}") for r in con.execute("SELECT * FROM documents WHERE title LIKE ? OR description LIKE ? OR original_name LIKE ? OR doc_type LIKE ? OR doc_status LIKE ? OR doc_date LIKE ? OR received_date LIKE ? OR created_by LIKE ? OR updated_by LIKE ?",(like,)*9)]
+                results += [('Dokument',r['id'],r['title'],f"{r['doc_type']} · {r['doc_status']} · dokument: {fmt_date(r['doc_date'])} · wpływ: {fmt_date(r['received_date'])}") for r in con.execute("SELECT * FROM documents WHERE title LIKE ? OR description LIKE ? OR original_name LIKE ? OR doc_type LIKE ? OR doc_status LIKE ? OR doc_date LIKE ? OR received_date LIKE ? OR created_by LIKE ? OR updated_by LIKE ?",(like,)*9)]
                 results += [('Notatka',r['case_id'],r['note'][:100],f"{r['created_at']} · autor: {r['author']}") for r in con.execute("SELECT * FROM case_notes WHERE note LIKE ? OR author LIKE ?",(like,like))]
                 for r in con.execute("SELECT w.*,c.title case_title FROM writing_projects w LEFT JOIN cases c ON c.id=w.case_id WHERE w.title LIKE ? OR w.content LIKE ? OR w.notes LIKE ? OR w.original_name LIKE ? OR w.doc_type LIKE ? OR w.status LIKE ?",(like,)*6):
                     results.append(('Projekt pisma',r['case_id'],r['title'],f"{r['status']} · {r['doc_type']} · {r['case_title'] or 'bez sprawy'} · autor: {r['created_by']}"))
                 text_hits=fulltext_document_search(con,q,100)
         item_parts=[]
         for kind,cid,title,desc in results:
-            if kind=='Podmiot':
+            if kind=='Dokument':
+                href=f'/document/{cid}/open'
+            elif kind=='Podmiot':
                 with db() as con: er=con.execute('SELECT id FROM entities WHERE display_name=? COLLATE NOCASE LIMIT 1',(title,)).fetchone()
                 href=f"/entity/{er['id']}" if er else '/entities'
             else: href=f"/case/{cid}" if cid else '#'

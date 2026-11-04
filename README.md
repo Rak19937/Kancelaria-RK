@@ -1,4 +1,4 @@
-# RK KANCELARIA 0.3.0-dev4
+# RK KANCELARIA 0.3.2-dev1
 
 **CASE WORKSPACE** — zakładkowy warsztat prowadzenia sprawy.
 
@@ -65,3 +65,35 @@ Testy: `TESTY_0.3.0-dev3.txt`
 
 Dokumentacja zmian: `CHANGELOG_0.3.0-dev4_UI_PERFORMANCE.txt`
 Test regresji: `TEST_UI_PERFORMANCE_DEV4.py`
+
+
+## 0.3.1-dev1 — Skrzynka wpływu
+- OCR lokalny i sugestie czynności na podstawie pisma (heurystyki, nie analiza prawna).
+- Obowiązkowy wybór sprawy i ręczna weryfikacja danych, terminów, monitów oraz zadań.
+- Zaznaczane i edytowalne działania zapisują się dopiero po wyraźnym zatwierdzeniu.
+- Kalendarz otrzymuje zatwierdzone czynności z datą; terminy nie są obliczane automatycznie.
+- Nie wysyła dokumentów do zewnętrznych usług.
+- Testy: TEST_INBOX_REVIEW.py.
+
+
+## Status projektu i zasady korzystania
+RK KANCELARIA jest na etapie rozwoju i testów. Projekt i rozwój: Robert Kłosowski.
+© 2026 Robert Kłosowski — w zakresie przysługujących praw.
+
+Repozytorium nie jest obecnie udostępniane na licencji open source.
+Nie jest udzielana ogólna zgoda na komercyjne rozpowszechnianie elementów
+objętych prawami uprawnionego. Zewnętrzne biblioteki i narzędzia pozostają
+objęte swoimi licencjami. Szczegóły: `LICENSE.txt`.
+
+Odczyt pism może być niedokładny. Dane, daty, terminy i sugerowane czynności
+wymagają każdorazowego sprawdzenia i zatwierdzenia przez użytkownika.
+
+
+## 0.3.2-dev1 — Stabilizacja, dokumenty współdzielone i pełnomocnictwa
+- Skrzynka wpływu: uruchomienie istniejącego modułu, ręczna weryfikacja, bez samoczynnej decyzji o terminach.
+- Pełnomocnictwa: rejestr na podstawie już wgranych dokumentów; decyzja o umocowaniu należy do prawnika.
+- Jeden dokument może być widoczny w wielu sprawach bez kopiowania oryginalnego pliku.
+- Dokumenty współdzielone mają blokadę przypadkowego usunięcia ze sprawy źródłowej.
+- Wyszukiwarka: wynik dokumentu otwiera bezpośrednio dokument.
+- Podpowiedzi i dane demonstracyjne są neutralne; nie zawierają przykładów rzeczywistych spraw.
+- Przed instalacją wykonaj kopię Data. Testy na osobnej kopii bazy.
