@@ -8,6 +8,7 @@ import os
 import sqlite3
 import tempfile
 import zipfile
+from contextlib import closing
 from pathlib import Path
 
 
@@ -35,7 +36,10 @@ def main() -> int:
             assert app.save_document_file_version(con,did,'Tester')
             con.execute(f"PRAGMA user_version={app.SCHEMA_VERSION}")
 
-        with sqlite3.connect(app.DB_PATH) as con:
+        # sqlite3.connect jako zwykły context manager zatwierdza transakcję,
+        # ale nie zamyka połączenia. Na Windows blokuje to usunięcie bazy
+        # w TemporaryDirectory (WinError 32). closing wymusza zwolnienie uchwytu.
+        with closing(sqlite3.connect(app.DB_PATH)) as con:
             assert con.execute('PRAGMA user_version').fetchone()[0] == app.SCHEMA_VERSION
             assert con.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
             assert con.execute('SELECT principal_cents FROM case_claims').fetchone()[0] == 2_750_057
