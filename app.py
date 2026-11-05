@@ -52,6 +52,7 @@ from rk_correspondence import CorrespondenceMixin, ensure_correspondence_schema
 from rk_record_navigation import case_deadline_rows, linked_records_panel, safe_back
 from rk_workspace_plus import WorkspacePlusMixin, ensure_workspace_plus_schema, appointments_table, assignee_html, selected_ids, set_task_assignees, nav_strip, linked_sidecases, archived_appointments_html, task_assignees_map, upcoming_alerts_multi as upcoming_alerts
 from rk_case_categories import CaseCategoryMixin, ensure_case_categories_schema, category_form, save_categories, category_map, category_chips
+from rk_caseflow import CaseflowMixin, ensure_caseflow_schema, quick_nav_html, dependency_rows, unresolved_dependencies, dependency_blocking_counts
 from rk_document_hub import DocumentHubMixin, case_document_rows, ensure_document_hub_schema
 from rk_inbox import InboxMixin, ensure_inbox_schema
 from rk_paths import resolve_runtime_paths, installed_data_dir
@@ -66,8 +67,8 @@ from rk_smart import (
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.3.7-dev1"
-SCHEMA_VERSION = 329
+VERSION = "0.3.8-dev1"
+SCHEMA_VERSION = 330
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
 APP_MODE = RUNTIME_PATHS.mode
@@ -1308,6 +1309,7 @@ def init_db() -> None:
         ensure_correspondence_schema(con)
         ensure_workspace_plus_schema(con)
         ensure_case_categories_schema(con)
+        ensure_caseflow_schema(con)
         # Scala stare osobne monity/alerty i zadania. Operacja jest idempotentna.
         reconcile_task_alerts(con)
 
@@ -2506,7 +2508,7 @@ def is_case_pinned(user_id: int | None, case_id: int) -> bool:
         return bool(con.execute("SELECT 1 FROM user_case_pins WHERE user_id=? AND case_id=?",(user_id,case_id)).fetchone())
 
 def layout(title: str, body: str, active: str = "") -> str:
-    body = nav_strip(title) + body
+    body = nav_strip(title) + quick_nav_html() + body
     user = current_request_user()
     nav_sections = [
         ("PRACA", [
@@ -2518,7 +2520,8 @@ def layout(title: str, body: str, active: str = "") -> str:
             ("/case-categories", "▧", "Kategorie spraw", "case-categories"),
             ("/cases?mine=1", "◎", "Moje sprawy", "my_cases"),
             ("/tasks", "✓", "Zadania", "tasks"),
-            ("/documents", "▤", "Dokumenty", "documents"),
+            ("/documents", "▤", "Dokumenty — teczki", "documents"),
+            ("/evidence", "⚖", "Centrum dowodowe", "evidence"),
             ("/powers", "§", "Pełnomocnictwa", "powers"),
             ("/inbox", "✉", "Skrzynka wpływu", "inbox"),
             ("/workflow", "☑", "Centrum decyzji", "workflow"),
@@ -2865,7 +2868,7 @@ def open_containing_folder(path: Path) -> tuple[bool,str]:
     except Exception as exc: return False,str(exc)
 
 
-class Handler(CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
+class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
     server_version = f"{APP_NAME}/{VERSION}"
 
     def handle_one_request(self):
@@ -3152,6 +3155,10 @@ class Handler(CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, Action
             if path == "/deadline": return self.deadline_page(qs)
             if path == "/cases": return self.cases(qs, closed_only=False)
             if path == "/case-categories": return self.category_catalog_page()
+            if path == "/evidence": return self.caseflow_evidence(qs)
+            if path == "/navigate": return self.caseflow_navigate(qs)
+            if re.fullmatch(r"/case/\d+/chronology",path): return self.caseflow_chronology(int(path.split("/")[2]),qs)
+            if re.fullmatch(r"/task/\d+/dependencies",path): return self.caseflow_dependencies_page(int(path.split("/")[2]))
             if path == "/cases/closed": return self.cases(qs, closed_only=True)
             if path == "/case/new": return self.case_new()
             if path == "/entities": return self.entities_page(qs)
@@ -3347,6 +3354,9 @@ class Handler(CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, Action
             if path == "/view/save": return self.saved_view_save(fields)
             if re.fullmatch(r"/view/\d+/delete", path): return self.saved_view_delete(int(path.split('/')[2]), fields)
             if path == "/deadline/create": return self.deadline_create(fields)
+            if re.fullmatch(r"/task/\d+/dependencies/add",path): return self.caseflow_dependency_add(int(path.split("/")[2]),fields)
+            if re.fullmatch(r"/task-dependency/\d+/remove",path): return self.caseflow_dependency_remove(int(path.split("/")[2]),fields)
+            if re.fullmatch(r"/task/\d+/force-complete",path): return self.caseflow_force_complete(int(path.split("/")[2]),fields)
             if path == "/case-category/create": return self.category_create(fields)
             if re.fullmatch(r"/case-category/\d+/rename",path): return self.category_rename(int(path.split("/")[2]),fields)
             if path == "/appointment/create": return self.appointment_save(fields)
@@ -4440,6 +4450,7 @@ class Handler(CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, Action
                 relation_cases=con.execute('''SELECT id,signature,internal_signature,title,status FROM cases
                                               WHERE id<>? ORDER BY status='closed',signature='',signature,title COLLATE NOCASE''',(cid,)).fetchall()
             readonly=case_read_only(con,cid)
+            blocked_task_counts=dependency_blocking_counts(con,[t['id'] for t in tasks])
             task_people=task_assignees_map(con,[t['id'] for t in tasks])
             appointments_count=con.execute("SELECT COUNT(*) FROM case_appointments WHERE case_id=? AND status='planned'",(cid,)).fetchone()[0]
 
@@ -4475,7 +4486,7 @@ class Handler(CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, Action
         header=f"""<div class='case-workspace-sticky' id='rkCaseContext'>
           <div class='case-workspace-head'><div class='case-workspace-identity'><div class='case-workspace-sig'>{esc(primary)}</div>
           <div class='case-workspace-parties'>{esc(party_line)}</div><h1>{esc(c['title'])}</h1></div>
-          <div class='case-workspace-actions'>{badge(c['status'])}{closed_actions}<a class='btn small' href='/case/{cid}/sidecases'>Sprawy poboczne</a><a class='btn small' href='/case/{cid}/edit'>Edytuj</a><a class='btn small' href='/case/{cid}/export'>Eksport</a><a class='btn small danger' href='/case/{cid}/delete'>Usuń</a><a class='btn small' href='/case/{cid}?mode=advanced'>Widok techniczny</a></div></div>
+          <div class='case-workspace-actions'>{badge(c['status'])}{closed_actions}<a class='btn small' href='/case/{cid}/sidecases'>Sprawy poboczne</a><a class='btn small' href='/case/{cid}/chronology'>Chronologia</a><a class='btn small' href='/evidence?case_id={cid}'>Centrum dowodowe</a><a class='btn small' href='/case/{cid}/edit'>Edytuj</a><a class='btn small' href='/case/{cid}/export'>Eksport</a><a class='btn small danger' href='/case/{cid}/delete'>Usuń</a><a class='btn small' href='/case/{cid}?mode=advanced'>Widok techniczny</a></div></div>
           <div class='case-workspace-meta'><span>{esc(c['court']) or 'Sąd/organ: —'}</span><span>Kategorie: {selected_category_html}</span><div class='smart-tags'>{tags}</div></div>
           <nav class='case-tabs'>{tab_nav}</nav></div>"""
         readonly_html=(f"<div class='readonly-banner'><b>Sprawa zakończona.</b> Nadal możesz poprawiać jej dane i dokumenty albo <form method='post' action='/case/{cid}/reopen' style='display:inline'><button class='btn small'>przywrócić ją do aktywnych</button></form>.</div>" if c['status']=='closed' else '')
@@ -4503,13 +4514,13 @@ class Handler(CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, Action
             for d in sorted(grouped,reverse=True):
                 rows=[]
                 for x in grouped[d]:
-                    href=f"/document/{x['source_id']}/open" if x['source_type']=='document' else '#'
+                    href=(f"/document/{x['source_id']}/open" if x['source_type']=='document' else f"/process-event/{x['source_id']}/edit" if x['source_type']=='process_event' else f"/event/{x['source_id']}/edit" if x['source_type']=='event' else '#')
                     rows.append(f"<a class='timeline-clean-row' href='{href}'><span class='timeline-clean-kind'>{esc(x['kind'])}</span><div><b>{esc(x['title'])}</b><small>{esc(x.get('description',''))}</small></div></a>")
                 timeline_parts.append(f"<div class='timeline-day'><div class='timeline-day-date'>{fmt_date(d)}</div><div class='timeline-day-items'>{''.join(rows)}</div></div>")
             doc_opts=''.join(f"<option value='{x['id']}'>{esc(x['title'])}</option>" for x in docs if not row_get(x,'parent_document_id',None))
             add_forms='' if readonly else f"""<div class='grid workspace-add-grid'><details class='card span6 smart-add'><summary>+ Zdarzenie kancelarii</summary><form method='post' action='/case/{cid}/event' class='form-grid'><input type='hidden' name='return_to' value='/case/{cid}?tab=history'><div><label>Data</label><input type='date' name='event_date' value='{date.today().isoformat()}'></div><div><label>Typ</label><input name='event_type' value='Czynność'></div><div class='full'><label>Tytuł</label><input name='title' required></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details>
               <details class='card span6 smart-add'><summary>+ Zdarzenie wynikające z dokumentu</summary><form method='post' action='/case/{cid}/document-event' class='form-grid'><div class='full'><label>Dokument</label><select name='document_id' required><option value=''>— wybierz —</option>{doc_opts}</select></div><div><label>Data zdarzenia</label><input type='date' name='event_date'></div><div><label>Rodzaj</label><input name='event_type' placeholder='np. doręczenie, termin, rozprawa'></div><div class='full'><label>Co wynika z dokumentu?</label><input name='title' required></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details></div>"""
-            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Historia sprawy</h2><div class='muted'>Kilka dat z jednego dokumentu może tworzyć kilka osobnych zdarzeń.</div></div><a class='btn' href='/case/{cid}/history'>Historia procesu i zmian</a></div>{add_forms}<div class='card'><div class='timeline-clean'>{''.join(timeline_parts) or '<div class="empty">Brak historii.</div>'}</div></div></section>"
+            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Historia sprawy</h2><div class='muted'>Wpisy są układane według dat zdarzeń, nie według kolejności ich dodania.</div></div><a class='btn' href='/case/{cid}/chronology'>Wszystkie wydarzenia chronologicznie</a> <a class='btn' href='/case/{cid}/history'>Historia procesu i zmian</a></div>{add_forms}<div class='card'><div class='timeline-clean'>{''.join(timeline_parts) or '<div class="empty">Brak historii.</div>'}</div></div></section>"
 
         elif tab=='documents':
             rows=[]
@@ -4525,13 +4536,15 @@ class Handler(CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, Action
                 doc_actions += f" <a class='btn small' href='/document/{d['id']}/links'>Powiązania</a>"
                 rows.append(f"<tr><td>{fmt_date(d['doc_date'])}<div class='small muted'>wpływ {fmt_date(d['received_date'])} · doręczenie {fmt_date(d['delivered_date'])}</div></td><td>{disclosure}</td><td>{state}</td><td>{doc_actions}</td></tr>")
             add='' if readonly else f"""<details class='card smart-add'><summary>+ Dodaj dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid'><input type='hidden' name='return_to' value='/case/{cid}?tab=documents'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{''.join(f'<option>{esc(x)}</option>' for x in DOC_TYPES)}</select></div><div class='full'><label>Tytuł</label><input name='title' required></div><div><label>Nadawca</label><input name='sender'></div><div><label>Status</label><select name='doc_status'>{''.join(f'<option>{esc(x)}</option>' for x in DOC_STATUSES)}</select></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><label>Plik</label><input type='file' name='file'></div><div class='full'><label>Załączniki</label><input type='file' name='attachments[]' multiple></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"""
-            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Dokumenty</h2><div class='muted'>Dokumenty sprawy i powiązane dokumenty bez kopiowania plików.</div></div><a class='btn' href='/documents?case_id={cid}'>Widok globalny</a></div>{add}<div class='card table-scroll'><table><tr><th>Daty</th><th>Dokument</th><th>Status</th><th></th></tr>{''.join(rows) or '<tr><td colspan=4>Brak dokumentów.</td></tr>'}</table></div></section>"
+            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Dokumenty</h2><div class='muted'>Dokumenty sprawy i powiązane dokumenty bez kopiowania plików.</div></div><a class='btn' href='/documents?case_id={cid}'>Teczka dokumentów</a></div>{add}<div class='card table-scroll'><table><tr><th>Daty</th><th>Dokument</th><th>Status</th><th></th></tr>{''.join(rows) or '<tr><td colspan=4>Brak dokumentów.</td></tr>'}</table></div></section>"
 
         elif tab=='tasks':
             task_rows=[]
             for t in tasks:
                 done=t['status']=='done'; assignee=esc(task_people.get(t['id']) or t['assigned_name'] or '—')
-                task_rows.append(f"<div class='workspace-task {'done' if done else ''}'><form method='post' action='/task/{t['id']}/toggle'><input type='hidden' name='case_id' value='{cid}'><input type='hidden' name='return_to' value='/case/{cid}?tab=tasks'><button class='task-check'>{'↩' if done else '✓'}</button></form><div><span class='mini-badge'>{esc(row_get(t,'task_type','Zadanie'))}</span> <a class='case-link' href='/task/{t['id']}/edit?return_to=%2Fcase%2F{cid}%3Ftab%3Dtasks'><b>{esc(t['title'])}</b></a><small>{fmt_date(t['due_date'])} · {assignee}{(' · '+esc(t['depends_on'])) if t['depends_on'] else ''}</small></div><a class='btn small' href='/task/{t['id']}/edit?return_to=%2Fcase%2F{cid}%3Ftab%3Dtasks'>Edytuj</a></div>")
+                blocked=blocked_task_counts.get(t['id'],0)
+                blocked_note=(f" <a class='case-link small' href='/task/{t['id']}/dependencies'>⏳ {blocked} oczekujących warunków</a>" if blocked else '')
+                task_rows.append(f"<div class='workspace-task {'done' if done else ''}'><form method='post' action='/task/{t['id']}/toggle'><input type='hidden' name='case_id' value='{cid}'><input type='hidden' name='return_to' value='/case/{cid}?tab=tasks'><button class='task-check'>{'↩' if done else '✓'}</button></form><div><span class='mini-badge'>{esc(row_get(t,'task_type','Zadanie'))}</span> <a class='case-link' href='/task/{t['id']}/edit?return_to=%2Fcase%2F{cid}%3Ftab%3Dtasks'><b>{esc(t['title'])}</b></a><small>{fmt_date(t['due_date'])} · {assignee}{blocked_note}{(' · '+esc(t['depends_on'])) if t['depends_on'] else ''}</small></div><a class='btn small' href='/task/{t['id']}/edit?return_to=%2Fcase%2F{cid}%3Ftab%3Dtasks'>Edytuj</a></div>")
             user_opts='<option value="">— bez przypisania —</option>'+''.join(f"<option value='{x['id']}'>{esc(user_display_name(x))}</option>" for x in users)
             add='' if readonly else f"""<details class='card smart-add'><summary>+ Dodaj zadanie</summary><form method='post' action='/case/{cid}/task' class='form-grid'><input type='hidden' name='return_to' value='/case/{cid}?tab=tasks'><div><label>Rodzaj</label><select name='task_type'>{''.join(f'<option>{x}</option>' for x in ['Zadanie','Monit','Termin procesowy','Płatność'])}</select></div><div><label>Termin</label><input type='date' name='due_date'></div><div class='full'><label>Co trzeba zrobić?</label><input name='title' required></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div><div class='full'><label>Zależność</label><input name='depends_on'></div><div class='full'><label>Notatka</label><textarea name='notes'></textarea></div><input type='hidden' name='_multi_assignees' value='1'>{assignees_html_task}<div class='full'><button class='btn primary'>Dodaj</button></div></form></details>"""
             content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Zadania</h2><div class='muted'>Otwarte i wykonane czynności tej sprawy.</div></div></div>{add}<div class='card workspace-task-list'>{''.join(task_rows) or '<div class="empty">Brak zadań.</div>'}</div></section>"
@@ -4710,7 +4723,7 @@ class Handler(CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, Action
                                          WHERE ds.case_id=? AND ds.status='open' ORDER BY ds.id DESC""", (cid,)).fetchall()
             docs = con.execute("""SELECT id,title,doc_type,received_date,delivered_date,extracted_text
                                   FROM documents WHERE case_id=? AND COALESCE(parent_document_id,0)=0
-                                  ORDER BY id DESC LIMIT 12""", (cid,)).fetchall()
+                                  ORDER BY COALESCE(NULLIF(doc_date,''),NULLIF(received_date,''),SUBSTR(created_at,1,10)) DESC,id DESC LIMIT 12""", (cid,)).fetchall()
             law_links = con.execute("""SELECT lcl.id,a.code,a.short_title,COALESCE(la.article_key,lcl.article_key_text) article_key,la.heading,lcl.note
                                        FROM law_case_links lcl JOIN law_acts a ON a.id=lcl.act_id
                                        LEFT JOIN law_articles la ON la.id=lcl.article_id
@@ -5756,7 +5769,7 @@ class Handler(CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, Action
                  f"<form method='post' action='/task/{tid}/assignees' class='form-grid'>"
                  f"{assignees_html_task}<div class='full'><button class='btn primary'>Zapisz osoby</button></div>"
                  "</form></div>")
-        body += related_nav
+        body += related_nav + self.caseflow_task_summary(tid)
         body += (f"<div class='card'><h3>Usuń zadanie / termin</h3>"
                  f"<form method='post' action='/task/{tid}/delete' "
                  "onsubmit='return confirm(&quot;Przenieść termin lub zadanie do Kosza?&quot;)'>"
@@ -5781,6 +5794,7 @@ class Handler(CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, Action
         with db() as con:
             old=con.execute("SELECT * FROM tasks WHERE id=?",(tid,)).fetchone()
             if not old: return self.send_error(404)
+            if old['status']!='done' and new['status']=='done' and self.caseflow_before_finish(tid,f):return
             cid=old['case_id']
             details=describe_changes(old,new,{
                 'title':'Zadanie','task_type':'Rodzaj','due_date':'Termin','status':'Status','priority':'Priorytet',
@@ -6101,6 +6115,7 @@ class Handler(CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, Action
             r=con.execute("SELECT status,title,case_id FROM tasks WHERE id=?",(tid,)).fetchone()
             if r:
                 cid=r['case_id']; new='done' if r['status']!='done' else 'open'
+                if new=='done' and self.caseflow_before_finish(tid,f):return
                 completed_at='' if new=='open' else datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 completed_by='' if new=='open' else a
                 con.execute("UPDATE tasks SET status=?,updated_by=?,completed_at=?,completed_by=? WHERE id=?",(new,a,completed_at,completed_by,tid))
@@ -6342,6 +6357,7 @@ class Handler(CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, Action
             elif flt=='undated': sql += " AND t.status='open' AND t.due_date=''"
             sql += " ORDER BY t.status,CASE WHEN t.due_date='' THEN 1 ELSE 0 END,t.due_date,CASE t.priority WHEN 'high' THEN 0 ELSE 1 END"
             rows=con.execute(sql,params).fetchall()
+            block_counts=dependency_blocking_counts(con,[r['id'] for r in rows])
             task_sig_map=load_external_signature_map(con,[r['case_id'] for r in rows])
             cases=con.execute("SELECT id,signature,internal_signature,title,status,closed_edit_unlocked FROM cases ORDER BY status='closed',signature='',signature,title").fetchall()
             case_sig_map=load_external_signature_map(con,[r['id'] for r in cases])
@@ -6359,12 +6375,14 @@ class Handler(CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, Action
             if r['updated_by'] and r['updated_by']!=r['created_by']: auth.append('zmiana: '+esc(r['updated_by']))
             auth_html=f"<div class='author'>{' · '.join(auth)}</div>" if auth else ''
             prio='Wysoki' if r['priority']=='high' else 'Normalny'
+            blocked=block_counts.get(r['id'],0)
+            blocked_note=(f"<div class='small'><a class='case-link' href='/task/{r['id']}/dependencies'>⏳ {blocked} niespełnionych zależności</a></div>" if blocked else '')
             deadline_meta=''
             if row_get(r,'deadline_base_date',''):
                 manual=' · ręcznie skorygowany' if int(row_get(r,'deadline_manual',0) or 0) else ''
                 deadline_meta=f"<div class='small deadline-meta'>wyliczono: {fmt_date(r['deadline_base_date'])} + {esc(str(row_get(r,'deadline_days','')))} {esc(row_get(r,'deadline_rule',''))}{manual}</div>"
             edit_return=quote(current_return,safe='')
-            parts.append(f"<tr><td><form method='post' action='/task/{r['id']}/toggle'><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small'>{toggle}</button></form></td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td class='{cls}'><span class='mini-badge'>{esc(row_get(r,'task_type','Zadanie') or 'Zadanie')}</span> <a class='case-link' href='/task/{r['id']}/edit'><b>{esc(r['title'])}</b></a>{dep}{deadline_meta}{auth_html}</td><td>{fmt_date(r['due_date'])}</td><td>{esc(assigned)}</td><td>{prio}</td><td class='nowrap'><a class='btn small' href='/task/{r['id']}/edit?return_to={edit_return}'>Edytuj</a> <form style='display:inline' method='post' action='/task/{r['id']}/delete' onsubmit=\"return confirm('Przenieść zadanie do Kosza?');\"><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small danger'>Do kosza</button></form></td></tr>")
+            parts.append(f"<tr><td><form method='post' action='/task/{r['id']}/toggle'><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small'>{toggle}</button></form></td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td class='{cls}'><span class='mini-badge'>{esc(row_get(r,'task_type','Zadanie') or 'Zadanie')}</span> <a class='case-link' href='/task/{r['id']}/edit'><b>{esc(r['title'])}</b></a>{dep}{deadline_meta}{blocked_note}{auth_html}</td><td>{fmt_date(r['due_date'])}</td><td>{esc(assigned)}</td><td>{prio}</td><td class='nowrap'><a class='btn small' href='/task/{r['id']}/edit?return_to={edit_return}'>Edytuj</a> <form style='display:inline' method='post' action='/task/{r['id']}/delete' onsubmit=\"return confirm('Przenieść zadanie do Kosza?');\"><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small danger'>Do kosza</button></form></td></tr>")
         trs=''.join(parts) or '<tr><td colspan=7><div class="empty compact-empty"><b>Brak zadań do pokazania.</b><div class="small">Dodaj nowe zadanie przyciskiem u góry.</div></div></td></tr>'
         qp='&mine=1' if mine else ''; a1='primary' if show=='open' else ''; a2='primary' if show=='all' else ''
         mine_button="<a class='btn primary' href='/tasks?show=open&mine=1'>Moje zadania</a> <a class='btn' href='/tasks?show=open'>Wszystkie zadania</a>" if mine else "<a class='btn' href='/tasks?show=open&mine=1'>Moje zadania</a>"
@@ -6393,84 +6411,7 @@ class Handler(CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, Action
         self.send_html(layout('Zadania',body,'tasks'))
 
     def documents_page(self,qs):
-        q=(qs.get('q') or [''])[0].strip(); dtype=(qs.get('type') or [''])[0].strip(); dstatus=(qs.get('status') or [''])[0].strip(); order=(qs.get('order') or ['desc'])[0].strip().lower()
-        if order not in ('desc','asc'): order='desc'
-        if dstatus and dstatus not in DOC_STATUSES: dstatus=''
-        sql="SELECT d.*,c.title case_title,c.signature,c.internal_signature,c.client FROM documents d JOIN cases c ON c.id=d.case_id WHERE 1=1"; params=[]
-        if q:
-            like=f"%{q}%"; sql += " AND (d.title LIKE ? OR d.description LIKE ? OR d.original_name LIKE ? OR d.sender LIKE ? OR d.document_author LIKE ? OR d.tags LIKE ? OR c.signature LIKE ? OR c.internal_signature LIKE ? OR c.client LIKE ? OR c.title LIKE ? OR d.created_by LIKE ? OR d.updated_by LIKE ? OR EXISTS (SELECT 1 FROM case_external_signatures es WHERE es.case_id=c.id AND (es.label LIKE ? OR es.signature LIKE ?)))"; params += [like]*14
-        if dtype: sql += " AND d.doc_type=?"; params.append(dtype)
-        if dstatus: sql += " AND d.doc_status=?"; params.append(dstatus)
-        direction='ASC' if order=='asc' else 'DESC'
-        sql += f" ORDER BY c.title COLLATE NOCASE, CASE WHEN COALESCE(d.parent_document_id,0)=0 THEN COALESCE(NULLIF(d.doc_date,''),'0000-00-00') ELSE COALESCE((SELECT NULLIF(p.doc_date,'') FROM documents p WHERE p.id=d.parent_document_id),'0000-00-00') END {direction}, COALESCE(d.parent_document_id,d.id) {direction}, CASE WHEN COALESCE(d.parent_document_id,0)=0 THEN 0 ELSE 1 END, d.attachment_order, d.id"
-        with db() as con:
-            rows=con.execute(sql,params).fetchall()
-            doc_sig_map=load_external_signature_map(con,[r['case_id'] for r in rows])
-            shared_doc_rows=con.execute("""SELECT d.id,d.title,c.id case_id,c.title case_title,c.signature
-                    FROM document_case_links l JOIN documents d ON d.id=l.document_id
-                    JOIN cases c ON c.id=l.case_id
-                    WHERE (?='' OR d.title LIKE ? OR d.original_name LIKE ? OR c.title LIKE ? OR c.signature LIKE ?)
-                    ORDER BY l.created_at DESC LIMIT 150""",(q,f'%{q}%',f'%{q}%',f'%{q}%',f'%{q}%')).fetchall()
-        opts=''.join(f"<option value='{esc(x)}' {'selected' if dtype==x else ''}>{esc(x)}</option>" for x in DOC_TYPES)
-        status_filter_opts=''.join(f"<option value='{esc(x)}' {'selected' if dstatus==x else ''}>{esc(x)}</option>" for x in DOC_STATUSES)
-        doc_form_opts=''.join(f"<option>{esc(x)}</option>" for x in DOC_TYPES)
-        doc_status_form_opts=''.join(f"<option>{esc(x)}</option>" for x in DOC_STATUSES)
-        grouped={}
-        for r in rows: grouped.setdefault(r['case_id'],[]).append(r)
-        def newest_key(item):
-            cid,docs=item; dates=[d['doc_date'] for d in docs if d['doc_date']]; return (max(dates) if dates else '',docs[0]['case_title'].casefold())
-        groups=sorted(grouped.items(),key=newest_key,reverse=True); auto_open=bool(q or dtype or dstatus); folders=[]
-        for cid,docs in groups:
-            first=docs[0]; primary=primary_signature_fast(cid,first['signature'],doc_sig_map); internal=internal_signature_text(first['internal_signature'])
-            dates=[d['doc_date'] for d in docs if d['doc_date']]; latest=fmt_date(max(dates)) if dates else 'brak daty'; client=f"Klient: {esc(first['client'])}" if first['client'] else ''
-            present_types=[]
-            for d in docs:
-                if d['doc_type'] not in present_types: present_types.append(d['doc_type'])
-            type_buttons="<button class='btn small doc-type-filter active' type='button' onclick='filterDocs(\"docs-%s\",\"\",this)'>Wszystkie</button>"%cid
-            type_buttons+=''.join(f"<button class='btn small doc-type-filter' type='button' onclick='filterDocs(\"docs-{cid}\",{esc(json.dumps(t))},this)'>{esc(t)}</button>" for t in present_types)
-            years={}
-            for d in docs:
-                year=(d['doc_date'][:4] if d['doc_date'] and len(d['doc_date'])>=4 else 'Bez daty')
-                years.setdefault(year,[]).append(d)
-            year_keys=sorted(years,key=lambda y:('0000' if y=='Bez daty' else y),reverse=(order=='desc'))
-            year_html=[]
-            for year in year_keys:
-                rows_html=[]
-                for r in years[year]:
-                    auth=[]
-                    if r['created_by']: auth.append('autor: '+esc(r['created_by']))
-                    if r['updated_by'] and r['updated_by']!=r['created_by']: auth.append('zmiana: '+esc(r['updated_by']))
-                    auth_html=f"<div class='author'>{' · '.join(auth)}</div>" if auth else ''
-                    file_actions=''
-                    if r['stored_name']: file_actions=f"<a class='btn small' href='/document/{r['id']}/open'>Otwórz</a> <a class='btn small' href='/document/{r['id']}/download'>Pobierz</a>"
-                    filename=esc(r['original_name']) if r['original_name'] else 'bez pliku'
-                    ocr_info=("<div class='small muted'>OCR: "+esc(r['ocr_language'] or 'tak')+"</div>") if r['ocr_used'] else ("<div class='small muted'>OCR: silnik niedostępny</div>" if r['ocr_status']=='ocr_brak_silnika' else '')
-                    sender_info=(f"<div class='small muted'>nadawca: {esc(row_get(r,'sender',''))}</div>" if row_get(r,'sender','') else '')
-                    doc_author_info=(f"<div class='small muted'>autor dokumentu: {esc(row_get(r,'document_author',''))}</div>" if row_get(r,'document_author','') else '')
-                    tags_info=(f"<div class='small'>tagi: {esc(row_get(r,'tags',''))}</div>" if row_get(r,'tags','') else '')
-                    linked_id=int(row_get(r,'linked_task_id',0) or 0)
-                    linked_info=(f"<div class='small'><a class='linked-chip' href='/task/{linked_id}/edit'>Powiązane zadanie #{linked_id}</a></div>" if linked_id else '')
-                    is_attachment=bool(int(row_get(r,'parent_document_id',0) or 0))
-                    row_class='doc-filter-row attachment-row' if is_attachment else 'doc-filter-row document-family'
-                    kind_label=("<span class='attachment-label'>↳ Załącznik</span>" if is_attachment else f"<span class='pill'>{esc(r['doc_type'])}</span>")
-                    title_prefix='📎 ' if is_attachment else ''
-                    rows_html.append(f"""<tr class='{row_class}' data-doc-type='{esc(r['doc_type'])}'><td class='nowrap'><b>{fmt_date(r['doc_date'])}</b><div class='small muted'>wpływ: {fmt_date(r['received_date'])}</div><div class='small muted'>doręczenie: {fmt_date(row_get(r,'delivered_date',''))}</div></td><td>{kind_label}<div><span class='doc-status {'sign' if r['doc_status']=='Do podpisu' else ''}'>{esc(r['doc_status'])}</span></div></td><td><b>{title_prefix}{esc(r['title'])}</b><div class='small muted'>{esc(r['description'])}</div>{sender_info}{doc_author_info}{tags_info}{linked_info}<div class='small muted'>{filename}</div>{ocr_info}{auth_html}</td><td class='nowrap'>{file_actions} <a class='btn small' href='/document/{r['id']}/edit'>Edytuj</a> <form method='post' action='/document/{r['id']}/delete' style='display:inline' onsubmit="return confirm('Przenieść dokument do Kosza?');"><input type='hidden' name='case_id' value='{cid}'><button class='btn small danger'>Do kosza</button></form></td></tr>""")
-                year_html.append(f"<details class='year-folder' {'open' if auto_open or year==year_keys[0] else ''}><summary>{esc(year)} — {len(years[year])} dokumentów</summary><div style='padding:0 8px 8px'><table><tr><th>Data / wpływ</th><th>Rodzaj</th><th>Dokument</th><th>Akcje</th></tr>{''.join(rows_html)}</table></div></details>")
-            open_attr=' open' if auto_open else ''
-            quick_form=f"""<details><summary>+ Szybko dodaj dokument</summary><form method='post' enctype='multipart/form-data' action='/case/{cid}/document' class='form-grid' style='margin-top:10px'><input type='hidden' name='return_to' value='/documents'><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_form_opts}</select></div><div><label>Status</label><select name='doc_status'>{doc_status_form_opts}</select></div><div><label>Nadawca</label><input name='sender'></div><div><label>Autor dokumentu</label><input name='document_author'></div><div><label>Tagi</label><input name='tags' placeholder='np. dowód, pilne'></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Pismo / dokument główny</label><input type='file' name='file'><label style='font-weight:500'><input style='width:auto' type='checkbox' name='allow_duplicate' value='1'> Zezwól na identyczny plik</label></div><div class='full'><label>Załączniki do pisma</label><input type='file' name='attachments[]' multiple><div class='small muted'>Każdy plik zostanie zapisany jako załącznik tego dokumentu.</div></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></details>"""
-            folders.append(f"""<details class='doc-case-folder'{open_attr} id='docs-{cid}'><summary><span class='doc-chevron'>›</span><div class='doc-folder-main'><div class='doc-folder-title'>{esc(primary)} · {esc(internal)} — {esc(first['case_title'])}</div><div class='doc-folder-sub'>{client or 'Kliknij, aby rozwinąć dokumenty sprawy'}</div></div><span class='doc-count'>{len(docs)} dok.</span><span class='doc-latest'>najnowszy: {latest}</span></summary><div class='doc-folder-body'><div class='doc-folder-actions'><a class='btn small' href='/case/{cid}'>Karta sprawy</a></div><div class='doc-type-toolbar'>{type_buttons}</div>{quick_form}{''.join(year_html)}</div></details>""")
-        folders_html=''.join(folders) or '<div class="empty">Brak dokumentów.</div>'
-        shared_rows=''.join(f"<tr><td><a href='/document/{r['id']}/open'>{esc(r['title'])}</a></td>"
-                            f"<td><a href='/case/{r['case_id']}?tab=documents'>{esc(r['signature'] or r['case_title'])}</a></td>"
-                            f"<td><a class='btn small' href='/document/{r['id']}/links'>Powiązania</a></td></tr>"
-                            for r in shared_doc_rows)
-        shared_panel=("<div class='card'><h2>Dokumenty powiązane z dodatkowymi sprawami</h2>"
-                      "<table><tr><th>Dokument</th><th>Sprawa</th><th>Akcje</th></tr>"+shared_rows+"</table></div>") if shared_rows else ''
-        order_desc='primary' if order=='desc' else ''; order_asc='primary' if order=='asc' else ''; hidden_q=f"&q={quote(q)}" if q else ''; hidden_type=f"&type={quote(dtype)}" if dtype else ''; hidden_status=f"&status={quote(dstatus)}" if dstatus else ''
-        script="""<script>function filterDocs(folderId,type,btn){const f=document.getElementById(folderId);if(!f)return;f.querySelectorAll('.doc-type-filter').forEach(x=>x.classList.remove('active'));btn.classList.add('active');f.querySelectorAll('.doc-filter-row').forEach(r=>{r.style.display=(!type||r.dataset.docType===type)?'':'none'});f.querySelectorAll('.year-folder').forEach(y=>{const visible=[...y.querySelectorAll('.doc-filter-row')].some(r=>r.style.display!=='none');y.style.display=visible?'':'none';});}</script>"""
-        save_view=self._save_view_form(self.path)
-        body=f"""<div class='topbar'><div><h1>Dokumenty</h1><div class='sub'>{len(groups)} teczek spraw · {len(rows)} dokumentów. Teczka → rok → dokument.</div></div><div><a class='btn primary' href='/quick-add'>+ Dokument</a> <a class='btn' href='/inbox'>Skrzynka wpływu</a> <a class='btn' href='/cases'>Wybierz sprawę</a></div></div><details class='card filter-panel'><summary>Filtry dokumentów</summary><form class='form-grid' method='get' style='margin-top:12px'><input type='hidden' name='order' value='{order}'><div><label>Szukaj</label><input name='q' value='{esc(q)}' placeholder='Tytuł, plik, sygnatura, autor…'></div><div><label>Rodzaj</label><select name='type'><option value=''>Wszystkie</option>{opts}</select></div><div><label>Status</label><select name='status'><option value=''>Wszystkie statusy</option>{status_filter_opts}</select></div><div class='full'><button class='btn'>Filtruj</button> <a class='btn' href='/documents'>Wyczyść</a> <a class='btn' href='/documents?status=Do%20podpisu'>Do podpisu</a></div></form></details>{save_view}<br><div class='doc-toolbar'><div class='small muted'>W każdej teczce możesz dodatkowo filtrować typ dokumentu bez przeładowania strony.</div><div class='doc-toolbar-actions'><a class='btn small {order_desc}' href='/documents?order=desc{hidden_q}{hidden_type}{hidden_status}'>Najnowsze najpierw</a><a class='btn small {order_asc}' href='/documents?order=asc{hidden_q}{hidden_type}{hidden_status}'>Najstarsze najpierw</a><button class='btn small' type='button' onclick="document.querySelectorAll('.doc-case-folder').forEach(x=>x.open=true)">Rozwiń wszystkie</button><button class='btn small' type='button' onclick="document.querySelectorAll('.doc-case-folder').forEach(x=>x.open=false)">Zwiń wszystkie</button></div></div><div class='doc-folders'>{folders_html}</div>{shared_panel}{script}"""
-        self.send_html(layout('Dokumenty',body,'documents'))
+        return self.caseflow_documents(qs)
 
     def note_add(self,cid,f):
         note=f.get('note','').strip(); a=self.current_author(f)
@@ -6495,7 +6436,7 @@ class Handler(CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, Action
         if cid: sql += " AND a.case_id=?"; params.append(cid)
         if q:
             like=f"%{q}%"; sql += " AND (a.action LIKE ? OR a.description LIKE ? OR a.author LIKE ? OR c.title LIKE ? OR c.signature LIKE ? OR c.internal_signature LIKE ?)"; params += [like]*6
-        sql += " ORDER BY a.id DESC LIMIT 500"
+        sql += " ORDER BY a.created_at DESC,a.id DESC LIMIT 500"
         with db() as con: rows=con.execute(sql,params).fetchall()
         items=[]
         for r in rows:

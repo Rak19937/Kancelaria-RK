@@ -145,3 +145,11 @@ wymagają każdorazowego sprawdzenia i zatwierdzenia przez użytkownika.
 - Wiele kategorii w jednej sprawie, własne kategorie, filtrowanie i zmiana nazw.
 - Stare kategorie przenoszone bez usuwania historii.
 - Katalog korzysta wyłącznie z lokalnej bazy.
+
+
+## RK KANCELARIA 0.3.8-dev1 — teczki, zależności i chronologia
+- Dokumenty otwierane po wybraniu sprawy; jedna teczka zamiast masowego widoku.
+- Centrum dowodowe prezentuje istniejące twierdzenia i dowody.
+- Zależności zadanie / dokument / sprawa poboczna z kontrolą cykli.
+- Oś czasu porządkuje rzeczywiste daty zdarzeń, oddzielnie od audytu zmian.
+- Zamknięcie mimo nieukończonych zależności wymaga świadomego uzasadnienia.
