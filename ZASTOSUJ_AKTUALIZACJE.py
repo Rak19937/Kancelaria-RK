@@ -285,6 +285,15 @@ def build_changes(repo: Path, package: Path):
     current = {name: path.read_text(encoding='utf-8') for name,path in paths.items()}
     app = current['app.py']; caseflow=current['rk_caseflow.py']; old_js=current['assets/rk_app.js']
     if NEW_VERSION in app:
+        # Po zapisie źródeł w main kolejny przebieg Actions musi być idempotentny.
+        required = (
+            'from rk_navigation import render_sidebar_navigation',
+            'from rk_routes import dispatch_static_get, dispatch_static_post',
+            'from rk_dashboard_data import dashboard_snapshot',
+            '/assets/rk_ux.js?v={VERSION}',
+        )
+        if any(marker not in app for marker in required):
+            raise RuntimeError('Wersja 0.3.10 wykryta, ale niekompletna. Przerwano.')
         return None, (), 'Wersja 0.3.10-dev1 już istnieje — bez zmian.'
     if SOURCE_VERSION in app:
         for name,sha in BASE_BLOBS.items():
@@ -296,8 +305,13 @@ def build_changes(repo: Path, package: Path):
         ux_js = (package / 'assets/rk_ux.js').read_text(encoding='utf-8')
         extra_ux = ['rk_ux.py','assets/rk_ux.css','assets/rk_ux.js','TEST_UX_039.py']
         for rel in extra_ux:
-            if (repo / rel).exists():
-                raise RuntimeError(f'{rel} istnieje w czystym repo; przerwano bez zmian.')
+            target = repo / rel
+            if target.is_file():
+                expected = (package / rel).read_text(encoding='utf-8')
+                if target.read_text(encoding='utf-8') != expected:
+                    raise RuntimeError(f'{rel}: repozytorium zawiera inny plik. Bez zmian.')
+            elif target.exists():
+                raise RuntimeError(f'{rel}: oczekiwano pliku, znaleziono inny obiekt.')
         ux = 'base'
     elif V1_VERSION in app:
         ux_js_path = repo / 'assets/rk_ux.js'
@@ -335,9 +349,15 @@ def build_changes(repo: Path, package: Path):
     # Nowe architektoniczne moduły; instalacja nie zastępuje przypadkowych plików użytkownika.
     for rel in ('rk_navigation.py','rk_routes.py','rk_dashboard_data.py',
                 'rk_search_data.py','rk_document_data.py','TEST_ARCHITEKTURA_0310.py'):
-        if (repo / rel).exists():
-            raise RuntimeError(f'Plik {rel} już istnieje. Bez zmian.')
-        changes[repo / rel] = (package / rel).read_text(encoding='utf-8')
+        expected = (package / rel).read_text(encoding='utf-8')
+        target = repo / rel
+        if target.is_file():
+            if target.read_text(encoding='utf-8') != expected:
+                raise RuntimeError(f'{rel}: już istnieje, ale ma inną zawartość. Bez zmian.')
+        elif target.exists():
+            raise RuntimeError(f'{rel}: oczekiwano pliku. Bez zmian.')
+        else:
+            changes[target] = expected
     if ux == 'base':
         for rel in ('assets/rk_ux.css','TEST_UX_039.py'):
             changes[repo / rel] = (package / rel).read_text(encoding='utf-8')
@@ -351,9 +371,19 @@ def build_changes(repo: Path, package: Path):
             raise RuntimeError(f'Test {rel} został zmieniony od czasu przeglądu; bez zmian.')
         changes[target] = patch_regression_test(rel,text)
     workflow = repo / '.github/workflows/main.yml'
-    if not workflow.is_file() or git_blob_sha(workflow.read_text(encoding='utf-8')) != WORKFLOW_BLOB:
-        raise RuntimeError('Workflow CI jest inny niż w zatwierdzonym repozytorium; bez zmian.')
-    changes[workflow] = patch_ci_workflow(workflow.read_text(encoding='utf-8'))
+    if not workflow.is_file():
+        raise RuntimeError('Brak workflow GitHub Actions. Bez zmian.')
+    workflow_text = workflow.read_text(encoding='utf-8')
+    if git_blob_sha(workflow_text) == WORKFLOW_BLOB:
+        # Zgodność z oryginalnym instalatorem poza GitHub Actions.
+        changes[workflow] = patch_ci_workflow(workflow_text)
+    elif ('# RK_0310_WORKFLOW' in workflow_text
+          and 'python ZASTOSUJ_AKTUALIZACJE.py . --dry-run' in workflow_text
+          and 'TEST_ARCHITEKTURA_0310.py' in workflow_text):
+        # Użytkownik wgrał już nowy main.yml; nie nadpisuj pliku w trakcie joba.
+        pass
+    else:
+        raise RuntimeError('Nieznana wersja workflow CI; przerwano bez zmian.')
     originals = tuple(path for path in changes if path.is_file())
     for path, content in changes.items():
         if path.suffix == '.py':
