@@ -3,9 +3,9 @@ name: Build RK KANCELARIA Windows Portable
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
 
 permissions:
   contents: write
@@ -41,11 +41,13 @@ jobs:
           python -m pip install -r requirements_desktop.txt
           python -m pip install "pyinstaller>=6.10,<7"
 
-      - name: Integracja zgodnych modułów 0.3.2 / 0.3.3
+      - name: Integracja zgodnych modulow 0.3.2 / 0.3.3
         shell: pwsh
         run: |
-          if (Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.4-dev1"' -Quiet) {
-            Write-Host "Źródła 0.3.4 są już kompletne — pomijam historyczne integratory."
+          if ((Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.4-dev1"' -Quiet) -or
+              (Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.5-dev1"' -Quiet) -or
+              (Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.6-dev1"' -Quiet)) {
+            Write-Host "Stare integratory nie są wymagane."
           } else {
             python RK_AKTUALIZACJA_ZBIORCZA.py .
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -53,16 +55,37 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
-      - name: Zintegruj Centrum decyzji 0.3.4-dev1
+      - name: Integracja Centrum decyzji 0.3.4-dev1
         shell: pwsh
         run: |
-          python ZASTOSUJ_OBIEG.py .
+          if ((Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.5-dev1"' -Quiet) -or
+              (Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.6-dev1"' -Quiet)) {
+            Write-Host "Centrum decyzji jest już zintegrowane."
+          } else {
+            python ZASTOSUJ_OBIEG.py .
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Zintegruj obieg korespondencji 0.3.5-dev1
+        shell: pwsh
+        run: |
+          if (Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.6-dev1"' -Quiet) {
+            Write-Host "Korespondencja 0.3.5 jest juz zintegrowana."
+          } else {
+            python ZASTOSUJ_KORESPONDENCJE.py .
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Zintegruj nawigacje i usuwanie terminow 0.3.6-dev1
+        shell: pwsh
+        run: |
+          python ZASTOSUJ_NAWIGACJE.py .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Test zrodel przed buildem
+      - name: Testy zrodel przed buildem
         shell: pwsh
         run: |
-          python -m py_compile app.py rk_inbox.py rk_document_hub.py rk_unified_preview.py rk_action_center.py ZASTOSUJ_PODGLAD.py ZASTOSUJ_OBIEG.py RK_STABILIZACJA.py RK_AKTUALIZACJA_ZBIORCZA.py RK_WYCZYSC_PODPOWIEDZI.py desktop.py rk_paths.py rk_sync.py RK_KANCELARIA_DESKTOP.pyw
+          python -m py_compile app.py rk_inbox.py rk_document_hub.py rk_unified_preview.py rk_action_center.py rk_correspondence.py rk_record_navigation.py ZASTOSUJ_NAWIGACJE.py ZASTOSUJ_PODGLAD.py ZASTOSUJ_OBIEG.py ZASTOSUJ_KORESPONDENCJE.py RK_STABILIZACJA.py RK_AKTUALIZACJA_ZBIORCZA.py RK_WYCZYSC_PODPOWIEDZI.py desktop.py rk_paths.py rk_sync.py RK_KANCELARIA_DESKTOP.pyw
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python TEST_TRUE_PORTABLE_PATHS.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -86,11 +109,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python TEST_ACTION_CENTER.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python TEST_KORESPONDENCJE.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python TEST_NAWIGACJA.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python TEST_INTEGRACJA_NAWIGACJI.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python RK_KANCELARIA_DESKTOP.pyw --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # Po przejściu testów zapisuje aktualne źródła w main.
-      - name: Zapisz przetestowane i oczyszczone źródła na main
+      - name: Zapisz przetestowane zrodla na main
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         continue-on-error: true
         shell: pwsh
@@ -100,12 +128,12 @@ jobs:
           git add app.py rk_inbox.py README.md
           git diff --cached --quiet
           if ($LASTEXITCODE -ne 0) {
-            git commit -m "RK KANCELARIA 0.3.4-dev1: human-reviewed legal workflow"
+            git commit -m "RK KANCELARIA 0.3.6-dev1: term controls and internal navigation"
             if ($LASTEXITCODE -ne 0) { throw "Nie udało się zapisać commita" }
             git push origin HEAD:main
-            if ($LASTEXITCODE -ne 0) { throw "GitHub zablokował zapis źródeł; build jest kontynuowany" }
+            if ($LASTEXITCODE -ne 0) { throw "Zapis źródeł został zablokowany; build jest kontynuowany" }
           } else {
-            Write-Host "Źródła już są zaktualizowane."
+            Write-Host "Źródła już są aktualne."
           }
 
       - name: Zbuduj prawdziwe EXE na Windows
