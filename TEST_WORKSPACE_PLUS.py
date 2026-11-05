@@ -177,6 +177,31 @@ class DBTests(unittest.TestCase):
         self.assertFalse(any(x[2]=='Prywatne Jana' for x in personal_calendar_items(self.con,1,'2026-11-01','2026-11-30')))
 
 class PatchTests(unittest.TestCase):
+    def test_integrator_injected_sync_python_syntax(self):
+        """Wykrywa niedomknięte wywołania w kodzie wstawianym do app.py.
+
+        Błąd kompilacji #36 pochodził z replacement strings, choć sam integrator
+        oraz jego starsze testy przechodziły. Ten test kompiluje faktyczny wstrzykiwany
+        kod synchronizacji jako fragment klasy i odrzuca brak nawiasu.
+        """
+        import ast
+        import inspect
+        import ZASTOSUJ_WORKSPACE_PLUS as installer
+        tree=ast.parse(inspect.getsource(installer.apply_app))
+        found=0
+        for call in ast.walk(tree):
+            if not (isinstance(call,ast.Call) and isinstance(call.func,ast.Name)
+                    and call.func.id=='method_change'):
+                continue
+            transforms=ast.literal_eval(call.args[3])
+            for old,replacement,label in transforms:
+                if 'sync_task_alert(' not in replacement:
+                    continue
+                code='def test(con,f,cur,a,old,assigned,tid):\n    if True:\n        if True:\n'+replacement+'\n'
+                compile(code,'generated_sync_check.py','exec')
+                self.assertIn('sync_task_alert(',replacement)
+                found+=1
+        self.assertEqual(found,3)
     def test_old_source_rejected(self):
         with self.assertRaises(RuntimeError):apply_app('VERSION = "0.3.5-dev1"')
     def test_no_mutation_of_unexpected_version(self):

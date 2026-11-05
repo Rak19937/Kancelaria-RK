@@ -165,14 +165,14 @@ def apply_app(src):
     # Terminy wyliczane i zadania: zapis dodatkowych przypisań wewnątrz transakcji.
     src=method_change(src,'    def deadline_create(self,f):','    def quick_event_add(self,f):',[
         ('            sync_task_alert(con,cur.lastrowid,a)',
-         "            if f.get('_multi_assignees')=='1':\n                set_task_assignees(con,cur.lastrowid,selected_ids(f,con))\n            sync_task_alert(con,cur.lastrowid,a",'sync')], 'deadline_create')
+         "            if f.get('_multi_assignees')=='1':\n                set_task_assignees(con,cur.lastrowid,selected_ids(f,con))\n            sync_task_alert(con,cur.lastrowid,a)",'sync')], 'deadline_create')
     src=method_change(src,'    def task_add(self,cid,f):','    def task_add_global(self,f):',[
         ('            sync_task_alert(con,cur.lastrowid,a)',
-         "            if f.get('_multi_assignees')=='1':\n                ids=selected_ids(f,con)\n                set_task_assignees(con,cur.lastrowid,ids)\n                assigned=ids[0] if ids else None\n            sync_task_alert(con,cur.lastrowid,a",'sync')], 'task_add')
+         "            if f.get('_multi_assignees')=='1':\n                ids=selected_ids(f,con)\n                set_task_assignees(con,cur.lastrowid,ids)\n                assigned=ids[0] if ids else None\n            sync_task_alert(con,cur.lastrowid,a)",'sync')], 'task_add')
     # W starym edytorze zachowaj listę wielu wykonawców przy niezmienionym 'głównym'.
     src=method_change(src,'    def task_update(self,tid,f):','    def document_edit(self,did):',[
         ('            sync_task_alert(con,tid,a)',
-         "            if old['assigned_user_id'] != assigned:\n                set_task_assignees(con,tid,[assigned] if assigned else [])\n            sync_task_alert(con,tid,a",'legacy edit')], 'task_update')
+         "            if old['assigned_user_id'] != assigned:\n                set_task_assignees(con,tid,[assigned] if assigned else [])\n            sync_task_alert(con,tid,a)",'legacy edit')], 'task_update')
     # Od tej pory wersja źródła jest jednoznaczna.
     compile(src,'app.py','exec')
     return src
