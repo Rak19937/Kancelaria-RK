@@ -1,39 +1,49 @@
-# RK KANCELARIA 0.3.4-dev1 — Centrum decyzji
+# RK KANCELARIA — 0.3.6-dev1: terminy i odnośniki
 
-## Zawartość paczki
+**Ta paczka zawiera także pliki aktualizacji 0.3.5 (Obieg korespondencji), ponieważ w sprawdzonym repozytorium na GitHubie nadal była wersja 0.3.4-dev1.** Dzięki temu nie trzeba szukać poprzedniego ZIP.
 
-| Plik | Miejsce w repozytorium GitHub |
-|---|---|
-| `rk_action_center.py` | główny katalog repozytorium |
-| `ZASTOSUJ_OBIEG.py` | główny katalog repozytorium |
-| `TEST_ACTION_CENTER.py` | główny katalog repozytorium |
-| `TEST_AKTUALIZACJA_ZBIORCZA.py` | główny katalog repozytorium — **zastąpić** istniejący test |
-| `.github/workflows/main.yml` | **właśnie ten katalog `.github/workflows/`** — zastąpić istniejący plik |
+## Wgraj do GitHuba
 
-## Wgranie
+Repozytorium: https://github.com/Rak19937/Kancelaria-RK
 
-1. **Nie modyfikuj obecnej wersji Portable i nie przenoś plików `Data`.** Zachowaj działającą wersję 0.3.3-dev1.
-2. Otwórz repozytorium `Rak19937/Kancelaria-RK`, gałąź `main`.
-3. Wgraj cztery pliki `.py` z paczki do **głównego katalogu repozytorium**, zastępując `TEST_AKTUALIZACJA_ZBIORCZA.py`. Zapisz commit.
-4. W GitHubie wejdź do `.github/workflows/main.yml`. Zastąp **całą zawartość** zawartością pliku z paczki. Zapisz commit. **Nie wgrywaj `main.yml` do głównego katalogu repozytorium.**
-5. Otwórz **Actions → Build RK KANCELARIA Windows Portable**, wybierz **najnowszy** przebieg (nie wcześniejszy uruchomiony po wgraniu czterech plików).
-6. Po zielonym wyniku: **Artifacts → RK-KANCELARIA-WINDOWS-PORTABLE**. Nową paczkę rozpakuj do osobnego folderu.
+**Do katalogu głównego gałęzi `main`** wgraj siedem plików `.py`:
 
-## Co zmienia aktualizacja
+- `rk_correspondence.py`
+- `ZASTOSUJ_KORESPONDENCJE.py`
+- `TEST_KORESPONDENCJE.py`
+- `rk_record_navigation.py`
+- `ZASTOSUJ_NAWIGACJE.py`
+- `TEST_NAWIGACJA.py`
+- `TEST_INTEGRACJA_NAWIGACJI.py`
 
-- Nowy element menu **Centrum decyzji**: propozycje z dokumentów i projektów oraz oczekujące pisma ze Skrzynki wpływu.
-- Na ekranach istniejących dokumentów i projektów pojawia się przycisk **Zaproponuj czynności**.
-- Regułowe propozycje: sprawdzenie zobowiązań sądu, doręczeń, posiedzeń, płatności, mediacji, opinii biegłych i literalnych wzmianek o terminach.
-- Możliwość edytowania opisów, rodzaju i priorytetu; wpisania źródła, dat i sposobu obliczenia; dodawania propozycji ręcznie, odrzucenia albo zatwierdzenia.
-- Zapis zadania wyłącznie po zaznaczeniu propozycji i świadomym zatwierdzeniu; historia działań zachowana.
-- **Brak automatycznego liczenia terminów.** Przy wyborze „Termin procesowy” program wymaga ręcznie zweryfikowanych dat początkowej i końcowej, podstawy i sposobu obliczenia.
-- Jeśli dokument zmieni się po analizie, zatwierdzenie zostanie zablokowane do ponownej analizy.
-- Migracja tworzy nowe tabele i zwiększa schemat SQLite do **325**. Integrator **nie dotyka danych użytkownika** na GitHubie; uruchamiany EXE doda tabele po uruchomieniu na danej bazie.
+Trzy dotyczą wcześniejszego obiegu korespondencji, cztery nowej nawigacji.
 
-## Ograniczenia
+**W folderze `.github/workflows/`** zastąp dotychczasowy plik `main.yml` wersją z paczki. Nie wgrywaj `main.yml` do katalogu głównego.
 
-To **lokalny silnik regułowy**, a nie językowy model AI czy samodzielna analiza prawna. Nie rozstrzyga o dopuszczalności środka zaskarżenia, nie oblicza terminu procesowego, nie wysyła korespondencji, nie wystawia monitów automatycznie. Dla nagrań nie zgaduje transkrypcji, a skany wymagają OCR. Gdy tekst nie jest dostępny, pokazuje propozycję ręcznej analizy.
+Zatwierdź zmiany. Wejdź w `Actions` i śledź **najnowszy przebieg**, a nie starsze uruchomienia: https://github.com/Rak19937/Kancelaria-RK/actions.
 
-Pierwsze testy najlepiej wykonać na przykładowej sprawie w **oddzielnym folderze Portable**. Dopiero po ich pomyślnym wyniku i wykonaniu pełnego backupu rozważ podłączenie bazy rzeczywistej.
+Workflow sam zastosuje aktualizacje po kolei: istniejące 0.3.4 → korespondencja 0.3.5 → nawigacja 0.3.6. Gdy integrator jest już zastosowany, pominie ponowną podmianę.
 
-**Testy lokalne:** `python TEST_ACTION_CENTER.py` (13 testów); pełny build Windows i testy integracyjne są wykonywane po commitach w Actions.
+Po pełnym zielonym przebiegu w sekcji `Artifacts` będzie `RK-KANCELARIA-WINDOWS-PORTABLE`. Pobierz i rozpakuj w nowym katalogu. Zachowaj starą wersję i jej folder `Data`.
+
+## Co zmieniono
+
+- W zakładce sprawy **Terminy** każdy termin będący zadaniem ma klikalny tytuł, przycisk **Otwórz** i **Do kosza**.
+- Alerty są odrębne od zadań; automatycznego alertu do istniejącego zadania nie pokazujemy jako osobnego terminu.
+- Pole „następna czynność w sprawie” to nie zadanie. Ma osobny przycisk **Wyczyść datę**, bez kasowania sprawy.
+- Na ekranie edycji zadania/terminu jest także przycisk przeniesienia do Kosza.
+- Kliknięcie tytułu zadania na Pulpicie, w widoku Dzisiaj, na liście zadań, w karcie sprawy i w kalendarzu prowadzi do konkretnego zadania.
+- Kalendarz odsyła do odpowiedniego zadania, zdarzenia procesowego lub zdarzenia kancelarii, nie tylko do sprawy.
+- Dokumenty, projekty i zadania pokazują odnośniki do rzeczywistych powiązanych rekordów, w tym do korespondencji 0.3.5.
+
+Nie jest to automatyczne dopasowanie tytułów po tekście (np. każde wystąpienie słowa „mediacja” nie stanie się linkiem). Linki wynikają z identyfikatorów powiązań już zapisanych w bazie.
+
+## Bezpieczeństwo
+
+- Integratory modyfikują tylko kod (`app.py` i `README.md`), nie otwierają danych użytkownika.
+- Zmiana numeru schematu do `327` jest addytywna; nowe widoki korzystają z istniejących tabel.
+- Usunięcie zadania/terminu przez przycisk przenosi rekord do **Kosza**, a nie usuwa go bezpowrotnie.
+- Data „następna czynność” jest czyszczona osobno i rejestrowana w dzienniku zmian.
+- Najpierw przeprowadź testy na fikcyjnych danych.
+
+Jeśli GitHub pokaże `failure`, zachowaj stary program i podaj numer przebiegu. Lokalnie wykonano testy logiki oraz integratora; **pełnej kompilacji Windows nowej wersji jeszcze nie wykonano**.
