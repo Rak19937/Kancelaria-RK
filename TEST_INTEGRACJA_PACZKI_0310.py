@@ -160,7 +160,20 @@ def fixture(tmp):
         install.REGRESSION_TEST_BLOBS[name] = install.git_blob_sha(source)
     wf=(repo/'.github/workflows/main.yml')
     wf.parent.mkdir(parents=True)
-    fake_workflow=(PKG/'fixtures/.github/workflows/main.yml.txt').read_text(encoding='utf-8')
+    # Niewielki wzorzec workflow jest wbudowany w test, aby GitHub Actions
+    # nie wymagał osobnego pliku w ukrytym katalogu fixtures/.github.
+    # Test nadal wywołuje rzeczywisty instalator oraz sprawdza transakcję i rollback.
+    fake_workflow = (
+        "name: Minimal test workflow fixture\n"
+        "jobs:\n"
+        "  test:\n"
+        "    steps:\n"
+        "      - name: Tests\n"
+        "        run: |\n"
+        "          python TEST_INTEGRACJA_CASEFLOW.py\n"
+        "          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"
+        "          python RK_KANCELARIA_DESKTOP.pyw --self-test\n"
+    )
     wf.write_text(fake_workflow,encoding='utf-8')
     install.WORKFLOW_BLOB=install.git_blob_sha(fake_workflow)
     (repo/'Data').mkdir()
