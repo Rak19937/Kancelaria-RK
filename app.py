@@ -50,6 +50,8 @@ from rk_unified_preview import render_preview, serve_local_file, serve_pdf_page,
 from rk_action_center import ActionCenterMixin, ensure_action_center_schema
 from rk_correspondence import CorrespondenceMixin, ensure_correspondence_schema
 from rk_record_navigation import case_deadline_rows, linked_records_panel, safe_back
+from rk_workspace_plus import WorkspacePlusMixin, ensure_workspace_plus_schema, appointments_table, assignee_html, selected_ids, set_task_assignees, nav_strip, linked_sidecases, archived_appointments_html, task_assignees_map, upcoming_alerts_multi as upcoming_alerts
+from rk_case_categories import CaseCategoryMixin, ensure_case_categories_schema, category_form, save_categories, category_map, category_chips
 from rk_document_hub import DocumentHubMixin, case_document_rows, ensure_document_hub_schema
 from rk_inbox import InboxMixin, ensure_inbox_schema
 from rk_paths import resolve_runtime_paths, installed_data_dir
@@ -64,8 +66,8 @@ from rk_smart import (
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.3.6-dev1"
-SCHEMA_VERSION = 327
+VERSION = "0.3.7-dev1"
+SCHEMA_VERSION = 329
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
 APP_MODE = RUNTIME_PATHS.mode
@@ -1304,6 +1306,8 @@ def init_db() -> None:
         ensure_document_hub_schema(con)
         ensure_action_center_schema(con)
         ensure_correspondence_schema(con)
+        ensure_workspace_plus_schema(con)
+        ensure_case_categories_schema(con)
         # Scala stare osobne monity/alerty i zadania. Operacja jest idempotentna.
         reconcile_task_alerts(con)
 
@@ -2502,13 +2506,16 @@ def is_case_pinned(user_id: int | None, case_id: int) -> bool:
         return bool(con.execute("SELECT 1 FROM user_case_pins WHERE user_id=? AND case_id=?",(user_id,case_id)).fetchone())
 
 def layout(title: str, body: str, active: str = "") -> str:
+    body = nav_strip(title) + body
     user = current_request_user()
     nav_sections = [
         ("PRACA", [
             ("/", "⌂", "Pulpit", "dashboard"),
             ("/today", "◷", "Dzisiaj", "today"),
-            ("/calendar", "▦", "Kalendarz", "calendar"),
+            ("/calendar", "▦", "Kalendarz kancelarii", "calendar"),
+            ("/my-calendar", "▣", "Mój kalendarz", "mycalendar"),
             ("/cases", "§", "Sprawy", "cases"),
+            ("/case-categories", "▧", "Kategorie spraw", "case-categories"),
             ("/cases?mine=1", "◎", "Moje sprawy", "my_cases"),
             ("/tasks", "✓", "Zadania", "tasks"),
             ("/documents", "▤", "Dokumenty", "documents"),
@@ -2858,7 +2865,7 @@ def open_containing_folder(path: Path) -> tuple[bool,str]:
     except Exception as exc: return False,str(exc)
 
 
-class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
+class Handler(CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
     server_version = f"{APP_NAME}/{VERSION}"
 
     def handle_one_request(self):
@@ -3136,11 +3143,15 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
             if path == "/": return self.dashboard()
             if path == "/today": return self.today_page(qs)
             if path == "/calendar": return self.calendar_page(qs)
+            if path == "/my-calendar": return self.my_calendar_page(qs)
+            if re.fullmatch(r"/appointment/\d+",path): return self.appointment_page(int(path.split("/")[2]))
+            if re.fullmatch(r"/case/\d+/sidecases",path): return self.sidecase_page(int(path.split("/")[2]))
             if path == "/law": return self.law_page(qs)
             if re.fullmatch(r"/law/[A-Za-z0-9_-]+", path): return self.law_page(qs, path.split("/")[2].upper())
             if path == "/quick-add": return self.quick_add_page(qs)
             if path == "/deadline": return self.deadline_page(qs)
             if path == "/cases": return self.cases(qs, closed_only=False)
+            if path == "/case-categories": return self.category_catalog_page()
             if path == "/cases/closed": return self.cases(qs, closed_only=True)
             if path == "/case/new": return self.case_new()
             if path == "/entities": return self.entities_page(qs)
@@ -3336,6 +3347,15 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
             if path == "/view/save": return self.saved_view_save(fields)
             if re.fullmatch(r"/view/\d+/delete", path): return self.saved_view_delete(int(path.split('/')[2]), fields)
             if path == "/deadline/create": return self.deadline_create(fields)
+            if path == "/case-category/create": return self.category_create(fields)
+            if re.fullmatch(r"/case-category/\d+/rename",path): return self.category_rename(int(path.split("/")[2]),fields)
+            if path == "/appointment/create": return self.appointment_save(fields)
+            if re.fullmatch(r"/appointment/\d+/update",path): return self.appointment_save(fields,int(path.split("/")[2]))
+            if re.fullmatch(r"/appointment/\d+/delete",path): return self.appointment_delete(int(path.split("/")[2]),fields)
+            if re.fullmatch(r"/appointment/\d+/restore",path): return self.appointment_restore(int(path.split("/")[2]),fields)
+            if re.fullmatch(r"/task/\d+/assignees",path): return self.task_assignments_save(int(path.split("/")[2]),fields)
+            if re.fullmatch(r"/case/\d+/sidecase",path): return self.sidecase_create(int(path.split("/")[2]),fields)
+            if re.fullmatch(r"/sidecase/\d+/status",path): return self.sidecase_status(int(path.split("/")[2]),fields)
             if re.fullmatch(r"/case/\d+/clear-next-date",path): return self.clear_case_next_date(int(path.split("/")[2]),fields)
             if path == "/quick/event": return self.quick_event_add(fields)
             if path == "/quick/note": return self.quick_note_add(fields)
@@ -3634,6 +3654,7 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
 
     def quick_add_page(self,qs):
         case_opts,user_opts=self._quick_case_and_user_options()
+        with db() as con: assignees_html_task=assignee_html(con,'task')
         event_opts=''.join(f"<option>{esc(x)}</option>" for x in EVENT_TYPES)
         doc_opts=''.join(f"<option>{esc(x)}</option>" for x in DOC_TYPES)
         doc_status_opts=''.join(f"<option>{esc(x)}</option>" for x in DOC_STATUSES)
@@ -3643,8 +3664,8 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
             return self.send_html(layout('Dodaj czynność',"<div class='card'><h1>Dodaj czynność</h1><p>Najpierw utwórz aktywną sprawę.</p><a class='btn primary' href='/case/new'>+ Nowa sprawa</a></div>"))
         body=f"""<div class='topbar'><div><h1>+ Dodaj czynność</h1><div class='sub'>Szybkie dodawanie z dowolnego miejsca w programie.</div></div><div><a class='btn' href='/case/new'>+ Sprawa</a> <a class='btn' href='/draft/new'>+ Projekt pisma</a></div></div>{notice}
         <div class='quick-add-grid'>
-          <div class='card quick-add-card'><h2>Zadanie / monit</h2><form method='post' action='/task/create' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=zadanie'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div><label>Rodzaj</label><select name='task_type'><option>Zadanie</option><option>Monit</option><option>Termin procesowy</option><option>Płatność</option></select></div><div><label>Termin</label><input type='date' name='due_date'></div><div class='full'><label>Co trzeba zrobić? *</label><input name='title' required></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div><div><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div><div class='full'><label>Czekamy na / zależność</label><input name='depends_on'></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></div>
-          <div class='card quick-add-card' id='deadline'><h2>Termin procesowy</h2><div class='small muted' style='margin-bottom:10px'>Pomocnicze wyliczenie — dzień początkowy nie jest liczony; końcowa sobota/niedziela/święto jest przesuwana. Zawsze zweryfikuj podstawę prawną.</div><form method='post' action='/deadline/create' class='form-grid'><input type='hidden' name='return_to' value='/today'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div class='full'><label>Czynność *</label><input name='title' required placeholder='np. Wnieść odpowiedź na zażalenie'></div><div><label>Data początkowa *</label><input type='date' name='base_date' required></div><div><label>Liczba dni *</label><input type='number' min='0' max='3650' name='days' required value='7'></div><div><label>Sposób liczenia</label><select name='rule'><option value='calendar'>Dni kalendarzowe / procesowe</option><option value='business'>Dni robocze</option></select></div><div><label>Priorytet</label><select name='priority'><option value='high'>Wysoki</option><option value='normal'>Normalny</option></select></div><div class='full'><label>Podstawa / źródło terminu</label><input name='source' placeholder='np. doręczenie 11.09.2026, art. ...'></div><div class='full'><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div><div class='full'><button class='btn primary'>Wylicz i dodaj termin</button></div></form></div>
+          <div class='card quick-add-card'><h2>Zadanie / monit</h2><form method='post' action='/task/create' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=zadanie'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div><label>Rodzaj</label><select name='task_type'><option>Zadanie</option><option>Monit</option><option>Termin procesowy</option><option>Płatność</option></select></div><div><label>Termin</label><input type='date' name='due_date'></div><div class='full'><label>Co trzeba zrobić? *</label><input name='title' required></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div><div class='full'><label>Czekamy na / zależność</label><input name='depends_on'></div><input type='hidden' name='_multi_assignees' value='1'>{assignees_html_task}<div class='full'><button class='btn primary'>Dodaj</button></div></form></div>
+          <div class='card quick-add-card' id='deadline'><h2>Termin procesowy</h2><div class='small muted' style='margin-bottom:10px'>Pomocnicze wyliczenie — dzień początkowy nie jest liczony; końcowa sobota/niedziela/święto jest przesuwana. Zawsze zweryfikuj podstawę prawną.</div><form method='post' action='/deadline/create' class='form-grid'><input type='hidden' name='return_to' value='/today'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div class='full'><label>Czynność *</label><input name='title' required placeholder='np. Wnieść odpowiedź na zażalenie'></div><div><label>Data początkowa *</label><input type='date' name='base_date' required></div><div><label>Liczba dni *</label><input type='number' min='0' max='3650' name='days' required value='7'></div><div><label>Sposób liczenia</label><select name='rule'><option value='calendar'>Dni kalendarzowe / procesowe</option><option value='business'>Dni robocze</option></select></div><div><label>Priorytet</label><select name='priority'><option value='high'>Wysoki</option><option value='normal'>Normalny</option></select></div><div class='full'><label>Podstawa / źródło terminu</label><input name='source' placeholder='np. doręczenie 11.09.2026, art. ...'></div><input type='hidden' name='_multi_assignees' value='1'>{assignees_html_task}<div class='full'><button class='btn primary'>Wylicz i dodaj termin</button></div></form></div>
           <div class='card quick-add-card'><h2>Zdarzenie na osi czasu</h2><form method='post' action='/quick/event' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=zdarzenie'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div><label>Data</label><input type='date' name='event_date' value='{date.today().isoformat()}'></div><div><label>Typ</label><select name='event_type'>{event_opts}</select></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><textarea name='description'></textarea></div><div class='full'><button class='btn primary'>Dodaj zdarzenie</button></div></form></div>
           <div class='card quick-add-card'><h2>Notatka</h2><form method='post' action='/quick/note' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=notatka'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div class='full'><label>Treść *</label><textarea name='note' required></textarea></div><div class='full'><button class='btn primary'>Dodaj notatkę</button></div></form></div>
           <div class='card quick-add-card'><h2>Dokument / pismo</h2><form method='post' enctype='multipart/form-data' action='/quick/document' class='form-grid'><input type='hidden' name='return_to' value='/quick-add?done=dokument'><div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz —</option>{case_opts}</select></div><div><label>Data dokumentu</label><input type='date' name='doc_date'></div><div><label>Data wpływu</label><input type='date' name='received_date'></div><div><label>Data doręczenia</label><input type='date' name='delivered_date'></div><div><label>Rodzaj</label><select name='doc_type'>{doc_opts}</select></div><div><label>Status</label><select name='doc_status'>{doc_status_opts}</select></div><div><label>Nadawca</label><input name='sender'></div><div><label>Autor dokumentu</label><input name='document_author'></div><div><label>Tagi</label><input name='tags' placeholder='np. pilne, dowód'></div><div class='full'><label>Tytuł *</label><input name='title' required></div><div class='full'><label>Opis</label><input name='description'></div><div class='full'><label>Pismo / dokument główny</label><input type='file' name='file'></div><div class='full'><label>Załączniki do pisma</label><input type='file' name='attachments[]' multiple><div class='small muted'>Możesz zaznaczyć kilka plików. Zostaną zapisane pod pismem jako jego załączniki.</div></div><div class='full'><button class='btn primary'>Dodaj dokument</button></div></form></div>
@@ -3689,6 +3710,8 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
                               VALUES(?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,0)""",
                             (cid,title,due_date,priority,assigned,'',source,'Termin procesowy',a,a,
                              f.get('base_date',''),days,rule_label,source))
+            if f.get('_multi_assignees')=='1':
+                set_task_assignees(con,cur.lastrowid,selected_ids(f,con))
             sync_task_alert(con,cur.lastrowid,a)
             details=(f"Czynność: {_change_value(title)}\nData początkowa: {_change_value(f.get('base_date',''))}\n"
                      f"Reguła: {_change_value(str(days)+' '+rule_label)}\nWyliczony termin: {_change_value(due_date)}")
@@ -3806,7 +3829,7 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
             </div>
           </div>
           <div class="dashboard-hero-tools">
-            <div class="live-clock-card" aria-label="Aktualny czas"><div class="live-clock-label">AKTUALNY CZAS</div><div id="liveClock" class="live-clock" data-live-clock>--:--:--</div><div id="liveClockDate" class="live-clock-date">{esc(today_label)}</div></div>
+            <a href="/my-calendar" class="live-clock-card" style="display:block;text-decoration:none;color:inherit" title="Otwórz mój kalendarz" aria-label="Otwórz mój kalendarz"><div class="live-clock-label">AKTUALNY CZAS</div><div id="liveClock" class="live-clock" data-live-clock>--:--:--</div><div id="liveClockDate" class="live-clock-date">{esc(today_label)} · kliknij, by otworzyć kalendarz</div></a>
             <form class="searchbar dashboard-search" action="/search"><input name="q" data-global-search placeholder="Szukaj sprawy, klienta, sygnatury lub dokumentu…"><button class="btn primary">Szukaj</button></form>
             <div class="quick-actions"><a class="btn primary" href="/quick-add">+ Dodaj czynność</a><a class="btn" href="/today">Dzisiaj</a><a class="btn" href="/case/new">+ Nowa sprawa</a><a class="btn" href="/tasks">Zadania</a><a class="btn" href="/documents">Dokumenty</a><a class="btn" href="/draft/new">+ Projekt pisma</a></div>
           </div>
@@ -3952,6 +3975,9 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
         q=(qs.get('q') or [''])[0].strip()
         status=(qs.get('status') or [''])[0]
         tag=(qs.get('tag') or [''])[0].strip()
+        try: category_filter=int((qs.get('category_id') or ['0'])[0] or 0)
+        except ValueError: category_filter=0
+        category_filter=max(category_filter,0)
         mine=(qs.get('mine') or [''])[0]=='1'
         focus=(qs.get('focus') or [''])[0].strip().lower()
         if focus not in {'','waiting','no-next','7d'}: focus=''
@@ -3979,6 +4005,9 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
             sql += " AND c.status=?"; params.append(status)
         if tag:
             sql += " AND EXISTS (SELECT 1 FROM case_tags ct JOIN tags tg ON tg.id=ct.tag_id WHERE ct.case_id=c.id AND tg.name=? COLLATE NOCASE)"; params.append(tag)
+        if category_filter:
+            sql += " AND EXISTS (SELECT 1 FROM case_category_assignments cc WHERE cc.case_id=c.id AND cc.category_id=?)"
+            params.append(category_filter)
         if focus=='waiting': sql += " AND c.waiting_for<>''"
         elif focus=='no-next': sql += " AND (c.next_step='' OR c.next_date='')"
         elif focus=='7d':
@@ -3987,12 +4016,15 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
         sql += " ORDER BY pinned DESC, CASE c.status WHEN 'todo' THEN 0 WHEN 'active' THEN 1 WHEN 'waiting' THEN 2 WHEN 'suspended' THEN 3 ELSE 4 END, c.next_date='' ASC, c.next_date, c.title"
         with db() as con:
             rows=con.execute(sql,params).fetchall()
+            category_by_case=category_map(con,[r["id"] for r in rows])
+            all_categories=con.execute("SELECT id,name FROM case_category_catalog ORDER BY name COLLATE NOCASE").fetchall()
             sig_map=load_external_signature_map(con,[r['id'] for r in rows if not (r['signature'] or '').strip()])
             tag_map={}
             row_ids={r['id'] for r in rows}
             for r in con.execute("SELECT ct.case_id,t.name FROM case_tags ct JOIN tags t ON t.id=ct.tag_id ORDER BY t.name"):
                 if r['case_id'] in row_ids:
                     tag_map.setdefault(r['case_id'],[]).append(r['name'])
+        def categories_for(cid):return category_chips(category_by_case.get(cid,[]))
         def tags_for(cid,limit=3):
             tags=tag_map.get(cid,[]); visible=tags[:limit]; rest=tags[limit:]
             extra='&mine=1' if mine else ''
@@ -4005,6 +4037,7 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
         if q: common.append('q='+quote(q))
         if status and not closed_only: common.append('status='+quote(status))
         if tag: common.append('tag='+quote(tag))
+        if category_filter: common.append('category_id='+str(category_filter))
         if mine: common.append('mine=1')
         if focus: common.append('focus='+quote(focus))
         def view_url(which): return base_path+'?'+'&'.join(common+['view='+which])
@@ -4029,7 +4062,7 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
                   <div class='case-card-top'><div><a class='case-signature' href='/case/{r['id']}'>{esc(primary)}</a>{internal}</div><div class='case-control-bar'><form method='post' action='/case/{r['id']}/pin'><button class='pin-btn {pincls}' title='Przypnij / odepnij'>{pin}</button></form>{badge(r['status'])}</div></div>
                   <a class='case-card-title' href='/case/{r['id']}'>{esc(r['title'])}</a>{client}<div>{lead} {waiting}</div>
                   <div class='case-action'><span class='case-date'>{dt}</span><span class='case-arrow'>→</span><span class='case-next clamp-2' title='{esc(r['next_step'])}'>{nxt}</span></div>
-                  <div class='case-footer'><div class='case-tags'>{tags_for(r['id']) or '<span class="small muted">bez tagów</span>'}</div><a class='btn small open-arrow' href='/case/{r['id']}' title='Otwórz sprawę'>›</a></div>{archive_actions}
+                  <div class='case-footer'><div class='case-tags'>{categories_for(r['id'])} {tags_for(r['id'])}</div><a class='btn small open-arrow' href='/case/{r['id']}' title='Otwórz sprawę'>›</a></div>{archive_actions}
                 </div>""")
             list_html='<div class="case-list">'+''.join(cards)+'</div>' if cards else '<div class="empty">Brak spraw.</div>'
         else:
@@ -4043,7 +4076,7 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
                 if r['subject']: meta.append(esc(r['subject']))
                 pin='★' if r['pinned'] else '☆'; pincls='on' if r['pinned'] else ''
                 row_actions=(f"<a class='btn small' href='/case/{r['id']}/edit'>Edytuj</a> <form method='post' action='/case/{r['id']}/reopen' style='display:inline' onsubmit=\"return confirm('Przywrócić tę sprawę do aktywnych?');\"><button class='btn small primary'>Przywróć</button></form> <a class='btn small danger' href='/case/{r['id']}/delete'>Usuń</a>" if closed_only else f"<a class='btn small open-arrow' href='/case/{r['id']}'>›</a>")
-                trs.append(f"<tr><td><form method='post' action='/case/{r['id']}/pin' style='display:inline'><button class='pin-btn {pincls}'>{pin}</button></form><a class='case-link' href='/case/{r['id']}'>{esc(primary)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td class='case-title-cell'><a class='case-link' href='/case/{r['id']}'>{esc(r['title'])}</a><div class='small muted'>{' · '.join(meta)}</div><div class='case-tags' style='margin-top:5px'>{tags_for(r['id'])}</div></td><td>{badge(r['status'])}</td><td>{fmt_date(r['next_date'])}</td><td class='next-cell'><div class='clamp-2'>{esc(r['next_step']) or '—'}</div></td><td>{row_actions}</td></tr>")
+                trs.append(f"<tr><td><form method='post' action='/case/{r['id']}/pin' style='display:inline'><button class='pin-btn {pincls}'>{pin}</button></form><a class='case-link' href='/case/{r['id']}'>{esc(primary)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td class='case-title-cell'><a class='case-link' href='/case/{r['id']}'>{esc(r['title'])}</a><div class='small muted'>{' · '.join(meta)}</div><div class='case-tags' style='margin-top:5px'>{categories_for(r['id'])} {tags_for(r['id'])}</div></td><td>{badge(r['status'])}</td><td>{fmt_date(r['next_date'])}</td><td class='next-cell'><div class='clamp-2'>{esc(r['next_step']) or '—'}</div></td><td>{row_actions}</td></tr>")
             list_html=f"<div class='card' style='padding:8px 14px'><table class='case-table'><tr><th>Sygnatura</th><th>Sprawa</th><th>Status</th><th>Termin</th><th>Następny krok</th><th></th></tr>{''.join(trs) or '<tr><td colspan=6>Brak spraw.</td></tr>'}</table></div>"
         active_statuses={k:v for k,v in STATUS_LABELS.items() if k!='closed'}
         opts=''.join(f"<option value='{k}' {'selected' if status==k else ''}>{v}</option>" for k,v in active_statuses.items())
@@ -4053,8 +4086,13 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
         else: page_title='Sprawy'; page_sub=f"{len(rows)} aktywnych spraw · widok {'kompaktowy' if view=='compact' else 'szczegółowy'}"
         status_filter='' if closed_only else f"<div><label>Status</label><select name='status'><option value=''>Wszystkie aktywne</option>{opts}</select></div>"
         mine_hidden="<input type='hidden' name='mine' value='1'>" if mine else ''
+        category_filter_control=("<div><label>Kategoria sprawy</label><select name='category_id'>"
+            +"<option value=''>Wszystkie kategorie</option>"
+            +''.join(f"<option value='{r['id']}' {'selected' if category_filter==r['id'] else ''}>{esc(r['name'])}</option>" for r in all_categories)
+            +"</select></div>")
         extra_action=("<a class='btn' href='/cases'>← Aktywne sprawy</a>" if closed_only else ("<a class='btn' href='/cases'>Wszystkie sprawy</a>" if mine else "<a class='btn' href='/cases?mine=1'>Moje sprawy</a> <a class='btn' href='/cases/closed'>Sprawy zakończone</a>"))
         new_button='' if closed_only else '<a class="btn primary" href="/case/new">+ Nowa sprawa</a>'
+        extra_action += ' <a class="btn" href="/case-categories">Kategorie spraw</a>'
         save_view=self._save_view_form(self.path)
         focus_bar=''
         if not closed_only:
@@ -4064,7 +4102,7 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
                 return f"<a class='btn small {active}' href='/cases?view={view}{suffix}{('&focus='+key) if key else ''}'>{label}</a>"
             focus_bar="<div class='quick-filter-bar'><span class='small muted'>Szybkie widoki:</span> "+''.join([focus_link('','Wszystkie'),focus_link('7d','Następne 7 dni'),focus_link('waiting','Czekamy na'),focus_link('no-next','Brak następnego ruchu')])+"</div>"
         body=f"""<div class='topbar'><div><h1>{page_title}</h1><div class='sub'>{page_sub}</div></div><div>{extra_action} {new_button}</div></div>{tag_note}{focus_bar}
-        <details class='card filter-panel'><summary>Filtry spraw</summary><form class='form-grid' method='get' style='margin-top:12px'>{mine_hidden}<input type='hidden' name='view' value='{view}'>{f"<input type='hidden' name='focus' value='{esc(focus)}'>" if focus else ''}<div><label>Szukaj</label><input name='q' value='{esc(q)}' placeholder='Sygnatura, klient, prowadzący, oczekiwanie, tag…'></div>{status_filter}<div class='full'><button class='btn'>Filtruj</button> <a class='btn' href='{clear_url}'>Wyczyść</a> <a class='btn' href='/tags'>Tagi</a></div></form></details><br>
+        <details class='card filter-panel'><summary>Filtry spraw</summary><form class='form-grid' method='get' style='margin-top:12px'>{mine_hidden}<input type='hidden' name='view' value='{view}'>{f"<input type='hidden' name='focus' value='{esc(focus)}'>" if focus else ''}<div><label>Szukaj</label><input name='q' value='{esc(q)}' placeholder='Sygnatura, klient, prowadzący, oczekiwanie, tag…'></div>{status_filter}{category_filter_control}<div class='full'><button class='btn'>Filtruj</button> <a class='btn' href='{clear_url}'>Wyczyść</a> <a class='btn' href='/tags'>Tagi</a></div></form></details><br>
         <div class='cases-toolbar'><div class='small muted'>⭐ oznacza sprawę przypiętą do Twojego konta.</div><div class='view-switch'><a class='view-tab {'active' if view=='compact' else ''}' href='{view_url('compact')}'>Kompaktowy</a><a class='view-tab {'active' if view=='detailed' else ''}' href='{view_url('detailed')}'>Szczegółowy</a></div></div>{save_view}{list_html}"""
         self.send_html(layout(page_title,body,active_key))
 
@@ -4073,6 +4111,7 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
         with db() as con:
             users=con.execute("SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name").fetchall()
             entities=con.execute("SELECT id,display_name,pesel,nip,krs FROM entities ORDER BY display_name COLLATE NOCASE").fetchall()
+            category_field=category_form(con)
         lead_opts='<option value="">— nie przypisano —</option>'+''.join(f"<option value='{u['id']}'>{esc(user_display_name(u))}</option>" for u in users)
         entity_opts='<option value="">— wybierz z kartoteki —</option>'+''.join(f"<option value='{e['id']}'>{esc(entity_display(e))}{' · PESEL '+esc(e['pesel']) if e['pesel'] else ''}{' · NIP '+esc(e['nip']) if e['nip'] else ''}</option>" for e in entities)
         body=f"""<div class='topbar'><div><h1>Nowa sprawa</h1><div class='sub'>Na początek wystarczą podstawowe informacje. Resztę możesz uzupełnić później.</div></div><div><a class='btn' href='/case/import'>Importuj sprawę</a></div></div>
@@ -4081,11 +4120,11 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
         <div class='full important-field'><label>Czego dotyczy sprawa? / Przedmiot * <span class='help-dot' title='Jedno krótkie zdanie, po którym każdy od razu rozumie sprawę.'>?</span></label><input name='subject' required placeholder='np. zapłata wynikająca z umowy'><div class='small muted'>To zdanie będzie widoczne na liście i w nagłówku sprawy.</div></div>
         <div><label>Klient — kartoteka</label><select name='client_entity_id'>{entity_opts}</select></div><div><label>Klient — wpis tekstowy</label><input name='client' placeholder='np. Klient A'></div>
         <div class='full'><label>Co trzeba zrobić dalej?</label><input name='next_step' placeholder='np. przygotować odpowiedź na pozew'></div><div><label>Termin następnej czynności</label><input type='date' name='next_date'></div><div><label>Status</label><select name='status'>{opts}</select></div>
-        <details class='advanced-fields full'><summary>Więcej informacji — sygnatury, sąd, prowadzący, druga strona…</summary><div class='form-grid'>
+        {category_field}<details class='advanced-fields full'><summary>Więcej informacji — sygnatury, sąd, prowadzący, druga strona…</summary><div class='form-grid'>
         <div><label>Sygnatura sądowa</label><input name='signature'></div><div><label>Sygnatura wewnętrzna</label><input name='internal_signature' placeholder='np. RK/2026/001'></div>
         <div><label>Przeciwnik / druga strona — kartoteka</label><select name='opponent_entity_id'>{entity_opts}</select></div><div><label>Prowadzący sprawę</label><select name='lead_user_id'>{lead_opts}</select></div>
         <div class='full'><label>Czekamy na / powód oczekiwania</label><input name='waiting_for' placeholder='np. sąd, klient, przeciwnik, urząd'></div>
-        <div><label>Sąd / organ</label><input name='court'></div><div><label>Wydział</label><input name='department'></div><div><label>Kategoria</label><input name='category' placeholder='np. cywilna, rodzinna, karna'></div>
+        <div><label>Sąd / organ</label><input name='court'></div><div><label>Wydział</label><input name='department'></div><input type='hidden' name='category' value=''>
         <div class='full'><label>Tagi</label><input name='tags' placeholder='np. pilne, do analizy, termin'><div class='small muted'>Oddzielaj przecinkiem lub średnikiem.</div></div>
         <div class='full'><label>Notatki</label><textarea name='notes'></textarea></div></div></details>
         <div class='full form-actions'><button class='btn primary'>Utwórz sprawę</button> <a class='btn' href='/cases'>Anuluj</a></div></form></div>"""
@@ -4126,6 +4165,7 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
             cur=con.execute("INSERT INTO cases(signature,internal_signature,client,title,court,department,category,subject,status,waiting_for,next_step,next_date,notes,lead_user_id,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",tuple(vals)+(lead,author,author))
             cid=cur.lastrowid
             set_case_tags(con,cid,f.get('tags',''))
+            save_categories(con,cid,f)
             if client_eid: con.execute("INSERT INTO case_entities(case_id,entity_id,role,created_by,updated_by) VALUES(?,?, 'Klient',?,?)",(cid,client_eid,author,author))
             if opponent_eid: con.execute("INSERT INTO case_entities(case_id,entity_id,role,created_by,updated_by) VALUES(?,?, 'Przeciwnik',?,?)",(cid,opponent_eid,author,author))
             # Automatycznie zastosuj pierwszy szablon pasujący dokładnie do kategorii.
@@ -4400,7 +4440,12 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
                 relation_cases=con.execute('''SELECT id,signature,internal_signature,title,status FROM cases
                                               WHERE id<>? ORDER BY status='closed',signature='',signature,title COLLATE NOCASE''',(cid,)).fetchall()
             readonly=case_read_only(con,cid)
+            task_people=task_assignees_map(con,[t['id'] for t in tasks])
+            appointments_count=con.execute("SELECT COUNT(*) FROM case_appointments WHERE case_id=? AND status='planned'",(cid,)).fetchone()[0]
 
+        with db() as con:
+            assignees_html_task = assignee_html(con,'task')
+        with db() as con: selected_category_html=category_chips(category_map(con,[cid]).get(cid,[]))
         shown_sig,sig_kind=display_case_signature(cid,c['signature'],c['internal_signature'])
         primary=shown_sig if shown_sig!='Bez sygnatury' else (c['internal_signature'] or 'Bez sygnatury')
         shown_people=entities or parties
@@ -4420,7 +4465,7 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
 
         tab_meta=[
             ('dashboard','Pulpit',''),('history','Historia',str(len(timeline))),('documents','Dokumenty',str(len(docs))),
-            ('tasks','Zadania',str(len(open_tasks))),('deadlines','Terminy',str(len(next_dates))),
+            ('tasks','Zadania',str(len(open_tasks))),('deadlines','Terminy',str(len(next_dates)+appointments_count)),
             ('evidence','Dowody',str(len(assertions))),('strategy','Strategia',''),('hearing','Rozprawa',''),
             ('finances','Finanse',str(len(claims))),('people','Osoby',str(len(shown_people))),
             ('relations','Powiązania',str(relation_count)),('notes','Notatki',str(len(notes))),
@@ -4430,8 +4475,8 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
         header=f"""<div class='case-workspace-sticky' id='rkCaseContext'>
           <div class='case-workspace-head'><div class='case-workspace-identity'><div class='case-workspace-sig'>{esc(primary)}</div>
           <div class='case-workspace-parties'>{esc(party_line)}</div><h1>{esc(c['title'])}</h1></div>
-          <div class='case-workspace-actions'>{badge(c['status'])}{closed_actions}<a class='btn small' href='/case/{cid}/edit'>Edytuj</a><a class='btn small' href='/case/{cid}/export'>Eksport</a><a class='btn small danger' href='/case/{cid}/delete'>Usuń</a><a class='btn small' href='/case/{cid}?mode=advanced'>Widok techniczny</a></div></div>
-          <div class='case-workspace-meta'><span>{esc(c['court']) or 'Sąd/organ: —'}</span><span>{esc(c['category']) or 'Kategoria: —'}</span><div class='smart-tags'>{tags}</div></div>
+          <div class='case-workspace-actions'>{badge(c['status'])}{closed_actions}<a class='btn small' href='/case/{cid}/sidecases'>Sprawy poboczne</a><a class='btn small' href='/case/{cid}/edit'>Edytuj</a><a class='btn small' href='/case/{cid}/export'>Eksport</a><a class='btn small danger' href='/case/{cid}/delete'>Usuń</a><a class='btn small' href='/case/{cid}?mode=advanced'>Widok techniczny</a></div></div>
+          <div class='case-workspace-meta'><span>{esc(c['court']) or 'Sąd/organ: —'}</span><span>Kategorie: {selected_category_html}</span><div class='smart-tags'>{tags}</div></div>
           <nav class='case-tabs'>{tab_nav}</nav></div>"""
         readonly_html=(f"<div class='readonly-banner'><b>Sprawa zakończona.</b> Nadal możesz poprawiać jej dane i dokumenty albo <form method='post' action='/case/{cid}/reopen' style='display:inline'><button class='btn small'>przywrócić ją do aktywnych</button></form>.</div>" if c['status']=='closed' else '')
         ro_disabled=' disabled' if readonly else ''
@@ -4485,10 +4530,10 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
         elif tab=='tasks':
             task_rows=[]
             for t in tasks:
-                done=t['status']=='done'; assignee=esc(t['assigned_name']) if t['assigned_name'] else '—'
+                done=t['status']=='done'; assignee=esc(task_people.get(t['id']) or t['assigned_name'] or '—')
                 task_rows.append(f"<div class='workspace-task {'done' if done else ''}'><form method='post' action='/task/{t['id']}/toggle'><input type='hidden' name='case_id' value='{cid}'><input type='hidden' name='return_to' value='/case/{cid}?tab=tasks'><button class='task-check'>{'↩' if done else '✓'}</button></form><div><span class='mini-badge'>{esc(row_get(t,'task_type','Zadanie'))}</span> <a class='case-link' href='/task/{t['id']}/edit?return_to=%2Fcase%2F{cid}%3Ftab%3Dtasks'><b>{esc(t['title'])}</b></a><small>{fmt_date(t['due_date'])} · {assignee}{(' · '+esc(t['depends_on'])) if t['depends_on'] else ''}</small></div><a class='btn small' href='/task/{t['id']}/edit?return_to=%2Fcase%2F{cid}%3Ftab%3Dtasks'>Edytuj</a></div>")
             user_opts='<option value="">— bez przypisania —</option>'+''.join(f"<option value='{x['id']}'>{esc(user_display_name(x))}</option>" for x in users)
-            add='' if readonly else f"""<details class='card smart-add'><summary>+ Dodaj zadanie</summary><form method='post' action='/case/{cid}/task' class='form-grid'><input type='hidden' name='return_to' value='/case/{cid}?tab=tasks'><div><label>Rodzaj</label><select name='task_type'>{''.join(f'<option>{x}</option>' for x in ['Zadanie','Monit','Termin procesowy','Płatność'])}</select></div><div><label>Termin</label><input type='date' name='due_date'></div><div class='full'><label>Co trzeba zrobić?</label><input name='title' required></div><div><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div><div class='full'><label>Zależność</label><input name='depends_on'></div><div class='full'><label>Notatka</label><textarea name='notes'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details>"""
+            add='' if readonly else f"""<details class='card smart-add'><summary>+ Dodaj zadanie</summary><form method='post' action='/case/{cid}/task' class='form-grid'><input type='hidden' name='return_to' value='/case/{cid}?tab=tasks'><div><label>Rodzaj</label><select name='task_type'>{''.join(f'<option>{x}</option>' for x in ['Zadanie','Monit','Termin procesowy','Płatność'])}</select></div><div><label>Termin</label><input type='date' name='due_date'></div><div class='full'><label>Co trzeba zrobić?</label><input name='title' required></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div><div class='full'><label>Zależność</label><input name='depends_on'></div><div class='full'><label>Notatka</label><textarea name='notes'></textarea></div><input type='hidden' name='_multi_assignees' value='1'>{assignees_html_task}<div class='full'><button class='btn primary'>Dodaj</button></div></form></details>"""
             content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Zadania</h2><div class='muted'>Otwarte i wykonane czynności tej sprawy.</div></div></div>{add}<div class='card workspace-task-list'>{''.join(task_rows) or '<div class="empty">Brak zadań.</div>'}</div></section>"
 
         elif tab=='deadlines':
@@ -4497,6 +4542,28 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
             doc_scan=''.join(f"<form method='post' action='/document/{d['id']}/suggest-deadlines' class='doc-scan-row'><input type='hidden' name='return_to' value='/case/{cid}?tab=deadlines'><span><b>{esc(d['title'])}</b></span><button class='btn small'>Sprawdź treść</button></form>" for d in docs if not row_get(d,'parent_document_id',None))
             manual='' if readonly else f"""<details class='card smart-add'><summary>+ Wylicz termin procesowy</summary><form method='post' action='/deadline/create' class='form-grid'><input type='hidden' name='case_id' value='{cid}'><input type='hidden' name='return_to' value='/case/{cid}?tab=deadlines'><div class='full'><label>Czynność</label><input name='title' required></div><div><label>Data początkowa</label><input type='date' name='base_date' required></div><div><label>Liczba dni</label><input type='number' name='days' min='0' value='7' required></div><div><label>Sposób liczenia</label><select name='rule'><option value='calendar'>Kalendarzowe / procesowe</option><option value='business'>Robocze</option></select></div><div><label>Priorytet</label><select name='priority'><option value='high'>Wysoki</option><option value='normal'>Normalny</option></select></div><div class='full'><label>Podstawa / źródło</label><input name='source'></div><div class='full'><button class='btn primary'>Wylicz i dodaj</button></div></form></details>"""
             content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Terminy</h2><div class='muted'>Terminy są zawsze zatwierdzane przez użytkownika.</div></div><a class='btn' href='/calendar?case_id={cid}'>Kalendarz sprawy</a></div>{manual}<div class='grid'><div class='card span7 table-scroll'><table><tr><th>Data</th><th>Źródło</th><th>Czynność — otwórz</th><th>Akcje</th></tr>{deadline_table_html or '<tr><td colspan=4>Brak terminów.</td></tr>'}</table></div><div class='card span5'><h2>Sugestie z dokumentów</h2>{suggestions_html}<details><summary>Sprawdź dokumenty</summary>{doc_scan or '<div class="empty">Brak dokumentów.</div>'}</details></div></div></section>"
+
+            with db() as con:
+                appointment_lines=appointments_table(con,cid)
+                appointment_archive=archived_appointments_html(con,cid)
+                appointment_users=assignee_html(con,'appointment')
+            new_appointment=f"""<details class='card smart-add'><summary>+ Nowy termin ustalony (data bez wyliczania)</summary>
+                <form method='post' action='/appointment/create' class='form-grid'>
+                <input type='hidden' name='case_id' value='{cid}'>
+                <div class='full'><label>Nazwa *</label><input name='title' required placeholder='np. druga mediacja'></div>
+                <div><label>Data *</label><input type='date' name='appointment_date' required></div>
+                <div><label>Godzina</label><input type='time' name='appointment_time'></div>
+                <div><label>Rodzaj</label><input name='kind' value='Termin ustalony'></div>
+                <div><label>Miejsce</label><input name='location'></div>
+                <div class='full'><label>Notatka</label><textarea name='notes'></textarea></div>
+                {appointment_users}<div class='full'><button class='btn primary'>Dodaj termin</button></div></form></details>"""
+            content += (f"<div class='card'><h2>Terminy ustalone — wiele dat dla jednej sprawy</h2>"
+                        f"<p class='small muted'>Rozprawa, druga mediacja, posiedzenie i spotkania mogą istnieć równolegle. "
+                        f"Nie są automatycznie liczone jako terminy procesowe.</p>"
+                        f"{new_appointment}<table><tr><th>Data</th><th>Termin</th><th>Status</th><th></th></tr>"
+                        f"{appointment_lines or '<tr><td colspan=4>Brak terminów ustalonych.</td></tr>'}</table>"
+                        f"<details><summary>Kosz terminów ustalonych</summary>{appointment_archive or 'Brak usuniętych terminów.'}</details></div>"
+                        f"<div class='card'><a class='btn primary' href='/case/{cid}/sidecases'>Sprawy poboczne i wymagane dokumenty</a></div>")
 
         elif tab=='evidence':
             by_assertion={x['id']:[] for x in assertions}
@@ -4826,6 +4893,9 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
             case_dates = con.execute(
                 f"SELECT id,next_date,title,signature,internal_signature,next_step FROM cases WHERE next_date BETWEEN ? AND ?{' AND id=?' if case_filter else ''}", params
             ).fetchall()
+            appointments = con.execute(
+                f"SELECT * FROM case_appointments WHERE status='planned' AND appointment_date BETWEEN ? AND ?{' AND case_id=?' if case_filter else ''}", params
+            ).fetchall()
             cases = con.execute("SELECT id,title,signature,internal_signature FROM cases WHERE status<>'closed' ORDER BY signature='',signature,title").fetchall()
             users = con.execute("SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name").fetchall()
         bydate = {}; seen_calendar=set()
@@ -4848,6 +4918,9 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
                 add_item(r['next_date'], 'Następny termin', r['title'], r['case_id'], 'high',f"/process-event/{r['id']}/edit")
         for r in work_events:
             add_item(r['event_date'], r['event_type'] or 'Czynność', r['title'], r['case_id'], 'normal',f"/event/{r['id']}/edit")
+        for r in appointments:
+            add_item(r['appointment_date'],r['kind'],r['title']+((' · '+r['appointment_time']) if r['appointment_time'] else ''),
+                     r['case_id'],'high',f"/appointment/{r['id']}")
         for r in case_dates:
             # Pole ogólne w sprawie jest tylko fallbackiem. Jeżeli tego dnia mamy już
             # konkretną rozprawę, zadanie, mediację itp., nie dokładamy drugiego wpisu.
@@ -5355,6 +5428,7 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
             c=con.execute("SELECT * FROM cases WHERE id=?",(cid,)).fetchone()
             tags=', '.join(r['name'] for r in con.execute("SELECT t.name FROM case_tags ct JOIN tags t ON t.id=ct.tag_id WHERE ct.case_id=? ORDER BY t.name",(cid,)).fetchall()) if c else ''
             users=con.execute("SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name").fetchall()
+            category_field=category_form(con,cid)
         if not c: return self.send_error(404)
         opts=''.join(f"<option value='{k}' {'selected' if c['status']==k else ''}>{v}</option>" for k,v in STATUS_LABELS.items())
         lead_opts='<option value="">— nie przypisano —</option>'+''.join(f"<option value='{u['id']}' {'selected' if c['lead_user_id']==u['id'] else ''}>{esc(user_display_name(u))}</option>" for u in users)
@@ -5364,7 +5438,7 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
         <div class='full'><label>Nazwa sprawy * <span class='help-dot' title='Krótka nazwa robocza sprawy'>?</span></label><input name='title' required value='{esc(c['title'])}'></div><div class='full'><label>Klient / zlecający</label><input name='client' value='{esc(c['client'])}'></div>
         <div><label>Prowadzący sprawę</label><select name='lead_user_id'>{lead_opts}</select></div><div><label>Status</label><select name='status'>{opts}</select></div>
         <div class='full'><label>Czekamy na / powód oczekiwania</label><input name='waiting_for' value='{esc(c['waiting_for'])}' placeholder='np. sąd, klient, przeciwnik, urząd'></div>
-        <div><label>Sąd</label><input name='court' value='{esc(c['court'])}'></div><div><label>Wydział</label><input name='department' value='{esc(c['department'])}'></div><div><label>Kategoria</label><input name='category' value='{esc(c['category'])}'></div><div><label>Najbliższa data</label><input type='date' name='next_date' value='{esc(c['next_date'])}'></div>
+        <div><label>Sąd</label><input name='court' value='{esc(c['court'])}'></div><div><label>Wydział</label><input name='department' value='{esc(c['department'])}'></div>{category_field}<input type='hidden' name='category' value='{esc(c['category'])}'><div><label>Najbliższa data</label><input type='date' name='next_date' value='{esc(c['next_date'])}'></div>
         <div class='full'><label>Tagi</label><input name='tags' value='{esc(tags)}'></div><div class='full important-field'><label>Czego dotyczy sprawa? / Przedmiot <span class='help-dot' title='Opis widoczny na pulpicie i karcie sprawy'>?</span></label><input name='subject' value='{esc(c['subject'])}' placeholder='np. alimenty, zapłata, rozwód, odszkodowanie'></div><div class='full'><label>Następny krok</label><input name='next_step' value='{esc(c['next_step'])}'></div><div class='full'><label>Notatki</label><textarea name='notes'>{esc(c['notes'])}</textarea></div><div class='full'><button class='btn primary'>Zapisz</button> <a class='btn' href='/case/{cid}'>Wróć</a></div></form></div>
         <br><div class='card danger-zone'><h2>Usuwanie sprawy</h2><p class='muted'>Przed operacją program automatycznie tworzy pełny snapshot danych. Usunięcie wymaga dodatkowego potwierdzenia.</p><a class='btn danger' href='/case/{cid}/delete'>Przejdź do bezpiecznego usuwania</a></div>"""
         self.send_html(layout('Edycja',body,'cases'))
@@ -5396,6 +5470,10 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
                 details=(details+'\n'+line).strip()
             con.execute("UPDATE cases SET signature=?,internal_signature=?,client=?,title=?,court=?,department=?,category=?,subject=?,status=?,waiting_for=?,next_step=?,next_date=?,notes=?,lead_user_id=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(*vals,lead,author,cid))
             set_case_tags(con,cid,f.get('tags',''))
+            changes=save_categories(con,cid,f)
+            if changes and changes[0]!=changes[1]:
+                audit(con,cid,'case',cid,'Zmieniono kategorie sprawy',
+                      ', '.join(changes[0])+' → '+', '.join(changes[1]),author)
             if details:
                 audit(con,cid,'case',cid,'Edytowano dane sprawy',details,author)
         self.redirect(f'/case/{cid}')
@@ -5672,6 +5750,12 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
             deadline_info=f"<div class='notice deadline-note'><b>Termin wyliczony pomocniczo:</b> od {fmt_date(t['deadline_base_date'])} + {esc(str(row_get(t,'deadline_days','')))} {esc(row_get(t,'deadline_rule',''))}. {esc(row_get(t,'deadline_source',''))}{manual}</div>"
         body=f'''<div class="topbar"><div><h1>Edytuj zadanie</h1><div class="sub">{esc(t['signature'] or t['case_title'])}</div></div></div>{deadline_info}<div class="card"><form method="post" action="/task/{tid}/update" class="form-grid" data-autosave="1"><input type="hidden" name="case_id" value="{t['case_id']}"><input type="hidden" name="return_to" value="{esc(return_to)}"><div><label>Rodzaj</label><select name="task_type">{type_opts}</select></div><div class="full"><label>Zadanie</label><input name="title" required value="{esc(t['title'])}"></div><div><label>Termin</label><input type="date" name="due_date" value="{esc(t['due_date'])}"><div class="small muted">Możesz ręcznie skorygować termin. Historia zachowa zmianę.</div></div><div><label>Priorytet</label><select name="priority">{prio}</select></div><div><label>Status</label><select name="status">{stat}</select></div><div><label>Wykonawca</label><select name="assigned_user_id">{user_opts}</select></div><div class="full"><label>Zależność / czekamy na</label><input name="depends_on" value="{esc(t['depends_on'])}"></div><div class="full"><label>Notatki</label><textarea name="notes">{esc(t['notes'])}</textarea></div><div class="full"><button class="btn primary">Zapisz zmiany</button> <a class="btn" href="{esc(back_href)}">Anuluj</a></div></form></div>'''
         # Przycisk usunięcia również dla Terminów procesowych; operacja przenosi do Kosza.
+        with db() as con:
+            assignees_html_task=assignee_html(con,'task',tid)
+        body += (f"<div class='card'><h3>Przypisani do zadania / terminu</h3>"
+                 f"<form method='post' action='/task/{tid}/assignees' class='form-grid'>"
+                 f"{assignees_html_task}<div class='full'><button class='btn primary'>Zapisz osoby</button></div>"
+                 "</form></div>")
         body += related_nav
         body += (f"<div class='card'><h3>Usuń zadanie / termin</h3>"
                  f"<form method='post' action='/task/{tid}/delete' "
@@ -5720,6 +5804,8 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
                            task_type=?,updated_by=?,deadline_manual=?,completed_at=?,completed_by=? WHERE id=?""",
                         (new['title'],new['due_date'],new['status'],new['priority'],assigned,new['depends_on'],new['notes'],
                          task_type,a,deadline_manual,completed_at,completed_by,tid))
+            if old['assigned_user_id'] != assigned:
+                set_task_assignees(con,tid,[assigned] if assigned else [])
             sync_task_alert(con,tid,a)
             if details: audit(con,cid,'task',tid,'Edytowano zadanie',details,a)
         target=(f.get('return_to','') or '').strip()
@@ -5905,6 +5991,10 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
                                VALUES(?,?,?,'open',?,?,?,?,?,?,?)""",
                             (cid,title,f.get('due_date',''),f.get('priority','normal'),assigned,
                              f.get('depends_on','').strip(),f.get('notes','').strip(),task_type,a,a))
+            if f.get('_multi_assignees')=='1':
+                ids=selected_ids(f,con)
+                set_task_assignees(con,cur.lastrowid,ids)
+                assigned=ids[0] if ids else None
             sync_task_alert(con,cur.lastrowid,a)
             assigned_row=con.execute("SELECT author_name,function FROM users WHERE id=?",(assigned,)).fetchone() if assigned else None
             details=(f"Zadanie: {_change_value(title)}\n"
@@ -6242,7 +6332,9 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
             sql="""SELECT t.*,c.title case_title,c.signature,c.internal_signature,u.author_name assigned_name,u.function assigned_function
                    FROM tasks t JOIN cases c ON c.id=t.case_id LEFT JOIN users u ON u.id=t.assigned_user_id WHERE 1=1"""; params=[]
             if show!='all': sql += " AND t.status='open'"
-            if mine: sql += " AND t.assigned_user_id=?"; params.append(uid)
+            if mine:
+                sql += " AND (EXISTS(SELECT 1 FROM task_assignees ta WHERE ta.task_id=t.id AND ta.user_id=?) OR (t.assigned_user_id=? AND NOT EXISTS(SELECT 1 FROM task_assignees ta WHERE ta.task_id=t.id)))"
+                params.extend([uid,uid])
             if flt=='overdue': sql += " AND t.status='open' AND t.due_date<>'' AND t.due_date<?"; params.append(today)
             elif flt=='today': sql += " AND t.status='open' AND t.due_date=?"; params.append(today)
             elif flt=='7d': sql += " AND t.status='open' AND t.due_date>? AND t.due_date<=?"; params.extend([today,week_end])
@@ -6254,12 +6346,14 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
             cases=con.execute("SELECT id,signature,internal_signature,title,status,closed_edit_unlocked FROM cases ORDER BY status='closed',signature='',signature,title").fetchall()
             case_sig_map=load_external_signature_map(con,[r['id'] for r in cases])
             users=con.execute("SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name").fetchall()
+        with db() as con: task_people=task_assignees_map(con,[r['id'] for r in rows])
         parts=[]
         for r in rows:
             toggle='↩' if r['status']=='done' else '✓'; label=primary_signature_fast(r['case_id'],r['signature'],task_sig_map); cls='muted' if r['status']=='done' else ''
             dep=f"<div class='small muted'>zależność: {esc(r['depends_on'])}</div>" if r['depends_on'] else ''
             assigned='—'
             if r['assigned_name']: assigned=r['assigned_name']+((' — '+r['assigned_function']) if r['assigned_function'] else '')
+            assigned=task_people.get(r['id']) or assigned
             auth=[]
             if r['created_by']: auth.append('autor: '+esc(r['created_by']))
             if r['updated_by'] and r['updated_by']!=r['created_by']: auth.append('zmiana: '+esc(r['updated_by']))
@@ -6285,14 +6379,15 @@ class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMix
             prefix='' if sig=='Bez sygnatury' else sig+' — '
             case_opts.append(f"<option value='{c['id']}'>{esc(prefix+c['title'])} · {esc(internal_signature_text(c['internal_signature']))}</option>")
         user_opts='<option value="">— nie przypisano —</option>'+''.join(f"<option value='{x['id']}'>{esc(user_display_name(x))}</option>" for x in users)
+        with db() as con: assignees_html_task=assignee_html(con,'task')
         create_form=(f"""<details class='card add-panel' id='new-task'><summary><span class='add-panel-plus'>＋</span><span><b>Dodaj zadanie</b><small>Formularz pokaże się dopiero tutaj.</small></span></summary><div class='add-panel-body'>
         <form method='post' action='/task/create' class='form-grid'><input type='hidden' name='return_to' value='/tasks'>
         <div class='full'><label>Sprawa *</label><select name='case_id' required><option value=''>— wybierz sprawę —</option>{''.join(case_opts)}</select></div>
         <div><label>Rodzaj</label><select name='task_type'><option>Zadanie</option><option>Monit</option><option>Termin procesowy</option><option>Płatność</option></select></div><div><label>Termin</label><input type='date' name='due_date'></div>
         <div class='full'><label>Co trzeba zrobić? *</label><input name='title' required placeholder='np. Przygotować odpowiedź na pismo'></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div>
-        <div class='full'><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div>
+
         <details class='advanced-fields full'><summary>Więcej opcji</summary><div class='form-grid'><div class='full'><label>Zależność / czekamy na</label><input name='depends_on'></div><div class='full'><label>Notatki</label><textarea name='notes'></textarea></div></div></details>
-        <div class='full'><button class='btn primary'>Dodaj zadanie</button></div></form></div></details>""" if cases else "<div class='notice'>Najpierw dodaj aktywną sprawę, aby utworzyć zadanie.</div>")
+        <input type='hidden' name='_multi_assignees' value='1'>{assignees_html_task}<div class='full'><button class='btn primary'>Dodaj zadanie</button></div></form></div></details>""" if cases else "<div class='notice'>Najpierw dodaj aktywną sprawę, aby utworzyć zadanie.</div>")
         save_view=self._save_view_form(self.path)
         body=f"""<div class='topbar'><div><h1>{'Moje zadania' if mine else 'Zadania'}</h1><div class='sub'>Najpierw lista zadań. Formularz dodawania otwierasz tylko wtedy, kiedy go potrzebujesz.</div></div><div><button class='btn primary' type='button' data-open-details='new-task'>+ Dodaj zadanie</button> <a class='btn' href='/deadline'>+ Termin procesowy</a> {mine_button}</div></div>{filter_bar}{save_view}<div class='card content-first'><div class='section-head'><div><h2>{'Moje zadania' if mine else 'Lista zadań'}</h2><div class='small muted'>Kliknij ✓, aby oznaczyć jako wykonane. Wykonane zadania pozostają w historii.</div></div><div><a class='btn small {a1}' href='/tasks?show=open{qp}'>Otwarte</a> <a class='btn small {a2}' href='/tasks?show=all{qp}'>Wszystkie</a></div></div><div class='table-scroll'><table><tr><th>Stan</th><th>Sprawa</th><th>Zadanie</th><th>Termin</th><th>Wykonawca</th><th>Priorytet</th><th>Akcje</th></tr>{trs}</table></div></div><div class='module-spacer'></div>{create_form}"""
         self.send_html(layout('Zadania',body,'tasks'))

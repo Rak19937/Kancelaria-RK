@@ -130,3 +130,18 @@ wymagają każdorazowego sprawdzenia i zatwierdzenia przez użytkownika.
 - W kalendarzu kliknięcie prowadzi do konkretnego zadania, zdarzenia lub sprawy zamiast zawsze do ogólnej karty.
 - Usunięcie zadania zachowuje mechanizm Kosza i historii. Nie usuwamy żadnych wpisów w czasie migracji.
 - Odnośniki opierają się wyłącznie na rzeczywistych identyfikatorach, bez zgadywania relacji po nazwie.
+
+
+## RK KANCELARIA 0.3.7-dev1 — Kalendarz, zespoły i sprawy poboczne
+- Wiele niezależnych terminów ustalonych w jednej sprawie (bez automatycznego liczenia terminów ustawowych).
+- Kalendarz osobisty z przypisanymi zadaniami, terminami i datami spraw prowadzonych przez danego użytkownika.
+- Zadania i terminy przypisywane wielu użytkownikom, z zachowaniem dotychczasowych przypisań.
+- Tworzenie odrębnych spraw pobocznych z kontrolą wymaganych dokumentów/czynności.
+- Skróty nawigacyjne na każdym ekranie i kalendarz otwierany po kliknięciu zegara na pulpicie.
+- Addytywna migracja SQLite do 328. Program nie podejmuje samodzielnych decyzji prawnych.
+
+
+## RK KANCELARIA 0.3.7-dev1 — otwarty katalog kategorii
+- Wiele kategorii w jednej sprawie, własne kategorie, filtrowanie i zmiana nazw.
+- Stare kategorie przenoszone bez usuwania historii.
+- Katalog korzysta wyłącznie z lokalnej bazy.
