@@ -1,10 +1,16 @@
-# Scenariusz testów ręcznych RK KANCELARIA 0.3.6-dev1
+# Testy funkcjonalne po zbudowaniu EXE — 0.3.7-dev1
 
-1. Utwórz fikcyjną sprawę i dwa zadania „Mediacja” z tą samą datą. Otwórz zakładkę **Terminy**. Każdy powinien być oddzielnym wierszem i otwierać właściwy rekord.
-2. W zakładce **Terminy** kliknij „Mediacja”, sprawdź ekran zadania i powrót do sprawy.
-3. Naciśnij **Do kosza** przy jednym zadaniu, potwierdź; drugi termin musi pozostać. Sprawdź **Kosz** i możliwość przywrócenia.
-4. Wypełnij na karcie sprawy pola **Następna czynność** i **Następna data**. W zakładce **Terminy** sprawdź osobną pozycję i przycisk **Wyczyść datę**. Nie powinien usuwać innych zadań.
-5. Sprawdź link do zadania w widokach: **Dzisiaj**, **Pulpit**, **Zadania**, **Kalendarz**, **Sprawa → Zadania**.
-6. Dodaj dokument ze wskazanym zadaniem/terminem i sprawdź panel **Powiązane elementy** z linkami w obie strony.
-7. Dodaj projekt i korespondencję przypisaną do sprawy. Sprawdź przejście z projektu do korespondencji, a z korespondencji do sprawy/dokumentów.
-8. Testuj bez danych rzeczywistych. Po pozytywnej weryfikacji przed przeniesieniem rzeczywistego katalogu Data zrób kopię całego katalogu.
+Wykonuj na danych demonstracyjnych w **oddzielnym katalogu Portable**.
+
+- [ ] W sprawie X utwórz dwa niezależne terminy ustalone („Mediacja” i „Rozprawa”) w różnych dniach; oba są widoczne w zakładce Terminy i Kalendarzu.
+- [ ] Edytuj pierwszy termin, przenieś go do kosza, przywróć i sprawdź czy pozostał drugi.
+- [ ] Kliknij zegar na pulpicie i otwórz „Mój kalendarz”.
+- [ ] Zaloguj dwie osoby, przypisz to samo zadanie obu; pojawia się w kalendarzu każdej, ale nie u nieprzypisanej osoby.
+- [ ] Utwórz sprawę poboczną z głównej, np. uzyskanie zaświadczenia administracyjnego. Zobacz powiązanie i status wymaganego dokumentu.
+- [ ] Dodaj kategorię „Sprawa podatkowa”, następnie przypisz jednej sprawie także „Sprawa administracyjna”.
+- [ ] Filtruj listę spraw kolejno po każdej z przypisanych kategorii — ta sama sprawa ma pojawić się w obu wynikach.
+- [ ] Zmień nazwę własnej kategorii i sprawdź, czy sprawa nadal jest przypisana.
+- [ ] Sprawdź stare sprawy z wcześniej wpisaną kategorią, także ze złożonym tekstem np. „karna, rodzinna”.
+- [ ] Klikaj nazwy spraw, terminów i zadań — odnośniki prowadzą do właściwych rekordów.
+- [ ] Wyłącz program, uruchom ponownie i sprawdź trwałość wpisów oraz katalogu kategorii.
+- [ ] Przetestuj powrót do starszej wersji wyłącznie na **kopii**, bez podmieniania schematu produkcyjnego.
