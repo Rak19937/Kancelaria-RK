@@ -1,16 +1,18 @@
-# Testy funkcjonalne po zbudowaniu EXE — 0.3.7-dev1
+# Testy ręczne po kompilacji RK KANCELARIA 0.3.8-dev1
 
-Wykonuj na danych demonstracyjnych w **oddzielnym katalogu Portable**.
+Wykonaj na kopii danych, nie na jedynej bazie kancelarii.
 
-- [ ] W sprawie X utwórz dwa niezależne terminy ustalone („Mediacja” i „Rozprawa”) w różnych dniach; oba są widoczne w zakładce Terminy i Kalendarzu.
-- [ ] Edytuj pierwszy termin, przenieś go do kosza, przywróć i sprawdź czy pozostał drugi.
-- [ ] Kliknij zegar na pulpicie i otwórz „Mój kalendarz”.
-- [ ] Zaloguj dwie osoby, przypisz to samo zadanie obu; pojawia się w kalendarzu każdej, ale nie u nieprzypisanej osoby.
-- [ ] Utwórz sprawę poboczną z głównej, np. uzyskanie zaświadczenia administracyjnego. Zobacz powiązanie i status wymaganego dokumentu.
-- [ ] Dodaj kategorię „Sprawa podatkowa”, następnie przypisz jednej sprawie także „Sprawa administracyjna”.
-- [ ] Filtruj listę spraw kolejno po każdej z przypisanych kategorii — ta sama sprawa ma pojawić się w obu wynikach.
-- [ ] Zmień nazwę własnej kategorii i sprawdź, czy sprawa nadal jest przypisana.
-- [ ] Sprawdź stare sprawy z wcześniej wpisaną kategorią, także ze złożonym tekstem np. „karna, rodzinna”.
-- [ ] Klikaj nazwy spraw, terminów i zadań — odnośniki prowadzą do właściwych rekordów.
-- [ ] Wyłącz program, uruchom ponownie i sprawdź trwałość wpisów oraz katalogu kategorii.
-- [ ] Przetestuj powrót do starszej wersji wyłącznie na **kopii**, bez podmieniania schematu produkcyjnego.
+1. Uruchom program i sprawdź `O programie` — oczekiwana wersja 0.3.8-dev1.
+2. Kliknij `Dokumenty`. Sprawdź, że najpierw widzisz listę teczek spraw i wyszukiwarkę, a nie wszystkie pliki wszystkich spraw naraz.
+3. Wyszukaj sprawę po sygnaturze lub kliencie, kliknij nazwę. Dokumenty powinny być wyświetlone chronologicznie. Zmień sortowanie na najnowsze/najstarsze.
+4. Wejdź w `Centrum dowodowe`. Wybierz sprawę; sprawdź twierdzenia i powiązane dowody, potem przejdź do istniejącej zakładki `Dowody` w sprawie.
+5. Otwórz zadanie A. Wejdź w `Zarządzaj zależnościami`. Dodaj zadanie B z tej samej sprawy jako wymagane. Zapisz. Spróbuj oznaczyć A jako wykonane: program powinien ostrzec i zażądać uzasadnienia świadomego obejścia.
+6. Zakończ B. Spróbuj zakończyć A ponownie: bez ostrzeżenia. Cofnij oba zadania i sprawdź, czy odnośniki nadal działają.
+7. Spróbuj utworzyć cykl A → B i B → A. Program powinien odrzucić drugie powiązanie.
+8. Sprawdź zależność od postępowania pobocznego. Dopóki ma status „oczekujemy”, główne zadanie powinno być oznaczone jako zależne. Po zmianie statusu na „uzyskano” — odblokowane.
+9. Utwórz dwa zdarzenia z datami w odwrotnej kolejności wprowadzania. `Chronologia` powinna ustawić je według dat wydarzeń.
+10. Dodaj dokument z wcześniejszą datą niż ostatnie dokumenty. Sprawdź chronologię oraz różnicę między datą dokumentu, wpływu i doręczenia.
+11. Sprawdź `Historia zmian` — powinna zachowywać rzeczywisty czas wykonania operacji, nawet dla wydarzeń datowanych wstecz.
+12. Sprawdź szybkie wyszukiwanie na górze strony, kliknięcie nazw oraz powrót do kart spraw, dokumentów i zadań.
+13. Sprawdź starsze dane 0.3.7: kalendarz, terminy, przypisania kilku osób, kategorie i korespondencję.
+14. Nie przełączaj jedynej bazy produkcyjnej przed wykonaniem kopii i tych testów.

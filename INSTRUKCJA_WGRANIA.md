@@ -1,38 +1,39 @@
-# RK KANCELARIA 0.3.7-dev1 — aktualizacja zbiorcza
+# RK KANCELARIA — 0.3.8-dev1
 
-**Ta paczka zastępuje poprzednią paczkę 0.3.7.** Nie trzeba jej wgrywać osobno. Zawiera jednocześnie:
+Aktualizacja obejmuje: uproszczoną nawigację i wyszukiwanie, zależności zadań,
+centralne Centrum dowodowe, teczki dokumentów i pełną oś chronologiczną sprawy.
 
-1. Wiele niezależnych terminów ustalonych w jednej sprawie, datę, godzinę, miejsce i usuwanie/przywracanie;
-2. Mój kalendarz, dostępny również po kliknięciu zegara na pulpicie;
-3. Przypisanie jednego zadania lub terminu kilku użytkownikom;
-4. Sprawy poboczne z powiązaniem ze sprawą główną i wymaganym dokumentem;
-5. Klikalne nazwy i nawigację kontekstową;
-6. Otwarty katalog kategorii spraw, wiele kategorii dla jednej sprawy, dodawanie własnych kategorii i filtr na liście spraw.
+## Wymagane źródła
 
-## Wgrywanie do GitHub
+Repozytorium GitHub: `Rak19937/Kancelaria-RK`, gałąź `main`.
+Stan wyjściowy: **0.3.7-dev1 / SCHEMA_VERSION=329**.
 
-Otwórz repozytorium `Rak19937/Kancelaria-RK`. Wgraj następujące **siedem plików .py** do katalogu głównego, bez zmiany ich nazw:
+## Wgraj TYLKO cztery pliki Python do katalogu głównego
 
-- `rk_workspace_plus.py`
-- `ZASTOSUJ_WORKSPACE_PLUS.py`
-- `TEST_WORKSPACE_PLUS.py`
-- `rk_case_categories.py`
-- `ZASTOSUJ_KATEGORIE.py`
-- `TEST_CASE_CATEGORIES.py`
-- `TEST_INTEGRACJA_KATEGORII.py`
+- `rk_caseflow.py`
+- `ZASTOSUJ_CASEFLOW.py`
+- `TEST_CASEFLOW.py`
+- `TEST_INTEGRACJA_CASEFLOW.py`
 
-Plik **`.github/workflows/main.yml`** z paczki wgraj **do `.github/workflows/`**, zastępując istniejący. Nie umieszczaj go wyłącznie w katalogu głównym repozytorium.
+Zastąp plik `.github/workflows/main.yml` z tej paczki w **tej samej ścieżce** na GitHubie.
+Pozostałe pliki `.md` są do czytania i nie są wymagane w repozytorium.
 
-Zatwierdź (Commit changes) i otwórz **Actions**. Workflow automatycznie stosuje aktualizację 0.3.7, następnie katalog kategorii i uruchamia testy, po czym buduje EXE. Na ostatniej stronie pomyślnego runu pobierz artifact `RK-KANCELARIA-WINDOWS-PORTABLE`.
+## Uruchomienie
 
-**Nie wrzucaj katalogu `Data` ani danych klientów do GitHuba.** Nie nadpisuj działającej wersji programu, dopóki paczka Portable i testy funkcjonalne nie zostaną sprawdzone. Przy przenoszeniu danych wykonaj kopię bazy i plików spraw.
+1. Zatwierdź nowe pliki (Commit changes) w `main`.
+2. Otwórz `https://github.com/Rak19937/Kancelaria-RK/actions`.
+3. Sprawdź najnowszy przebieg **z krokiem „Teczki, zależności, dowody i chronologia 0.3.8-dev1”**.
+4. Zielony wynik potwierdza integrację i kompilację. Na dole kliknij `Artifacts` → `RK-KANCELARIA-WINDOWS-PORTABLE`.
+5. Rozpakuj nowy ZIP do osobnego katalogu. Nie nadpisuj dotychczasowego `Data` ani działającego Portable bez kopii.
+6. Przetestuj na kopii bazy; szczegółowe kroki są w `TESTY_MANUALNE.md`.
 
-## Zgodność
+## Zasady bezpieczeństwa i zakres
 
-Instalatory działają na kompletnej wersji źródeł `0.3.6-dev1`; jeśli poprzednia paczka 0.3.7 została już zintegrowana, pierwszy instalator nie dubluje zmian, a drugi dodaje katalog kategorii. Ponowne uruchomienie instalatorów pozostawia gotową wersję bez kolejnych modyfikacji.
-
-Migracja schematu: **327 → 328 → 329**, bez czyszczenia istniejących rekordów. Dawne wartości pola `cases.category` zostaną przeniesione do nowego katalogu. Kategorie sprawy można zmienić bez zmian w dokumentach, zadaniach i terminach. Nowe postępowania poboczne korzystają z tego samego katalogu.
-
-## Ograniczenia
-
-Kalendarz osobisty nie jest zewnętrzną synchronizacją Google/Outlook; działa na lokalnych danych programu. Terminy procesowe nadal wymagają ręcznej weryfikacji podstaw i obliczenia. Zbudowanie EXE nie zastępuje testów interfejsu na Windows.
+- Skrypt nie otwiera i nie zmienia katalogu `Data`, bazy ani dokumentów. Zmienia wyłącznie `app.py` i `README.md` w drzewie źródeł.
+- Migracja SQLite (schemat 330) wykonuje się przy uruchomieniu nowego EXE, a nie podczas budowania ZIP-a na GitHubie.
+- Nowe zależności między zadaniami są jawnie wskazywane przez użytkownika; program nie wylicza prawa procesowego i nie ocenia ważności dokumentów.
+- Standardowe wykonanie zadania mającego niespełnione zależności wymaga osobnego, uzasadnionego potwierdzenia.
+- Centrum dowodowe czyta już istniejące `case_assertions` i `case_evidence`, nie tworzy drugiej bazy.
+- `Dokumenty` pokazują na starcie wybór sprawy. Po wyborze wyświetlają dokumenty tylko tej sprawy i dokumenty jawnie z nią współdzielone.
+- Oś sprawy używa dat merytorycznych (`doc_date`, `received_date`, `delivered_date`, `due_date`, `event_date`), odrębnie od dat audytu zmian. Przy braku jakiejkolwiek daty źródłowej dokument jest wyraźnie oznaczony jako dodany według daty wprowadzenia.
+- **Nie wgrywaj pojedynczych modułów z wcześniejszego ZIP-a 0.3.7 ponownie** po przejściu na 0.3.8.
