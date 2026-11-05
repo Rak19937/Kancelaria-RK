@@ -48,6 +48,8 @@ from http.cookies import SimpleCookie
 
 from rk_unified_preview import render_preview, serve_local_file, serve_pdf_page, serve_tiff_as_png
 from rk_action_center import ActionCenterMixin, ensure_action_center_schema
+from rk_correspondence import CorrespondenceMixin, ensure_correspondence_schema
+from rk_record_navigation import case_deadline_rows, linked_records_panel, safe_back
 from rk_document_hub import DocumentHubMixin, case_document_rows, ensure_document_hub_schema
 from rk_inbox import InboxMixin, ensure_inbox_schema
 from rk_paths import resolve_runtime_paths, installed_data_dir
@@ -62,8 +64,8 @@ from rk_smart import (
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.3.4-dev1"
-SCHEMA_VERSION = 325
+VERSION = "0.3.6-dev1"
+SCHEMA_VERSION = 327
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
 APP_MODE = RUNTIME_PATHS.mode
@@ -1301,6 +1303,7 @@ def init_db() -> None:
         ensure_inbox_schema(con)
         ensure_document_hub_schema(con)
         ensure_action_center_schema(con)
+        ensure_correspondence_schema(con)
         # Scala stare osobne monity/alerty i zadania. Operacja jest idempotentna.
         reconcile_task_alerts(con)
 
@@ -2512,6 +2515,7 @@ def layout(title: str, body: str, active: str = "") -> str:
             ("/powers", "§", "Pełnomocnictwa", "powers"),
             ("/inbox", "✉", "Skrzynka wpływu", "inbox"),
             ("/workflow", "☑", "Centrum decyzji", "workflow"),
+            ("/correspondence", "✉", "Korespondencja", "correspondence"),
             ("/drafts", "✎", "Pisma", "drafts"),
         ]),
         ("WIĘCEJ", [
@@ -2854,7 +2858,7 @@ def open_containing_folder(path: Path) -> tuple[bool,str]:
     except Exception as exc: return False,str(exc)
 
 
-class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
+class Handler(CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
     server_version = f"{APP_NAME}/{VERSION}"
 
     def handle_one_request(self):
@@ -3185,6 +3189,10 @@ class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHa
             if re.fullmatch(r"/document/\d+/links",path): return self.document_links_page(int(path.split("/")[2]))
             if path == "/inbox": return self.inbox_page()
             if path == "/workflow": return self.action_center_page()
+            if path == "/correspondence": return self.correspondence_page(qs)
+            if path == "/correspondence/new": return self.correspondence_form(qs)
+            if re.fullmatch(r"/correspondence/\d+/edit",path): return self.correspondence_form(record_id=int(path.split("/")[2]))
+            if re.fullmatch(r"/correspondence/\d+",path): return self.correspondence_detail(int(path.split("/")[2]))
             if re.fullmatch(r"/workflow/review/\d+",path): return self.action_center_review_page(int(path.split("/")[3]))
             if re.fullmatch(r"/inbox/\d+/file", path): return self.inbox_file(int(path.split("/")[2]))
             if re.fullmatch(r"/inbox/\d+", path): return self.inbox_review(int(path.split("/")[2]))
@@ -3314,6 +3322,9 @@ class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHa
             if re.fullmatch(r"/document/\d+/link",path): return self.document_link_add(int(path.split("/")[2]),fields)
             if re.fullmatch(r"/document/\d+/unlink",path): return self.document_link_remove(int(path.split("/")[2]),fields)
             if path == "/inbox/upload": return self.inbox_upload(fields, files)
+            if path == "/correspondence/create": return self.correspondence_save(fields)
+            if re.fullmatch(r"/correspondence/\d+/update",path): return self.correspondence_save(fields,int(path.split("/")[2]))
+            if re.fullmatch(r"/correspondence/\d+/followup",path): return self.correspondence_followup(int(path.split("/")[2]),fields)
             if re.fullmatch(r"/workflow/analyze/(document|draft)/\d+",path):
                 return self.action_center_analyze(path.split("/")[3],int(path.split("/")[4]),fields)
             if re.fullmatch(r"/workflow/review/\d+/decide",path):
@@ -3325,6 +3336,7 @@ class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHa
             if path == "/view/save": return self.saved_view_save(fields)
             if re.fullmatch(r"/view/\d+/delete", path): return self.saved_view_delete(int(path.split('/')[2]), fields)
             if path == "/deadline/create": return self.deadline_create(fields)
+            if re.fullmatch(r"/case/\d+/clear-next-date",path): return self.clear_case_next_date(int(path.split("/")[2]),fields)
             if path == "/quick/event": return self.quick_event_add(fields)
             if path == "/quick/note": return self.quick_note_add(fields)
             if path == "/quick/document": return self.quick_document_add(fields, files)
@@ -3585,7 +3597,7 @@ class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHa
             meta=''
             if row_get(r,'deadline_base_date',''):
                 meta=f"<div class='small deadline-meta'>wyliczono od {fmt_date(r['deadline_base_date'])} · {esc(str(row_get(r,'deadline_days','')))} dni · {esc(row_get(r,'deadline_rule',''))}</div>"
-            task_rows.append(f"<tr><td><span class='due-chip {cls}'>{when}</span><b>{fmt_date(r['due_date'])}</b></td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(r['case_title'])}</div></td><td><b>{esc(r['title'])}</b>{assigned}{meta}</td><td><a class='btn small' href='/task/{r['id']}/edit?return_to=%2Ftoday'>Edytuj</a></td></tr>")
+            task_rows.append(f"<tr><td><span class='due-chip {cls}'>{when}</span><b>{fmt_date(r['due_date'])}</b></td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(r['case_title'])}</div></td><td><a class='case-link' href='/task/{r['id']}/edit'><b>{esc(r['title'])}</b></a>{assigned}{meta}</td><td><a class='btn small' href='/task/{r['id']}/edit?return_to=%2Ftoday'>Edytuj</a></td></tr>")
         case_rows=[]
         for r in next_cases:
             label=primary_signature_fast(r['id'],r['signature'],sig_map)
@@ -3642,6 +3654,18 @@ class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHa
     def deadline_page(self,qs):
         self.redirect('/quick-add#deadline')
 
+
+    def clear_case_next_date(self,cid,f):
+        author=self.current_author(f)
+        with db() as con:
+            row=con.execute('SELECT id,title,next_date,next_step FROM cases WHERE id=?',(cid,)).fetchone()
+            if not row:return self.send_error(404)
+            if case_read_only(con,cid):return self.send_error(403)
+            if row['next_date']:
+                con.execute("UPDATE cases SET next_date='',next_step='',updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(author,cid))
+                audit(con,cid,'case',cid,'Wyczyszczono następny termin sprawy',
+                    f"Data: {row['next_date']} · czynność: {row['next_step']}",author)
+        return self.redirect(safe_back(f.get('return_to'),f'/case/{cid}?tab=deadlines'))
 
     def deadline_create(self,f):
         try: cid=int(f.get('case_id','0') or 0)
@@ -3752,14 +3776,14 @@ class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHa
                 due_chip="<span class='due-chip soon'>7 dni</span>"
             else:
                 due_chip=''
-            dated_parts.append(f"<tr><td class='nowrap'><b>{fmt_date(r['due_date'])}</b>{due_chip}</td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td><b class='{cls}'>{esc(r['title'])}</b>{dep}</td><td>{prio}</td></tr>")
+            dated_parts.append(f"<tr><td class='nowrap'><b>{fmt_date(r['due_date'])}</b>{due_chip}</td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td><a class='case-link' href='/task/{r['id']}/edit'><b class='{cls}'>{esc(r['title'])}</b></a>{dep}</td><td>{prio}</td></tr>")
         dated_rows=''.join(dated_parts) or '<tr><td colspan=4>Brak czynności z przypisaną datą.</td></tr>'
         undated_parts=[]
         for r in undated:
             dep = f"<div class='small muted'>czekamy na: {esc(r['depends_on'])}</div>" if r['depends_on'] else ''
             prio = 'Wysoki' if r['priority']=='high' else 'Normalny'
             label = primary_signature_fast(r['case_id'], r['signature'], sig_map)
-            undated_parts.append(f"<tr><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td><b>{esc(r['title'])}</b>{dep}</td><td>{prio}</td></tr>")
+            undated_parts.append(f"<tr><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td><a class='case-link' href='/task/{r['id']}/edit'><b>{esc(r['title'])}</b></a>{dep}</td><td>{prio}</td></tr>")
         undated_rows=''.join(undated_parts) or '<tr><td colspan=3>Brak czynności bez daty.</td></tr>'
         upcoming_parts=[]
         for r in upcoming:
@@ -4462,22 +4486,17 @@ class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHa
             task_rows=[]
             for t in tasks:
                 done=t['status']=='done'; assignee=esc(t['assigned_name']) if t['assigned_name'] else '—'
-                task_rows.append(f"<div class='workspace-task {'done' if done else ''}'><form method='post' action='/task/{t['id']}/toggle'><input type='hidden' name='case_id' value='{cid}'><input type='hidden' name='return_to' value='/case/{cid}?tab=tasks'><button class='task-check'>{'↩' if done else '✓'}</button></form><div><span class='mini-badge'>{esc(row_get(t,'task_type','Zadanie'))}</span> <b>{esc(t['title'])}</b><small>{fmt_date(t['due_date'])} · {assignee}{(' · '+esc(t['depends_on'])) if t['depends_on'] else ''}</small></div><a class='btn small' href='/task/{t['id']}/edit?return_to=%2Fcase%2F{cid}%3Ftab%3Dtasks'>Edytuj</a></div>")
+                task_rows.append(f"<div class='workspace-task {'done' if done else ''}'><form method='post' action='/task/{t['id']}/toggle'><input type='hidden' name='case_id' value='{cid}'><input type='hidden' name='return_to' value='/case/{cid}?tab=tasks'><button class='task-check'>{'↩' if done else '✓'}</button></form><div><span class='mini-badge'>{esc(row_get(t,'task_type','Zadanie'))}</span> <a class='case-link' href='/task/{t['id']}/edit?return_to=%2Fcase%2F{cid}%3Ftab%3Dtasks'><b>{esc(t['title'])}</b></a><small>{fmt_date(t['due_date'])} · {assignee}{(' · '+esc(t['depends_on'])) if t['depends_on'] else ''}</small></div><a class='btn small' href='/task/{t['id']}/edit?return_to=%2Fcase%2F{cid}%3Ftab%3Dtasks'>Edytuj</a></div>")
             user_opts='<option value="">— bez przypisania —</option>'+''.join(f"<option value='{x['id']}'>{esc(user_display_name(x))}</option>" for x in users)
             add='' if readonly else f"""<details class='card smart-add'><summary>+ Dodaj zadanie</summary><form method='post' action='/case/{cid}/task' class='form-grid'><input type='hidden' name='return_to' value='/case/{cid}?tab=tasks'><div><label>Rodzaj</label><select name='task_type'>{''.join(f'<option>{x}</option>' for x in ['Zadanie','Monit','Termin procesowy','Płatność'])}</select></div><div><label>Termin</label><input type='date' name='due_date'></div><div class='full'><label>Co trzeba zrobić?</label><input name='title' required></div><div><label>Wykonawca</label><select name='assigned_user_id'>{user_opts}</select></div><div><label>Priorytet</label><select name='priority'><option value='normal'>Normalny</option><option value='high'>Wysoki</option></select></div><div class='full'><label>Zależność</label><input name='depends_on'></div><div class='full'><label>Notatka</label><textarea name='notes'></textarea></div><div class='full'><button class='btn primary'>Dodaj</button></div></form></details>"""
             content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Zadania</h2><div class='muted'>Otwarte i wykonane czynności tej sprawy.</div></div></div>{add}<div class='card workspace-task-list'>{''.join(task_rows) or '<div class="empty">Brak zadań.</div>'}</div></section>"
 
         elif tab=='deadlines':
-            deadline_rows=[]
-            seen=set()
-            for d,k,t in next_dates:
-                key=(d,t)
-                if key in seen: continue
-                seen.add(key); deadline_rows.append(f"<tr><td><b>{fmt_date(d)}</b></td><td>{esc(k)}</td><td>{esc(t)}</td></tr>")
+            deadline_table_html=case_deadline_rows(tasks,alerts,c,fmt_date,is_readonly=readonly)
             suggestions_html=''.join(f"<div class='deadline-suggestion'><b>{esc(x['suggested_title'])}</b><div class='small'>{esc(x['source_text'])}</div><form method='post' action='/deadline-suggestion/{x['id']}/accept'><input type='hidden' name='return_to' value='/case/{cid}?tab=deadlines'><button class='btn primary small'>Zatwierdź</button></form></div>" for x in suggestions) or '<div class="empty">Brak sugestii.</div>'
             doc_scan=''.join(f"<form method='post' action='/document/{d['id']}/suggest-deadlines' class='doc-scan-row'><input type='hidden' name='return_to' value='/case/{cid}?tab=deadlines'><span><b>{esc(d['title'])}</b></span><button class='btn small'>Sprawdź treść</button></form>" for d in docs if not row_get(d,'parent_document_id',None))
             manual='' if readonly else f"""<details class='card smart-add'><summary>+ Wylicz termin procesowy</summary><form method='post' action='/deadline/create' class='form-grid'><input type='hidden' name='case_id' value='{cid}'><input type='hidden' name='return_to' value='/case/{cid}?tab=deadlines'><div class='full'><label>Czynność</label><input name='title' required></div><div><label>Data początkowa</label><input type='date' name='base_date' required></div><div><label>Liczba dni</label><input type='number' name='days' min='0' value='7' required></div><div><label>Sposób liczenia</label><select name='rule'><option value='calendar'>Kalendarzowe / procesowe</option><option value='business'>Robocze</option></select></div><div><label>Priorytet</label><select name='priority'><option value='high'>Wysoki</option><option value='normal'>Normalny</option></select></div><div class='full'><label>Podstawa / źródło</label><input name='source'></div><div class='full'><button class='btn primary'>Wylicz i dodaj</button></div></form></details>"""
-            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Terminy</h2><div class='muted'>Terminy są zawsze zatwierdzane przez użytkownika.</div></div><a class='btn' href='/calendar?case_id={cid}'>Kalendarz sprawy</a></div>{manual}<div class='grid'><div class='card span7 table-scroll'><table><tr><th>Data</th><th>Rodzaj</th><th>Czynność</th></tr>{''.join(deadline_rows) or '<tr><td colspan=3>Brak terminów.</td></tr>'}</table></div><div class='card span5'><h2>Sugestie z dokumentów</h2>{suggestions_html}<details><summary>Sprawdź dokumenty</summary>{doc_scan or '<div class="empty">Brak dokumentów.</div>'}</details></div></div></section>"
+            content=f"<section class='case-tab-content'><div class='section-head'><div><h2>Terminy</h2><div class='muted'>Terminy są zawsze zatwierdzane przez użytkownika.</div></div><a class='btn' href='/calendar?case_id={cid}'>Kalendarz sprawy</a></div>{manual}<div class='grid'><div class='card span7 table-scroll'><table><tr><th>Data</th><th>Źródło</th><th>Czynność — otwórz</th><th>Akcje</th></tr>{deadline_table_html or '<tr><td colspan=4>Brak terminów.</td></tr>'}</table></div><div class='card span5'><h2>Sugestie z dokumentów</h2>{suggestions_html}<details><summary>Sprawdź dokumenty</summary>{doc_scan or '<div class="empty">Brak dokumentów.</div>'}</details></div></div></section>"
 
         elif tab=='evidence':
             by_assertion={x['id']:[] for x in assertions}
@@ -4677,7 +4696,7 @@ class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHa
                 f"<div class='simple-task-row'><form method='post' action='/task/{t['id']}/toggle'>"
                 f"<input type='hidden' name='case_id' value='{cid}'><input type='hidden' name='return_to' value='/case/{cid}'>"
                 f"<button class='task-check' title='Oznacz jako wykonane'>✓</button></form>"
-                f"<div class='simple-task-main'><div><span class='mini-badge'>{esc(row_get(t,'task_type','Zadanie') or 'Zadanie')}</span> <b>{esc(t['title'])}</b></div>"
+                f"<div class='simple-task-main'><div><span class='mini-badge'>{esc(row_get(t,'task_type','Zadanie') or 'Zadanie')}</span> <a class='case-link' href='/task/{t['id']}/edit'><b>{esc(t['title'])}</b></a></div>"
                 f"<div class='simple-task-meta'>{due}{assigned}</div></div>"
                 f"<a class='btn small' href='/task/{t['id']}/edit?return_to=%2Fcase%2F{cid}'>Edytuj</a></div>"
             )
@@ -4810,38 +4829,40 @@ class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHa
             cases = con.execute("SELECT id,title,signature,internal_signature FROM cases WHERE status<>'closed' ORDER BY signature='',signature,title").fetchall()
             users = con.execute("SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name").fetchall()
         bydate = {}; seen_calendar=set()
-        def add_item(d, kind, title, cid=0, priority='normal'):
+        def add_item(d, kind, title, cid=0, priority='normal', url=''):
             if not d: return
             norm=re.sub(r'\W+','',str(title or '').lower())
-            key=(str(d),int(cid or 0),norm)
+            key=(str(d),int(cid or 0),url or norm)
             if key in seen_calendar: return
             seen_calendar.add(key)
-            bydate.setdefault(d, []).append((kind, title, cid, priority))
+            bydate.setdefault(d, []).append((kind, title, cid, priority, url))
         for r in alerts:
-            add_item(r['alert_date'], r['alert_type'], r['title'], r['case_id'] or 0, r['priority'])
+            alert_target=(f"/task/{r['source_id']}/edit" if r['source_type']=='task' and r['source_id'] else (f"/case/{r['case_id']}?tab=deadlines" if r['case_id'] else '/calendar'))
+            add_item(r['alert_date'], r['alert_type'], r['title'], r['case_id'] or 0, r['priority'],alert_target)
         for r in tasks:
-            add_item(r['due_date'], 'Zadanie', r['title'], r['case_id'], r['priority'])
+            add_item(r['due_date'], 'Zadanie', r['title'], r['case_id'], r['priority'],f"/task/{r['id']}/edit")
         for r in process:
             if r['event_date']:
-                add_item(r['event_date'], r['event_type'] or 'Proces', r['title'], r['case_id'], 'normal')
+                add_item(r['event_date'], r['event_type'] or 'Proces', r['title'], r['case_id'], 'normal',f"/process-event/{r['id']}/edit")
             if r['next_date'] and r['next_date'] != r['event_date']:
-                add_item(r['next_date'], 'Następny termin', r['title'], r['case_id'], 'high')
+                add_item(r['next_date'], 'Następny termin', r['title'], r['case_id'], 'high',f"/process-event/{r['id']}/edit")
         for r in work_events:
-            add_item(r['event_date'], r['event_type'] or 'Czynność', r['title'], r['case_id'], 'normal')
+            add_item(r['event_date'], r['event_type'] or 'Czynność', r['title'], r['case_id'], 'normal',f"/event/{r['id']}/edit")
         for r in case_dates:
             # Pole ogólne w sprawie jest tylko fallbackiem. Jeżeli tego dnia mamy już
             # konkretną rozprawę, zadanie, mediację itp., nie dokładamy drugiego wpisu.
             already=any(int(item[2] or 0)==int(r['id']) for item in bydate.get(r['next_date'],[]))
             if not already:
-                add_item(r['next_date'], 'Termin', r['next_step'] or r['title'], r['id'], 'high')
+                add_item(r['next_date'], 'Termin', r['next_step'] or r['title'], r['id'], 'high',f"/case/{r['id']}/edit")
         cells = []
         cur = start
         while cur <= end:
             items = bydate.get(cur.isoformat(), [])
             event_parts = []
-            for kind, title, cid, pr in items[:5]:
+            for kind, title, cid, pr, url in items[:5]:
                 content = f"<b>{esc(kind)}</b><span>{esc(title)}</span>"
-                event_parts.append(f"<a class='calendar-event p-{esc(pr)}' href='/case/{cid}'>{content}</a>" if cid else f"<div class='calendar-event p-{esc(pr)}'>{content}</div>")
+                target=url or (f'/case/{cid}' if cid else '')
+                event_parts.append(f"<a class='calendar-event p-{esc(pr)}' href='{esc(target)}'>{content}</a>" if target else f"<div class='calendar-event p-{esc(pr)}'>{content}</div>")
             more = f"<div class='small muted'>+{len(items)-5} więcej</div>" if len(items) > 5 else ''
             cls = ' outside' if cur.month != first.month else ''
             cls += ' today' if cur == date.today() else ''
@@ -5639,6 +5660,7 @@ class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHa
             t=con.execute("SELECT t.*,c.signature,c.title case_title FROM tasks t JOIN cases c ON c.id=t.case_id WHERE t.id=?",(tid,)).fetchone()
             users=con.execute("SELECT id,author_name,function FROM users WHERE is_active=1 ORDER BY author_name").fetchall()
         if not t: return self.send_error(404)
+        with db() as con: related_nav=linked_records_panel(con,'task',t)
         prio='<option value="normal" {n}>Normalny</option><option value="high" {h}>Wysoki</option>'.format(n='selected' if t['priority']=='normal' else '',h='selected' if t['priority']=='high' else '')
         stat='<option value="open" {o}>Otwarte</option><option value="done" {d}>Wykonane</option>'.format(o='selected' if t['status']=='open' else '',d='selected' if t['status']=='done' else '')
         user_opts='<option value="">— nie przypisano —</option>'+''.join(f"<option value='{u['id']}' {'selected' if t['assigned_user_id']==u['id'] else ''}>{esc(user_display_name(u))}</option>" for u in users)
@@ -5649,6 +5671,14 @@ class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHa
             manual=' · <b>termin skorygowany ręcznie</b>' if int(row_get(t,'deadline_manual',0) or 0) else ''
             deadline_info=f"<div class='notice deadline-note'><b>Termin wyliczony pomocniczo:</b> od {fmt_date(t['deadline_base_date'])} + {esc(str(row_get(t,'deadline_days','')))} {esc(row_get(t,'deadline_rule',''))}. {esc(row_get(t,'deadline_source',''))}{manual}</div>"
         body=f'''<div class="topbar"><div><h1>Edytuj zadanie</h1><div class="sub">{esc(t['signature'] or t['case_title'])}</div></div></div>{deadline_info}<div class="card"><form method="post" action="/task/{tid}/update" class="form-grid" data-autosave="1"><input type="hidden" name="case_id" value="{t['case_id']}"><input type="hidden" name="return_to" value="{esc(return_to)}"><div><label>Rodzaj</label><select name="task_type">{type_opts}</select></div><div class="full"><label>Zadanie</label><input name="title" required value="{esc(t['title'])}"></div><div><label>Termin</label><input type="date" name="due_date" value="{esc(t['due_date'])}"><div class="small muted">Możesz ręcznie skorygować termin. Historia zachowa zmianę.</div></div><div><label>Priorytet</label><select name="priority">{prio}</select></div><div><label>Status</label><select name="status">{stat}</select></div><div><label>Wykonawca</label><select name="assigned_user_id">{user_opts}</select></div><div class="full"><label>Zależność / czekamy na</label><input name="depends_on" value="{esc(t['depends_on'])}"></div><div class="full"><label>Notatki</label><textarea name="notes">{esc(t['notes'])}</textarea></div><div class="full"><button class="btn primary">Zapisz zmiany</button> <a class="btn" href="{esc(back_href)}">Anuluj</a></div></form></div>'''
+        # Przycisk usunięcia również dla Terminów procesowych; operacja przenosi do Kosza.
+        body += related_nav
+        body += (f"<div class='card'><h3>Usuń zadanie / termin</h3>"
+                 f"<form method='post' action='/task/{tid}/delete' "
+                 "onsubmit='return confirm(&quot;Przenieść termin lub zadanie do Kosza?&quot;)'>"
+                 f"<input type='hidden' name='case_id' value='{t['case_id']}'>"
+                 f"<input type='hidden' name='return_to' value='{esc(safe_back(return_to,back_href))}'>"
+                 "<button class='btn danger' type='submit'>Przenieś do Kosza</button></form></div>")
         self.send_html(layout('Edycja zadania',body,'tasks'))
 
 
@@ -6078,6 +6108,7 @@ class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHa
         toolbar += (f" <form method='post' action='/workflow/analyze/document/{did}' "
                     "style='display:inline'><button class='btn primary'>Zaproponuj czynności</button></form>"
                     " <a class='btn' href='/workflow'>Centrum decyzji</a>")
+        toolbar += f" <a class='btn' href='/correspondence/new?case_id={d['case_id']}&document_id={did}'>Zarejestruj korespondencję</a>"
         max_chars=160_000; bodytxt,status=self._preview_text_now(d,p,ext)
         def text_preview(label):
             if not bodytxt:
@@ -6111,6 +6142,7 @@ class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHa
             family_html=f"<div class='card document-family'><h2>Załączniki ({len(children)})</h2><div class='document-attachment-list'>{''.join(attachment_rows)}</div></div>"
         body=f"<div class='topbar'><div><h1>{esc(d['title'])}</h1><div class='sub'>{esc(case_label)} · {meta}</div></div><div class='case-control-bar'>{toolbar}</div></div>{family_html}{preview}"
         extra_css="<style>.doc-native-view{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff}.doc-text-preview{background:#fff;border:1px solid var(--line);border-radius:10px;padding:28px;max-width:1200px;margin:0 auto;max-height:calc(100vh - 250px);overflow:auto;box-shadow:0 2px 10px rgba(0,0,0,.04)}.pdf-preview{min-height:420px}</style>"
+        with db() as con: body += linked_records_panel(con,'document',d)
         self.send_html(layout('Podgląd dokumentu',extra_css+body,'documents'))
 
     def document_file(self,did,download=False):
@@ -6238,7 +6270,7 @@ class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHa
                 manual=' · ręcznie skorygowany' if int(row_get(r,'deadline_manual',0) or 0) else ''
                 deadline_meta=f"<div class='small deadline-meta'>wyliczono: {fmt_date(r['deadline_base_date'])} + {esc(str(row_get(r,'deadline_days','')))} {esc(row_get(r,'deadline_rule',''))}{manual}</div>"
             edit_return=quote(current_return,safe='')
-            parts.append(f"<tr><td><form method='post' action='/task/{r['id']}/toggle'><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small'>{toggle}</button></form></td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td class='{cls}'><span class='mini-badge'>{esc(row_get(r,'task_type','Zadanie') or 'Zadanie')}</span> <b>{esc(r['title'])}</b>{dep}{deadline_meta}{auth_html}</td><td>{fmt_date(r['due_date'])}</td><td>{esc(assigned)}</td><td>{prio}</td><td class='nowrap'><a class='btn small' href='/task/{r['id']}/edit?return_to={edit_return}'>Edytuj</a> <form style='display:inline' method='post' action='/task/{r['id']}/delete' onsubmit=\"return confirm('Przenieść zadanie do Kosza?');\"><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small danger'>Do kosza</button></form></td></tr>")
+            parts.append(f"<tr><td><form method='post' action='/task/{r['id']}/toggle'><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small'>{toggle}</button></form></td><td><a class='case-link' href='/case/{r['case_id']}'>{esc(label)}</a><div class='small muted'>{esc(internal_signature_text(r['internal_signature']))}</div></td><td class='{cls}'><span class='mini-badge'>{esc(row_get(r,'task_type','Zadanie') or 'Zadanie')}</span> <a class='case-link' href='/task/{r['id']}/edit'><b>{esc(r['title'])}</b></a>{dep}{deadline_meta}{auth_html}</td><td>{fmt_date(r['due_date'])}</td><td>{esc(assigned)}</td><td>{prio}</td><td class='nowrap'><a class='btn small' href='/task/{r['id']}/edit?return_to={edit_return}'>Edytuj</a> <form style='display:inline' method='post' action='/task/{r['id']}/delete' onsubmit=\"return confirm('Przenieść zadanie do Kosza?');\"><input type='hidden' name='case_id' value='{r['case_id']}'><input type='hidden' name='return_to' value='{esc(current_return)}'><button class='btn small danger'>Do kosza</button></form></td></tr>")
         trs=''.join(parts) or '<tr><td colspan=7><div class="empty compact-empty"><b>Brak zadań do pokazania.</b><div class="small">Dodaj nowe zadanie przyciskiem u góry.</div></div></td></tr>'
         qp='&mine=1' if mine else ''; a1='primary' if show=='open' else ''; a2='primary' if show=='all' else ''
         mine_button="<a class='btn primary' href='/tasks?show=open&mine=1'>Moje zadania</a> <a class='btn' href='/tasks?show=open'>Wszystkie zadania</a>" if mine else "<a class='btn' href='/tasks?show=open&mine=1'>Moje zadania</a>"
@@ -7013,6 +7045,7 @@ class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHa
                     pdf_pages_base=f'/preview/draft/{did}/page',image_url=f'/preview/draft/{did}/image')
             else: draft_preview="<div class='error'>Nieprawidłowa ścieżka pliku projektu.</div>"
         to_doc=f"<form method='post' action='/draft/{did}/to-document' style='display:inline'><button class='btn primary'>Dodaj do dokumentów sprawy</button></form>" if d['case_id'] else ''
+        corr_action=(f"<a class='btn' href='/correspondence/new?case_id={d['case_id']}&draft_id={did}'>Zarejestruj wysyłkę</a>" if d['case_id'] else '')
         content=f"<pre class='doc-text-preview' style='white-space:pre-wrap'>{esc(d['content'])}</pre>" if d['content'] else "<div class='empty'>Brak treści roboczej w programie.</div>"
         version_rows=[]
         for v in versions:
@@ -7020,7 +7053,8 @@ class Handler(ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHa
             restore=f"<form method='post' action='/draft/{did}/version/{v['id']}/restore' style='display:inline' onsubmit=\"return confirm('Przywrócić tę wersję jako bieżącą? Bieżący stan zostanie zachowany w historii.');\"><button class='btn small'>Przywróć</button></form>"
             version_rows.append(f"<tr><td>v{v['version_no']}</td><td>{esc(str(v['created_at'])[:16])}</td><td>{esc(v['created_by'])}</td><td>{esc(v['change_note'])}{file_label}</td><td>{restore}</td></tr>")
         versions_html=''.join(version_rows) or '<tr><td colspan=5>Brak zapisanych wersji.</td></tr>'
-        body=f"""<div class='topbar'><div><h1>{esc(d['title'])}</h1><div class='sub'>{case_html} · {esc(d['doc_type'])} · {esc(d['status'])}</div></div><div><a class='btn' href='/draft/{did}/edit'>Edytuj</a> {file_buttons} {center_action} {to_doc}</div></div>{msg}<div class='grid'><div class='card span8'><h2>Treść projektu</h2>{content}{draft_preview}</div><div class='card span4'><h2>Informacje</h2><p><b>Status:</b> {esc(d['status'])}<br><b>Termin:</b> {fmt_date(d['due_date']) if d['due_date'] else '—'}<br><b>Plik:</b> {esc(d['original_name']) or '—'}<br><b>Autor:</b> {esc(d['created_by'])}<br><b>Ostatnia zmiana:</b> {esc(str(d['updated_at'])[:16])}</p><h3>Notatki</h3><div style='white-space:pre-wrap'>{esc(d['notes']) or '—'}</div><hr><form method='post' action='/draft/{did}/archive'><button class='btn'>Archiwizuj projekt</button></form></div><div class='card span12'><div class='section-head'><div><h2>Historia wersji</h2><div class='small muted'>Każdy zapis tworzy wersję tekstu i kopię pliku roboczego, jeśli plik istnieje.</div></div></div><table><tr><th>Wersja</th><th>Data</th><th>Autor</th><th>Opis</th><th></th></tr>{versions_html}</table></div></div>"""
+        body=f"""<div class='topbar'><div><h1>{esc(d['title'])}</h1><div class='sub'>{case_html} · {esc(d['doc_type'])} · {esc(d['status'])}</div></div><div><a class='btn' href='/draft/{did}/edit'>Edytuj</a> {file_buttons} {center_action} {corr_action} {to_doc}</div></div>{msg}<div class='grid'><div class='card span8'><h2>Treść projektu</h2>{content}{draft_preview}</div><div class='card span4'><h2>Informacje</h2><p><b>Status:</b> {esc(d['status'])}<br><b>Termin:</b> {fmt_date(d['due_date']) if d['due_date'] else '—'}<br><b>Plik:</b> {esc(d['original_name']) or '—'}<br><b>Autor:</b> {esc(d['created_by'])}<br><b>Ostatnia zmiana:</b> {esc(str(d['updated_at'])[:16])}</p><h3>Notatki</h3><div style='white-space:pre-wrap'>{esc(d['notes']) or '—'}</div><hr><form method='post' action='/draft/{did}/archive'><button class='btn'>Archiwizuj projekt</button></form></div><div class='card span12'><div class='section-head'><div><h2>Historia wersji</h2><div class='small muted'>Każdy zapis tworzy wersję tekstu i kopię pliku roboczego, jeśli plik istnieje.</div></div></div><table><tr><th>Wersja</th><th>Data</th><th>Autor</th><th>Opis</th><th></th></tr>{versions_html}</table></div></div>"""
+        with db() as con: body += linked_records_panel(con,'draft',d)
         self.send_html(layout('Projekt pisma',body,'drafts'))
 
     def draft_edit_page(self,did,message=''):

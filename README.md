@@ -1,4 +1,4 @@
-# RK KANCELARIA 0.3.4-dev1
+# RK KANCELARIA 0.3.6-dev1
 
 **CASE WORKSPACE** — zakładkowy warsztat prowadzenia sprawy.
 
@@ -107,3 +107,26 @@ wymagają każdorazowego sprawdzenia i zatwierdzenia przez użytkownika.
 - Przed wpisaniem terminu procesowego trzeba ręcznie potwierdzić daty, podstawę i sposób wyliczenia.
 - OCR skanów i transkrypcja nagrań nie są zgadywane; gdy nie ma tekstu, wymagana jest ręczna ocena.
 - Addytywna migracja schematu SQLite do wersji 325. Nie dotyka plików użytkownika podczas kompilacji.
+
+
+## Obieg korespondencji — 0.3.5-dev1
+
+- Lokalny rejestr korespondencji wychodzącej i przychodzącej przypisanej do spraw.
+- Odrębne stany: przygotowano, wysłano, doręczono, odpowiedziano, zamknięto.
+- Dowód nadania, dowód doręczenia, dokument źródłowy i projekt pisma są wskazywane z istniejących dokumentów bez ich kopiowania.
+- Powiązane odpowiedzi i historia zmian.
+- Ręcznie wpisana data **organizacyjna** oczekiwanej odpowiedzi pokazuje sugestię monitu.
+- Monit to zadanie tworzone dopiero po potwierdzeniu; bez wysyłania jakiejkolwiek korespondencji.
+- Program **nie** ustala skuteczności doręczenia, nie oblicza terminów procesowych i nie interpretuje treści korespondencji.
+- Addytywna, idempotentna migracja SQLite do schematu 326; podczas budowania nie otwiera plików Data użytkownika.
+
+
+## Terminy i nawigacja — 0.3.6-dev1
+
+- W zakładce **Terminy** widoczny jest rzeczywisty rekord źródłowy, odnośnik i przycisk przeniesienia zadania/alertu do Kosza.
+- Datę „następnej czynności w sprawie” można osobno wyczyścić; nie jest zadaniem.
+- Tytuły zadań są klikalne w warsztacie sprawy, widoku Dzisiaj, Pulpicie, listach i kalendarzu.
+- W edytorze zadań, dokumentach i projektach pism jest panel powiązań z innymi rekordami.
+- W kalendarzu kliknięcie prowadzi do konkretnego zadania, zdarzenia lub sprawy zamiast zawsze do ogólnej karty.
+- Usunięcie zadania zachowuje mechanizm Kosza i historii. Nie usuwamy żadnych wpisów w czasie migracji.
+- Odnośniki opierają się wyłącznie na rzeczywistych identyfikatorach, bez zgadywania relacji po nazwie.
