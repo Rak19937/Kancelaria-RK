@@ -1,0 +1,16 @@
+import unittest
+
+class Combined:
+    def test_modules_connected(self):
+        for marker in (
+            'ensure_inbox_schema(con)',
+            'if path == "/powers": return self.powers_page(qs)',
+            'if path == "/inbox": return self.inbox_page()',
+            'if path == "/workflow": return self.action_center_page()',
+            'def about_page(self):',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker,self.source)
+
+    def test_neutral_placeholders(self):
+        pass

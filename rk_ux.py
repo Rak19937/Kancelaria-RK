@@ -1,0 +1,55 @@
+"""RK KANCELARIA 0.3.9: wyłącznie prezentacja kontekstu i skrótów, bez migracji bazy."""
+from html import escape
+from rk_document_data import list_open_case_tasks
+
+
+def doc_workspace_panel(con, document, readonly=False):
+    """Bezpieczny, nieedytujący panel pracy obok oryginalnego podglądu."""
+    cid = int(document['case_id'])
+    did = int(document['id'])
+    tasks = list_open_case_tasks(con, cid)
+    heading = escape(str(document['title'] or 'Dokument'), quote=True)
+    task_rows = ''.join(
+        '<li><a href="/task/{}/edit">{}</a><small>{}</small></li>'.format(
+            int(t['id']), escape(str(t['title'] or ''), quote=True),
+            escape(str(t['due_date'] or 'Bez daty'), quote=True))
+        for t in tasks)
+    if not task_rows:
+        task_rows = '<li class="rk-muted">Brak otwartych zadań w tej sprawie.</li>'
+    actions = '' if readonly else f'''<section class="rk-ux-panel-section">
+      <h3>Nowe zadanie w tej sprawie</h3>
+      <form method="post" action="/task/create" class="rk-inline-task">
+       <input type="hidden" name="case_id" value="{cid}">
+       <input type="hidden" name="return_to" value="/document/{did}/open">
+       <label for="rk-ux-task-title">Czynność</label>
+       <input id="rk-ux-task-title" name="title" required maxlength="250" placeholder="Np. przygotować odpowiedź">
+       <label for="rk-ux-task-date">Planowana data (opcjonalnie)</label>
+       <input id="rk-ux-task-date" name="due_date" type="date">
+       <button class="btn primary" type="submit">Dodaj zadanie</button>
+      </form></section>'''
+    return f'''<aside class="rk-ux-side" aria-label="Panel czynności dokumentu">
+      <section class="rk-ux-panel-section"><h2>Praca z dokumentem</h2>
+       <div class="rk-muted">{heading}</div>
+       <a class="btn small" href="/case/{cid}?tab=documents">Teczka sprawy</a>
+       <a class="btn small" href="/case/{cid}/chronology">Chronologia</a>
+       <a class="btn small" href="/evidence?case_id={cid}">Centrum dowodowe</a>
+      </section>
+      {actions}
+      <section class="rk-ux-panel-section"><h3>Otwarte zadania</h3><ul class="rk-ux-task-list">{task_rows}</ul></section>
+      <section class="rk-ux-panel-section"><h3>Powiązania</h3>
+       <a href="/document/{did}/links">Powiązane sprawy</a>
+       <p class="rk-muted">Terminy procesowe i działania sugerowane z treści pisma wymagają osobnego zatwierdzenia.</p>
+      </section>
+    </aside>'''
+
+
+def timeline_category(source):
+    """Kategorie widoku, bez ingerencji w źródłowe rekordy lub sortowanie."""
+    s = str(source or '').lower()
+    if s.startswith('document') or s == 'doc-event':
+        return 'documents'
+    if s.startswith('correspondence'):
+        return 'correspondence'
+    if s in ('task', 'appointment', 'case-date', 'process-next', 'draft'):
+        return 'tasks'
+    return 'events'

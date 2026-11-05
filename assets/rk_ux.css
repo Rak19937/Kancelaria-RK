@@ -1,0 +1,23 @@
+/* RK KANCELARIA UX 0.3.9 — warstwa progresywna, bez zmian danych. */
+.rk-ux-document-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,320px);gap:16px;align-items:start}
+.rk-ux-main{min-width:0}.rk-ux-side{position:sticky;top:12px;display:grid;gap:12px;max-height:calc(100vh - 24px);overflow:auto}
+.rk-ux-panel-section{background:var(--card,#fff);color:var(--text,inherit);border:1px solid var(--line,#d6dfe0);padding:16px;border-radius:12px}
+.rk-ux-panel-section h2,.rk-ux-panel-section h3{margin:0 0 10px;font-size:1.05rem}.rk-muted{opacity:.73;font-size:.89rem}
+.rk-inline-task{display:grid;gap:8px}.rk-inline-task label{font-size:.85rem;font-weight:600}.rk-inline-task input{min-width:0;width:100%;box-sizing:border-box}
+.rk-ux-task-list{list-style:none;padding:0;margin:0}.rk-ux-task-list li{border-bottom:1px solid var(--line,#d6dfe0);padding:8px 0}.rk-ux-task-list small{display:block;opacity:.7}
+.rk-ux-timeline-controls{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0}.rk-ux-timeline-controls button[aria-pressed="true"]{font-weight:700;outline:2px solid var(--accent,#3b807d)}
+.rk-ux-timeline-item[hidden]{display:none!important}.rk-ux-chain{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;margin:10px 0}
+.rk-ux-chain-step{border:1px solid var(--line,#d6dfe0);border-radius:10px;padding:10px;flex:1 1 140px;min-width:0}.rk-ux-chain-step small{display:block;margin-top:5px;opacity:.7}
+.rk-ux-chain-arrow{align-self:center;opacity:.6}
+.rk-ux-command{position:fixed;z-index:9500;inset:0;background:#0009;display:grid;place-items:start center;padding:12vh 16px 16px}
+.rk-ux-command[hidden]{display:none}.rk-ux-command-dialog{width:min(640px,100%);background:var(--card,#fff);color:var(--text,#152b32);border-radius:14px;padding:18px;box-shadow:0 20px 80px #0005}
+.rk-ux-command-dialog input{width:100%;box-sizing:border-box;font-size:1.1rem;padding:12px}.rk-ux-command-links{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.rk-ux-command-links a{padding:7px 10px;border:1px solid var(--line,#ddd);border-radius:8px;text-decoration:none;color:inherit}
+.rk-ux-toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin:8px 0 14px}
+.rk-ux-toolbar button{cursor:pointer}.rk-ux-focus .dashboard-body-grid>.card:not(.attention-card){display:none}.rk-ux-focus .dashboard-body-grid>.card:nth-child(-n+3){display:block}
+.rk-ux-focus .dashboard-body-grid>.backup-card{display:none}
+.rk-ux-compact-nav .sidebar .nav-section{margin-bottom:8px}
+.rk-ux-compact-nav .sidebar .nav-link:not(.active){padding-top:5px;padding-bottom:5px}
+.rk-ux-toast{position:fixed;bottom:24px;right:24px;z-index:9800;background:var(--card,#fff);border:1px solid var(--line,#ddd);border-radius:10px;padding:12px 16px;box-shadow:0 4px 20px #0003}
+@media(max-width:1050px){.rk-ux-document-grid{grid-template-columns:1fr}.rk-ux-side{position:static;max-height:none}}
+@media(prefers-reduced-motion:reduce){.rk-ux-command,.rk-ux-toast{scroll-behavior:auto}}
