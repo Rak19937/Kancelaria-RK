@@ -46,7 +46,8 @@ jobs:
         run: |
           if ((Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.4-dev1"' -Quiet) -or
               (Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.5-dev1"' -Quiet) -or
-              (Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.6-dev1"' -Quiet)) {
+              (Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.6-dev1"' -Quiet) -or
+              (Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.7-dev1"' -Quiet)) {
             Write-Host "Stare integratory nie są wymagane."
           } else {
             python RK_AKTUALIZACJA_ZBIORCZA.py .
@@ -59,7 +60,8 @@ jobs:
         shell: pwsh
         run: |
           if ((Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.5-dev1"' -Quiet) -or
-              (Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.6-dev1"' -Quiet)) {
+              (Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.6-dev1"' -Quiet) -or
+              (Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.7-dev1"' -Quiet)) {
             Write-Host "Centrum decyzji jest już zintegrowane."
           } else {
             python ZASTOSUJ_OBIEG.py .
@@ -69,7 +71,8 @@ jobs:
       - name: Zintegruj obieg korespondencji 0.3.5-dev1
         shell: pwsh
         run: |
-          if (Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.6-dev1"' -Quiet) {
+          if ((Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.6-dev1"' -Quiet) -or
+              (Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.7-dev1"' -Quiet)) {
             Write-Host "Korespondencja 0.3.5 jest juz zintegrowana."
           } else {
             python ZASTOSUJ_KORESPONDENCJE.py .
@@ -79,13 +82,29 @@ jobs:
       - name: Zintegruj nawigacje i usuwanie terminow 0.3.6-dev1
         shell: pwsh
         run: |
-          python ZASTOSUJ_NAWIGACJE.py .
+          if (Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.7-dev1"' -Quiet) {
+            Write-Host "Modul 0.3.6 jest juz czescia 0.3.7."
+          } else {
+            python ZASTOSUJ_NAWIGACJE.py .
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Terminy, kalendarz osobisty, zespoly i sprawy poboczne 0.3.7-dev1
+        shell: pwsh
+        run: |
+          python ZASTOSUJ_WORKSPACE_PLUS.py .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Otwarty katalog kategorii spraw 0.3.7-dev1
+        shell: pwsh
+        run: |
+          python ZASTOSUJ_KATEGORIE.py .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Testy zrodel przed buildem
         shell: pwsh
         run: |
-          python -m py_compile app.py rk_inbox.py rk_document_hub.py rk_unified_preview.py rk_action_center.py rk_correspondence.py rk_record_navigation.py ZASTOSUJ_NAWIGACJE.py ZASTOSUJ_PODGLAD.py ZASTOSUJ_OBIEG.py ZASTOSUJ_KORESPONDENCJE.py RK_STABILIZACJA.py RK_AKTUALIZACJA_ZBIORCZA.py RK_WYCZYSC_PODPOWIEDZI.py desktop.py rk_paths.py rk_sync.py RK_KANCELARIA_DESKTOP.pyw
+          python -m py_compile app.py rk_inbox.py rk_document_hub.py rk_unified_preview.py rk_action_center.py rk_correspondence.py rk_record_navigation.py rk_workspace_plus.py rk_case_categories.py ZASTOSUJ_WORKSPACE_PLUS.py ZASTOSUJ_KATEGORIE.py ZASTOSUJ_NAWIGACJE.py ZASTOSUJ_PODGLAD.py ZASTOSUJ_OBIEG.py ZASTOSUJ_KORESPONDENCJE.py RK_STABILIZACJA.py RK_AKTUALIZACJA_ZBIORCZA.py RK_WYCZYSC_PODPOWIEDZI.py desktop.py rk_paths.py rk_sync.py RK_KANCELARIA_DESKTOP.pyw
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python TEST_TRUE_PORTABLE_PATHS.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -115,6 +134,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python TEST_INTEGRACJA_NAWIGACJI.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python TEST_WORKSPACE_PLUS.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python TEST_CASE_CATEGORIES.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python TEST_INTEGRACJA_KATEGORII.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python RK_KANCELARIA_DESKTOP.pyw --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -128,7 +153,7 @@ jobs:
           git add app.py rk_inbox.py README.md
           git diff --cached --quiet
           if ($LASTEXITCODE -ne 0) {
-            git commit -m "RK KANCELARIA 0.3.6-dev1: term controls and internal navigation"
+            git commit -m "RK KANCELARIA 0.3.7-dev1: personal calendars, multi-assignee tasks, side cases and categories"
             if ($LASTEXITCODE -ne 0) { throw "Nie udało się zapisać commita" }
             git push origin HEAD:main
             if ($LASTEXITCODE -ne 0) { throw "Zapis źródeł został zablokowany; build jest kontynuowany" }
