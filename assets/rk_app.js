@@ -106,12 +106,7 @@
   document.addEventListener('keydown', e => {
     if (!e.ctrlKey || e.altKey || e.metaKey) return;
     const key = String(e.key || '').toLowerCase();
-    if (key === 'k') {
-      e.preventDefault();
-      const inp = document.querySelector('[data-global-search], #globalSearchInput');
-      if (inp) { inp.focus(); inp.select(); }
-      else location.href = '/search?focus=1';
-    } else if (key === 'j') {
+    if (key === 'j') {
       e.preventDefault();
       location.href = '/quick-add';
     } else if (key === 'n') {

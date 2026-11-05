@@ -3,6 +3,7 @@
 import ast
 from pathlib import Path
 import unittest
+from rk_routes import GET_ROUTES
 
 ROOT=Path(__file__).resolve().parent
 
@@ -29,14 +30,14 @@ class CombinedUpdateTests(unittest.TestCase):
             'ensure_document_hub_schema(con)',
             'ensure_action_center_schema(con)',
             'docs=case_document_rows(con,cid)',
-            'if path == "/powers": return self.powers_page(qs)',
-            'if path == "/inbox": return self.inbox_page()',
-            'if path == "/workflow": return self.action_center_page()',
             'def about_page(self):',
             "href='/document/{did}/links'",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker,self.source)
+        self.assertEqual(GET_ROUTES['/powers'], ('powers_page', 'q'))
+        self.assertEqual(GET_ROUTES['/inbox'], ('inbox_page', ''))
+        self.assertEqual(GET_ROUTES['/workflow'], ('action_center_page', ''))
 
     def test_neutral_placeholders(self):
         for marker in ('np. Klient A','np. pilne, do analizy, termin','Fikcyjne dane demonstracyjne'):

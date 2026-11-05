@@ -54,6 +54,10 @@ from rk_workspace_plus import WorkspacePlusMixin, ensure_workspace_plus_schema, 
 from rk_case_categories import CaseCategoryMixin, ensure_case_categories_schema, category_form, save_categories, category_map, category_chips
 from rk_caseflow import CaseflowMixin, ensure_caseflow_schema, quick_nav_html, dependency_rows, unresolved_dependencies, dependency_blocking_counts
 from rk_document_hub import DocumentHubMixin, case_document_rows, ensure_document_hub_schema
+from rk_ux import doc_workspace_panel
+from rk_navigation import render_sidebar_navigation
+from rk_dashboard_data import dashboard_snapshot
+from rk_routes import dispatch_static_get, dispatch_static_post
 from rk_inbox import InboxMixin, ensure_inbox_schema
 from rk_paths import resolve_runtime_paths, installed_data_dir
 from rk_smart import (
@@ -67,7 +71,7 @@ from rk_smart import (
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.3.8-dev1"
+VERSION = "0.3.10-dev1"
 SCHEMA_VERSION = 330
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
@@ -2510,55 +2514,7 @@ def is_case_pinned(user_id: int | None, case_id: int) -> bool:
 def layout(title: str, body: str, active: str = "") -> str:
     body = nav_strip(title) + quick_nav_html() + body
     user = current_request_user()
-    nav_sections = [
-        ("PRACA", [
-            ("/", "⌂", "Pulpit", "dashboard"),
-            ("/today", "◷", "Dzisiaj", "today"),
-            ("/calendar", "▦", "Kalendarz kancelarii", "calendar"),
-            ("/my-calendar", "▣", "Mój kalendarz", "mycalendar"),
-            ("/cases", "§", "Sprawy", "cases"),
-            ("/case-categories", "▧", "Kategorie spraw", "case-categories"),
-            ("/cases?mine=1", "◎", "Moje sprawy", "my_cases"),
-            ("/tasks", "✓", "Zadania", "tasks"),
-            ("/documents", "▤", "Dokumenty — teczki", "documents"),
-            ("/evidence", "⚖", "Centrum dowodowe", "evidence"),
-            ("/powers", "§", "Pełnomocnictwa", "powers"),
-            ("/inbox", "✉", "Skrzynka wpływu", "inbox"),
-            ("/workflow", "☑", "Centrum decyzji", "workflow"),
-            ("/correspondence", "✉", "Korespondencja", "correspondence"),
-            ("/drafts", "✎", "Pisma", "drafts"),
-        ]),
-        ("WIĘCEJ", [
-            ("/cases/closed", "□", "Sprawy zakończone", "closed_cases"),
-            ("/entities", "♙", "Kartoteka podmiotów", "entities"),
-            ("/checklists", "☑", "Checklisty", "checklists"),
-            ("/views", "☆", "Moje widoki", "views"),
-            ("/tags", "#", "Tagi", "tags"),
-            ("/law", "¶", "Prawo", "law"),
-            ("/search", "⌕", "Wyszukiwarka", "search"),
-        ]),
-        ("SYSTEM", [
-            ("/history", "↺", "Historia zmian", "history"),
-            ("/trash", "⌫", "Kosz", "trash"),
-            ("/backups", "⛁", "Kopie bezpieczeństwa", "backups"),
-            ("/about", "ⓘ", "O programie", "about"),
-        ]),
-    ]
-    if user and user['role'] == 'admin':
-        nav_sections[-1][1].append(("/audit", "≡", "Dziennik audytowy", "audit"))
-        nav_sections[-1][1].append(("/security", "◇", "Bezpieczeństwo", "security"))
-        nav_sections[-1][1].append(("/recovery", "↥", "Recovery", "recovery"))
-        nav_sections[-1][1].append(("/cloud", "☁", "Cloud / PWA", "cloud"))
-        nav_sections[-1][1].append(("/admin/users", "♟", "Użytkownicy", "users"))
-    nav_parts=[]
-    for section,items in nav_sections:
-        links="".join(f'<a class="nav-link {"active" if active==key else ""}" href="{href}"><span class="nav-icon">{icon}</span><span>{label}</span></a>' for href,icon,label,key in items)
-        if section=='SYSTEM':
-            opened=' open' if any(active==x[3] for x in items) else ''
-            nav_parts.append(f'<details class="nav-system"{opened}><summary><span>USTAWIENIA I SYSTEM</span><span class="nav-system-arrow">›</span></summary><div class="nav-system-links">{links}</div></details>')
-        else:
-            nav_parts.append(f'<div class="nav-section"><div class="nav-section-title">{esc(section)}</div>{links}</div>')
-    nav_html=''.join(nav_parts)
+    nav_html = render_sidebar_navigation(active, user, esc)
     if user:
         role = "Administrator" if user['role']=='admin' else "Użytkownik"
         func = f"<div class='small' style='color:#d7c48a;margin-top:3px'>{esc(user['function'])}</div>" if user['function'] else ''
@@ -2575,12 +2531,14 @@ def layout(title: str, body: str, active: str = "") -> str:
 <link rel="icon" type="image/x-icon" href="/assets/rk_kancelaria.ico">
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#082b36"><meta name="apple-mobile-web-app-capable" content="yes">
 <link rel="stylesheet" href="/assets/rk_app.css?v={VERSION}">
+<link rel="stylesheet" href="/assets/rk_ux.css?v={VERSION}">
 </head><body data-auto-shutdown="{'1' if AUTO_SHUTDOWN else '0'}"><div class="app"><aside class="sidebar"><div class="brand"><img src="/assets/rk_kancelaria_logo.png" alt="RK"><div class="brand-title">RK KANCELARIA<small>Baza spraw · v{VERSION}</small></div></div>{nav_html}
 {user_box}
-<div class='sidebar-tools'><button type='button' class='sidebar-mini-btn' data-compact-toggle title='Przełącz gęstość interfejsu'>↔ Tryb kompaktowy</button></div><div class='shortcut-help'><span class='kbd'>Ctrl+K</span> szukaj · <span class='kbd'>Ctrl+J</span> dodaj · <span class='kbd'>Ctrl+N</span> sprawa</div>
+<div class='sidebar-tools'><button type='button' class='sidebar-mini-btn' data-compact-toggle title='Przełącz gęstość interfejsu'>↔ Tryb kompaktowy</button></div><div class='shortcut-help'><span class='kbd'>Ctrl+F</span> szukaj · <span class='kbd'>Ctrl+J</span> dodaj · <span class='kbd'>Ctrl+N</span> sprawa</div>
 <div class="program-author">AUTOR PROGRAMU<b>{APP_AUTHOR}</b></div>
 </aside><main class="main">{startup_notice}{body}</main></div><a class="global-add" href="/quick-add" title="Dodaj czynność" aria-label="Dodaj czynność">＋</a><div id="autosaveStatus" class="autosave-status"></div>
-<script src="/assets/rk_app.js?v={VERSION}" defer></script></body></html>"""
+<script src="/assets/rk_app.js?v={VERSION}" defer></script>
+<script src="/assets/rk_ux.js?v={VERSION}" defer></script></body></html>"""
 
 
 def writing_tabs(active: str) -> str:
@@ -3138,44 +3096,45 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
         if not self.require_auth():
             return
         try:
+            if dispatch_static_get(self, path, qs): return
             if path == '/onboarding': return self.onboarding_page()
             if path == '/account': return self.account_page()
             if path == '/admin/users': return self.users_page()
             if path == '/admin/user/new': return self.user_new_page()
             if re.fullmatch(r"/admin/user/\d+/edit", path): return self.user_edit_page(int(path.split('/')[3]))
-            if path == "/": return self.dashboard()
-            if path == "/today": return self.today_page(qs)
-            if path == "/calendar": return self.calendar_page(qs)
-            if path == "/my-calendar": return self.my_calendar_page(qs)
+
+
+
+
             if re.fullmatch(r"/appointment/\d+",path): return self.appointment_page(int(path.split("/")[2]))
             if re.fullmatch(r"/case/\d+/sidecases",path): return self.sidecase_page(int(path.split("/")[2]))
             if path == "/law": return self.law_page(qs)
             if re.fullmatch(r"/law/[A-Za-z0-9_-]+", path): return self.law_page(qs, path.split("/")[2].upper())
-            if path == "/quick-add": return self.quick_add_page(qs)
-            if path == "/deadline": return self.deadline_page(qs)
-            if path == "/cases": return self.cases(qs, closed_only=False)
-            if path == "/case-categories": return self.category_catalog_page()
-            if path == "/evidence": return self.caseflow_evidence(qs)
-            if path == "/navigate": return self.caseflow_navigate(qs)
+
+
+
+
+
+
             if re.fullmatch(r"/case/\d+/chronology",path): return self.caseflow_chronology(int(path.split("/")[2]),qs)
             if re.fullmatch(r"/task/\d+/dependencies",path): return self.caseflow_dependencies_page(int(path.split("/")[2]))
-            if path == "/cases/closed": return self.cases(qs, closed_only=True)
-            if path == "/case/new": return self.case_new()
-            if path == "/entities": return self.entities_page(qs)
-            if path == "/entity/new": return self.entity_new_page()
+
+
+
+
             if re.fullmatch(r"/entity/\d+", path): return self.entity_view(int(path.split("/")[2]))
             if re.fullmatch(r"/entity/\d+/edit", path): return self.entity_edit_page(int(path.split("/")[2]))
-            if path == "/checklists": return self.checklists_page()
-            if path == "/audit": return self.immutable_audit_page(qs)
-            if path == "/security": return self.security_page()
-            if path == "/recovery": return self.recovery_page()
-            if path == "/cloud": return self.cloud_page()
-            if path == "/case/import": return self.case_import_page()
+
+
+
+
+
+
             if re.fullmatch(r"/case/\d+/export/package", path): return self.case_export_package(int(path.split("/")[2]))
-            if path == "/trash": return self.trash_page(qs)
-            if path == "/history": return self.history_page(qs)
-            if path == "/about": return self.about_page()
-            if path == "/backups": return self.backups_page()
+
+
+
+
             if re.fullmatch(r"/case/\d+/history", path): return self.case_history_page(int(path.split("/")[2]))
             if re.fullmatch(r"/process-event/\d+/edit", path): return self.process_event_edit(int(path.split("/")[2]))
             if re.fullmatch(r"/case/\d+", path): return self.case_view(int(path.split("/")[-1]), qs)
@@ -3189,8 +3148,8 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
             if re.fullmatch(r"/document/\d+/edit", path): return self.document_edit(int(path.split("/")[2]))
             if re.fullmatch(r"/relation/\d+/edit", path): return self.relation_edit(int(path.split("/")[2]))
             if re.fullmatch(r"/external-signature/\d+/edit", path): return self.external_signature_edit(int(path.split("/")[2]))
-            if path == "/tasks": return self.tasks_page(qs)
-            if path == "/views": return self.saved_views_page()
+
+
             if path == "/drafts":
                 if (qs.get('view') or ['projects'])[0] == 'templates':
                     return self.draft_templates_page()
@@ -3201,23 +3160,23 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
             if re.fullmatch(r"/draft/\d+/edit", path): return self.draft_edit_page(int(path.split("/")[2]))
             if re.fullmatch(r"/draft/\d+/file", path): return self.draft_inline_file(int(path.split("/")[2]))
             if re.fullmatch(r"/draft/\d+/download", path): return self.draft_download(int(path.split("/")[2]))
-            if path == "/documents": return self.documents_page(qs)
-            if path == "/powers": return self.powers_page(qs)
+
+
             if re.fullmatch(r"/powers/\d+/edit",path): return self.power_edit_page(int(path.split("/")[2]))
             if re.fullmatch(r"/document/\d+/links",path): return self.document_links_page(int(path.split("/")[2]))
-            if path == "/inbox": return self.inbox_page()
-            if path == "/workflow": return self.action_center_page()
-            if path == "/correspondence": return self.correspondence_page(qs)
-            if path == "/correspondence/new": return self.correspondence_form(qs)
+
+
+
+
             if re.fullmatch(r"/correspondence/\d+/edit",path): return self.correspondence_form(record_id=int(path.split("/")[2]))
             if re.fullmatch(r"/correspondence/\d+",path): return self.correspondence_detail(int(path.split("/")[2]))
             if re.fullmatch(r"/workflow/review/\d+",path): return self.action_center_review_page(int(path.split("/")[3]))
             if re.fullmatch(r"/inbox/\d+/file", path): return self.inbox_file(int(path.split("/")[2]))
             if re.fullmatch(r"/inbox/\d+", path): return self.inbox_review(int(path.split("/")[2]))
-            if path == "/tags": return self.tags_page(qs)
-            if path == "/search": return self.search_page(qs)
-            if path == "/backup": return self.backup()
-            if path == "/backup/snapshot": return self.full_snapshot_download()
+
+
+
+
             if re.fullmatch(r"/document/\d+/open", path): return self.document_view(int(path.split("/")[2]), qs)
             if re.fullmatch(r"/document/\d+/download", path): return self.document_file(int(path.split("/")[2]), download=True)
             if re.fullmatch(r"/document/\d+/file", path): return self.document_file(int(path.split("/")[2]), download=False)
@@ -3265,18 +3224,19 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
                 if ro:
                     return self.send_html(layout('Sprawa tylko do odczytu',f"<div class='readonly-banner'><b>Sprawa jest zakończona i zablokowana.</b> Administrator może ją odblokować z karty sprawy. <a class='btn' href='/case/{cid_ro}'>Wróć</a></div>",'cases'),403)
         try:
-            if path == '/logout': return self.logout_submit()
-            if path == '/account/update': return self.account_update(fields)
-            if path == '/account/password': return self.account_password(fields)
-            if path == '/admin/user/create': return self.user_create(fields)
+
+
+
+
+            if dispatch_static_post(self, path, fields, files): return
             if re.fullmatch(r"/admin/user/\d+/update", path): return self.user_update(int(path.split('/')[3]), fields)
             if re.fullmatch(r"/admin/user/\d+/password", path): return self.user_password_reset(int(path.split('/')[3]), fields)
             if re.fullmatch(r"/admin/user/\d+/delete", path): return self.user_delete(int(path.split('/')[3]), fields)
-            if path == "/entity/create": return self.entity_create(fields)
+
             if re.fullmatch(r"/entity/\d+/update", path): return self.entity_update(int(path.split('/')[2]), fields)
             if re.fullmatch(r"/case/\d+/entity", path): return self.case_entity_add(int(path.split('/')[2]), fields)
             if re.fullmatch(r"/case-entity/\d+/delete", path): return self.case_entity_delete(int(path.split('/')[2]), fields)
-            if path == "/checklist/template/create": return self.checklist_template_create(fields)
+
             if re.fullmatch(r"/checklist/template/\d+/delete", path): return self.checklist_template_delete(int(path.split('/')[3]), fields)
             if re.fullmatch(r"/case/\d+/checklist/apply", path): return self.case_checklist_apply(int(path.split('/')[2]), fields)
             if re.fullmatch(r"/case/\d+/checklist/add", path): return self.case_checklist_add(int(path.split('/')[2]), fields)
@@ -3285,20 +3245,20 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
             if re.fullmatch(r"/case/\d+/unlock", path): return self.case_unlock(int(path.split('/')[2]), fields)
             if re.fullmatch(r"/case/\d+/lock", path): return self.case_lock(int(path.split('/')[2]), fields)
             if re.fullmatch(r"/case/\d+/reopen", path): return self.case_reopen(int(path.split('/')[2]), fields)
-            if path == "/admin/reindex-documents": return self.reindex_documents(fields)
-            if path == "/security/ocr/install": return self.ocr_install_start(fields)
-            if path == "/security/key": return self.security_key_update(fields)
-            if path == "/backup/encrypted": return self.encrypted_backup(fields)
-            if path == "/backup/manual": return self.manual_backup_now(fields)
-            if path == "/recovery/check": return self.recovery_check(fields)
-            if path == "/recovery/test-restore": return self.recovery_test_restore(fields)
-            if path == "/recovery/snapshot-import": return self.full_snapshot_import(fields, files)
-            if path == "/cloud/config": return self.cloud_config_update(fields)
-            if path == "/cloud/check": return self.cloud_check(fields)
-            if path == "/cloud/push": return self.cloud_push(fields)
-            if path == "/cloud/pull": return self.cloud_pull(fields)
-            if path == "/backups/restore": return self.backup_restore_schedule(fields)
-            if path == "/data/import-installed": return self.data_import_installed(fields)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
             if re.fullmatch(r"/document/\d+/relocate", path): return self.document_relocate(int(path.split("/")[2]), fields, files)
             if re.fullmatch(r"/document/\d+/open-default", path): return self.document_open_default(int(path.split("/")[2]), fields)
             if re.fullmatch(r"/document/\d+/open-folder", path): return self.document_open_folder(int(path.split("/")[2]), fields)
@@ -3773,23 +3733,19 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
         display_name=(u['author_name'] or u['username'] or 'Użytkowniku').strip() if u else 'Użytkowniku'
         first_name=display_name.split()[0] if display_name else 'Użytkowniku'
         with db() as con:
-            status_counts = {r['status']: r['cnt'] for r in con.execute("SELECT status,COUNT(*) cnt FROM cases GROUP BY status").fetchall()}; counts = {st: status_counts.get(st,0) for st in STATUS_LABELS}
-            task_stats=con.execute("""SELECT
-                SUM(CASE WHEN t.due_date=? THEN 1 ELSE 0 END) due_today,
-                SUM(CASE WHEN t.due_date<>'' AND t.due_date<? THEN 1 ELSE 0 END) overdue,
-                SUM(CASE WHEN t.due_date>? AND t.due_date<=? THEN 1 ELSE 0 END) next7,
-                SUM(CASE WHEN t.priority='high' THEN 1 ELSE 0 END) high_priority
-                FROM tasks t JOIN cases c ON c.id=t.case_id
-                WHERE t.status='open' AND c.status<>'closed'""",(today,today,today,week_end)).fetchone()
-            due_today=int(task_stats['due_today'] or 0); overdue_count=int(task_stats['overdue'] or 0); next7_count=int(task_stats['next7'] or 0); high_count=int(task_stats['high_priority'] or 0)
-            dated = con.execute("""SELECT t.*,c.title case_title,c.signature,c.internal_signature FROM tasks t JOIN cases c ON c.id=t.case_id WHERE t.status='open' AND c.status<>'closed' AND t.due_date<>'' ORDER BY t.due_date,CASE t.priority WHEN 'high' THEN 0 ELSE 1 END,t.id LIMIT 15""").fetchall()
-            undated = con.execute("""SELECT t.*,c.title case_title,c.signature,c.internal_signature FROM tasks t JOIN cases c ON c.id=t.case_id WHERE t.status='open' AND c.status<>'closed' AND t.due_date='' ORDER BY CASE t.priority WHEN 'high' THEN 0 ELSE 1 END,t.id LIMIT 10""").fetchall()
-            upcoming = con.execute("SELECT * FROM cases WHERE status<>'closed' AND next_date<>'' AND next_date>=? ORDER BY next_date LIMIT 8", (today,)).fetchall()
-            recent_events = con.execute("SELECT e.*, c.title case_title, c.signature FROM events e JOIN cases c ON c.id=e.case_id WHERE c.status<>'closed' ORDER BY e.event_date DESC, e.id DESC LIMIT 8").fetchall()
-            pinned = con.execute("""SELECT c.* FROM user_case_pins p JOIN cases c ON c.id=p.case_id WHERE p.user_id=? AND c.status<>'closed' ORDER BY c.next_date='',c.next_date,c.title LIMIT 12""",(uid,)).fetchall() if uid else []
-            recent_cases = con.execute("""SELECT c.*,r.opened_at FROM user_case_recent r JOIN cases c ON c.id=r.case_id WHERE r.user_id=? ORDER BY r.opened_at DESC LIMIT 8""",(uid,)).fetchall() if uid else []
-            sig_ids=[r['id'] for r in pinned]+[r['id'] for r in recent_cases]+[r['case_id'] for r in dated]+[r['case_id'] for r in undated]+[r['id'] for r in upcoming]
-            sig_map=load_external_signature_map(con,sig_ids)
+            snapshot = dashboard_snapshot(con, today, week_end, uid, load_external_signature_map, STATUS_LABELS)
+        counts = snapshot['counts']
+        due_today = snapshot['due_today']
+        overdue_count = snapshot['overdue_count']
+        next7_count = snapshot['next7_count']
+        high_count = snapshot['high_count']
+        dated = snapshot['dated']
+        undated = snapshot['undated']
+        upcoming = snapshot['upcoming']
+        recent_events = snapshot['recent_events']
+        pinned = snapshot['pinned']
+        recent_cases = snapshot['recent_cases']
+        sig_map = snapshot['sig_map']
         def case_mini(r, extra=''):
             sig=primary_signature_fast(r['id'],r['signature'],sig_map)
             return f"<div class='dash-case'><a href='/case/{r['id']}'>{esc(sig if sig!='Bez sygnatury' else r['title'])}</a><div class='small muted'>{esc(r['title'])}</div>{extra}</div>"
@@ -6209,7 +6165,7 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
         editable=True
         edit_action=f"<a class='btn' href='/document/{did}/edit'>Edytuj / dodaj załączniki</a>" if editable else ''
         toolbar=f"<a class='btn' href='/case/{d['case_id']}?tab=documents'>← Wróć do sprawy</a> <a class='btn' href='/documents'>Dokumenty</a> {edit_action} <a class='btn primary' href='/document/{did}/download'>Pobierz</a> {desktop_actions}"
-        toolbar += f" <a class='btn' href='/document/{did}/links'>Powiązania spraw</a>"
+        toolbar += f" <a class='btn' href='/document/{did}/links'>Powiązania spraw</a> <a class='btn' href='/quick-add?case_id={d['case_id']}'>+ Dodaj w tej sprawie</a>"
         toolbar += (f" <form method='post' action='/workflow/analyze/document/{did}' "
                     "style='display:inline'><button class='btn primary'>Zaproponuj czynności</button></form>"
                     " <a class='btn' href='/workflow'>Centrum decyzji</a>")
@@ -6247,7 +6203,12 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
             family_html=f"<div class='card document-family'><h2>Załączniki ({len(children)})</h2><div class='document-attachment-list'>{''.join(attachment_rows)}</div></div>"
         body=f"<div class='topbar'><div><h1>{esc(d['title'])}</h1><div class='sub'>{esc(case_label)} · {meta}</div></div><div class='case-control-bar'>{toolbar}</div></div>{family_html}{preview}"
         extra_css="<style>.doc-native-view{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff}.doc-text-preview{background:#fff;border:1px solid var(--line);border-radius:10px;padding:28px;max-width:1200px;margin:0 auto;max-height:calc(100vh - 250px);overflow:auto;box-shadow:0 2px 10px rgba(0,0,0,.04)}.pdf-preview{min-height:420px}</style>"
-        with db() as con: body += linked_records_panel(con,'document',d)
+        with db() as con:
+            readonly = case_read_only(con, d['case_id'])
+            context_panel = doc_workspace_panel(con, d, readonly)
+            linked = linked_records_panel(con,'document',d)
+        # Bez zmian w danych dokumentów, oryginalnym podglądzie i relacjach.
+        body = f'<div class="rk-ux-document-grid"><div class="rk-ux-main">{body}</div>{context_panel}</div>' + linked
         self.send_html(layout('Podgląd dokumentu',extra_css+body,'documents'))
 
     def document_file(self,did,download=False):

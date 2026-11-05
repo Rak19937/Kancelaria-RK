@@ -3,6 +3,8 @@
 import ast
 import unittest
 from pathlib import Path
+from rk_navigation import NAV_SECTIONS
+from rk_routes import GET_ROUTES
 
 ROOT = Path(__file__).resolve().parent
 
@@ -30,19 +32,20 @@ class StabilitySmokeTests(unittest.TestCase):
         for marker in (
             'from rk_inbox import InboxMixin, ensure_inbox_schema',
             'ensure_inbox_schema(con)',
-            '("/inbox", "✉", "Skrzynka wpływu", "inbox")',
-            'if path == "/inbox": return self.inbox_page()',
             'if path == "/inbox/upload": return self.inbox_upload(fields, files)',
             'self.inbox_approve(', 'self.inbox_discard(',
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.src)
+        items = [item for section,links in NAV_SECTIONS for item in links]
+        self.assertIn(('/inbox','✉','Skrzynka wpływu','inbox'), items)
+        self.assertEqual(GET_ROUTES['/inbox'], ('inbox_page',''))
 
     def test_about_and_license(self):
-        for marker in ('def about_page(self):',
-                       '("/about", "ⓘ", "O programie", "about")',
-                       'if path == "/about": return self.about_page()'):
-            self.assertIn(marker, self.src)
+        self.assertIn('def about_page(self):', self.src)
+        items = [item for section,links in NAV_SECTIONS for item in links]
+        self.assertIn(('/about','ⓘ','O programie','about'), items)
+        self.assertEqual(GET_ROUTES['/about'], ('about_page',''))
         self.assertTrue((ROOT / 'LICENSE.txt').is_file())
 
 

@@ -27,12 +27,13 @@ def get(url: str) -> tuple[int, str, dict[str, str]]:
 
 def main() -> int:
     source = (ROOT / "app.py").read_text(encoding="utf-8")
+    nav_source = (ROOT / "rk_navigation.py").read_text(encoding="utf-8")
     css = (ROOT / "assets" / "rk_app.css").read_text(encoding="utf-8")
     assert ".calendar-grid" in css and "repeat(7,minmax(0,1fr))" in css
     assert ".case-workspace-sticky" in css
     assert ".module-tabs" in css
-    assert '("/drafts", "✎", "Pisma", "drafts")' in source
-    assert '("/draft/templates", "▣", "Szablony pism"' not in source
+    assert "('/drafts', '✎', 'Pisma', 'drafts')" in nav_source
+    assert "('/draft/templates', '▣', 'Szablony pism'" not in nav_source
     assert "class='calendar-board'" in source
     assert not (ROOT / "rk_app.css").exists(), "CSS w katalogu głównym znów dubluje assets"
     assert not (ROOT / "rk_app.js").exists(), "JS w katalogu głównym znów dubluje assets"

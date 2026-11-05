@@ -9,6 +9,8 @@ from __future__ import annotations
 import html
 import re
 import sqlite3
+from rk_ux import timeline_category
+from rk_search_data import find_navigation_matches
 import sys
 from datetime import date
 from urllib.parse import quote
@@ -214,7 +216,7 @@ def chronology_items(con, case_id):
 
 
 def quick_nav_html():
-    return ("<form action='/navigate' method='get' class='card' style='margin:0 0 12px;padding:10px 14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'>"
+    return ("<form action='/search' method='get' class='card' style='margin:0 0 12px;padding:10px 14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'>"
             "<label for='rkquickfind' class='small' style='font-weight:700'>Przejdź do sprawy lub dokumentu</label>"
             "<input id='rkquickfind' name='q' style='flex:1;min-width:160px' placeholder='Sygnatura, klient, nazwa lub dokument…' required>"
             "<button class='btn small primary'>Szukaj</button>"
@@ -357,7 +359,8 @@ class CaseflowMixin:
             items=chronology_items(con,cid)
         parts=[]
         for x in reversed(items) if reverse else items:
-            parts.append(f'<div class="card" style="padding:12px;margin:8px 0">'
+            cat=timeline_category(x['source'])
+            parts.append(f'<div class="card rk-ux-timeline-item" data-ux-source="{cat}" style="padding:12px;margin:8px 0">'
                          f'<div class="small muted">{esc(x["date"])} · {esc(x["kind"])}</div>'
                          f'<a class="case-link" href="{esc(x["url"])}"><b>{esc(x["title"])}</b></a>'
                          f'<div class="small muted">{esc(x["description"])}</div></div>')
@@ -369,21 +372,18 @@ class CaseflowMixin:
               f'<a class="btn" href="/evidence?case_id={cid}">Dowody</a> '
               f'<a class="btn" href="/case/{cid}/chronology?order={other}">'
               f'{"Najstarsze najpierw" if reverse else "Najnowsze najpierw"}</a></div>')
-        return self.send_html(a.layout('Chronologia sprawy',head+''.join(parts) if parts else head+'<div class="card">Brak datowanych wpisów.</div>','cases'))
+        controls=('<div class="rk-ux-timeline-controls" role="group" aria-label="Filtr zdarzeń">'
+                 + ''.join(f'<button type="button" class="btn small" data-ux-category="{key}" aria-pressed="{str(key=="all").lower()}">{label}</button>'
+                 for key,label in [('all','Wszystkie'),('documents','Dokumenty'),('tasks','Zadania i terminy'),('correspondence','Korespondencja'),('events','Pozostałe')])
+                 + '</div>')
+        timeline='<section data-ux-timeline>'+controls+(''.join(parts) if parts else '<div class="card">Brak datowanych wpisów.</div>')+'</section>'
+        return self.send_html(a.layout('Chronologia sprawy',head+timeline,'cases'))
 
     def caseflow_navigate(self,qs):
         a=_app(self);q=str((qs.get('q') or [''])[0]).strip()[:160]
         if not q:return self.redirect('/cases')
-        like='%'+q+'%'
         with a.db() as con:
-            cases=con.execute('''SELECT id,title,signature,client FROM cases
-               WHERE title LIKE ? OR signature LIKE ? OR internal_signature LIKE ? OR client LIKE ?
-               ORDER BY title LIMIT 50''',(like,like,like,like)).fetchall()
-            tasks=con.execute('''SELECT t.id,t.title,c.title case_title FROM tasks t
-                 JOIN cases c ON c.id=t.case_id WHERE t.title LIKE ? ORDER BY t.due_date,t.id LIMIT 30''',(like,)).fetchall()
-            docs=con.execute('''SELECT d.id,d.title,c.title case_title FROM documents d
-                 JOIN cases c ON c.id=d.case_id WHERE d.title LIKE ? OR d.original_name LIKE ?
-                 ORDER BY COALESCE(NULLIF(d.doc_date,''),NULLIF(d.received_date,''),SUBSTR(d.created_at,1,10)) DESC LIMIT 30''',(like,like)).fetchall()
+            cases,tasks,docs=find_navigation_matches(con,q)
         rows=['<h2>Sprawy</h2>']+[f'<p><a href="/case/{r["id"]}">{esc(r["signature"] or r["title"])}</a> — {esc(r["title"])}</p>' for r in cases]
         rows+=['<h2>Zadania</h2>']+[f'<p><a href="/task/{r["id"]}/edit">{esc(r["title"])}</a> · {esc(r["case_title"])}</p>' for r in tasks]
         rows+=['<h2>Dokumenty</h2>']+[f'<p><a href="/document/{r["id"]}/open">{esc(r["title"])}</a> · {esc(r["case_title"])}</p>' for r in docs]
@@ -425,10 +425,15 @@ class CaseflowMixin:
         opts+=''.join(f'<option value="task:{t["id"]}">Zadanie: {esc(t["title"])} ({esc(t["status"])})</option>' for t in related_tasks)
         opts+=''.join(f'<option value="document:{d["id"]}">Dokument: {esc(d["title"])}</option>' for d in related_docs)
         opts+=''.join(f'<option value="sidecase:{d["id"]}">Sprawa poboczna: {esc(d["needed_item"])} ({esc(d["status"])})</option>' for d in side)
+        chain = '<div class="rk-ux-chain">' + ''.join(
+            f'<div class="rk-ux-chain-step"><b>{"✓ Gotowe" if x["resolved"] else "⏳ Oczekuje"}</b>'
+            f'<small>{esc(x["label"])}</small></div><span class="rk-ux-chain-arrow" aria-hidden="true">→</span>'
+            for x in entries) + f'<div class="rk-ux-chain-step"><b>Zadanie</b><small>{esc(task["title"])}</small></div></div>'
         body=(f'<div class="topbar"><h1>Zależności: {esc(task["title"])}</h1></div>'
               f'<p><a class="btn" href="/task/{tid}/edit">← Zadanie</a> '
               f'<a class="btn" href="/case/{task["case_id"]}">Karta sprawy</a></p>'
               '<div class="card"><p class="small muted">Zadanie zależne nie jest automatycznie wykonywane. Potwierdzenie spełnienia warunków pozostaje po stronie użytkownika.</p>'
+              +chain+
               f'<table><tr><th>Rodzaj</th><th>Wymagany element</th><th>Stan</th><th>Akcje</th></tr>{rows or "<tr><td colspan=\"4\">Brak zależności.</td></tr>"}</table></div>'
               f'<div class="card"><h2>Dodaj zależność</h2><form method="post" action="/task/{tid}/dependencies/add" class="form-grid">'
               f'<div class="full"><label>Zależy od</label><select name="reference" required>{opts}</select></div>'
