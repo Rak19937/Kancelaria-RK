@@ -248,3 +248,57 @@ if('serviceWorker' in navigator && (location.protocol==='https:' || location.hos
     module.addEventListener('toggle', update);
   });
 })();
+
+// RK-INBOX-FEEDBACK-0310 — informacja zwrotna w czasie dłuższej lokalnej analizy OCR.
+// Nie przechwytujemy formularza przez fetch: zwykły POST + przekierowanie nadal działa.
+(() => {
+  'use strict';
+  const form = document.querySelector('form[data-rk-inbox-upload="1"]');
+  if (!form) return;
+  const fileInput = form.querySelector('input[type="file"][name="file"]');
+  const submit = form.querySelector('button[type="submit"]');
+  const info = document.getElementById('rk-inbox-upload-feedback');
+  if (!fileInput || !submit || !info) return;
+  const originalLabel = submit.textContent;
+  let sending = false;
+  let extendedNotice = null;
+  function show(message, error = false) {
+    info.hidden = false;
+    info.textContent = message;
+    info.setAttribute('role', error ? 'alert' : 'status');
+  }
+  function reset() {
+    sending = false;
+    submit.disabled = false;
+    submit.textContent = originalLabel;
+    if (extendedNotice !== null) { clearTimeout(extendedNotice); extendedNotice = null; }
+    info.hidden = true;
+    info.textContent = '';
+    info.setAttribute('role', 'status');
+  }
+  form.addEventListener('submit', e => {
+    if (sending) { e.preventDefault(); return; }
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) {
+      e.preventDefault();
+      show('Najpierw wybierz plik do odczytania.', true);
+      return;
+    }
+    if (!file.size || file.size > 20 * 1024 * 1024) {
+      e.preventDefault();
+      show('Plik musi mieć od 1 bajta do 20 MB. Wybierz odpowiedni plik.', true);
+      return;
+    }
+    sending = true;
+    submit.disabled = true;
+    submit.textContent = 'Trwa odczytywanie…';
+    show('Przesyłanie pliku i lokalny odczyt. Skany PDF mogą wymagać więcej czasu. Po zakończeniu otworzy się ekran weryfikacji.');
+    extendedNotice = setTimeout(() => {
+      if (sending) show('Odczyt nadal trwa. OCR większych skanów jest czasochłonny; pozostaw okno otwarte. Jeśli program nie odpowiada, sprawdź lokalny dziennik błędów.');
+    }, 25000);
+    // Pozostaw domyślne działanie formularza; nie blokuj i nie duplikuj POST.
+  });
+  fileInput.addEventListener('invalid', () => show('Najpierw wybierz plik do odczytania.', true));
+  fileInput.addEventListener('change', reset);
+  window.addEventListener('pageshow', e => { if (e.persisted) reset(); });
+})();

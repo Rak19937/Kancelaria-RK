@@ -175,11 +175,11 @@ class InboxMixin:
         body = f"""<div class='topbar'><div><h1>Skrzynka wpływu</h1>
         <div class='sub'>Lokalny OCR i propozycje czynności. Dokument ani zadania nie trafiają do sprawy bez Twojego zatwierdzenia.</div></div></div>
         <div class='card'><h2>Dodaj pismo do weryfikacji</h2>
-        <form method='post' action='/inbox/upload' enctype='multipart/form-data'>
+        <form method='post' action='/inbox/upload' enctype='multipart/form-data' data-rk-inbox-upload="1">
         <label>Załącznik (pisma, zdjęcia, audio, wideo i inne; maks. 20 MB)</label>
         <input type='file' name='file' required accept='.pdf,.doc,.docx,.odt,.rtf,.txt,.md,.csv,.xlsx,.xlsm,.ods,.pptx,.png,.jpg,.jpeg,.bmp,.gif,.tif,.tiff,.webp,.mp3,.wav,.ogg,.oga,.m4a,.aac,.flac,.opus,.mp4,.m4v,.webm,.mov,.avi,.mkv,.wmv,.mpg,.mpeg,.eml,.zip'>
         <p class='small muted'>Analiza działa lokalnie. Data końcowa terminu, adresat zobowiązania i przypisanie sprawy zawsze wymagają ręcznej kontroli.</p>
-        <button class='btn primary'>Odczytaj i przygotuj propozycje</button></form></div>
+        <button class='btn primary' type='submit'>Odczytaj i przygotuj propozycje</button><p id='rk-inbox-upload-feedback' class='small muted' role='status' aria-live='polite' hidden></p></form></div>
         <div class='card'><h2>Oczekujące ({len(rows)})</h2><div class='table-scroll'>
         <table><tr><th>Dodano</th><th>Dokument</th><th>Akcja</th></tr>{items}</table></div></div>"""
         return self.send_html(a.layout('Skrzynka wpływu', body, 'inbox'))
