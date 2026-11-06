@@ -1,42 +1,41 @@
-# RK KANCELARIA — Skrzynka wpływu 0.3.1-dev1
+# RK KANCELARIA 0.3.10 — poprawka obsługi przycisku w skrzynce wpływu
 
-**Punkt wyjścia:** źródła wersji portable z 17 września 2026 r. (commit `aa64d3bd50e6d71eae15ebcaabd41fa54e7ec4aa`, repo `Rak19937/Kancelaria-RK`).
+## Ustalenia
 
-Poprawka zawiera moduł `rk_inbox.py`, 13 testów w `TEST_INBOX_REVIEW.py` i bezpieczny skrypt dołączenia modułu do istniejącego `app.py`, nawigacji, inicjalizacji SQLite i workflow GitHub Actions.
+W aktualnym kodzie przycisk **Odczytaj i przygotuj propozycje** wywołuje POST `/inbox/upload`, a serwer wykonuje ekstrakcję tekstu i OCR **w tym samym żądaniu** przed przejściem do kolejnego ekranu. Ponieważ nie ma wskaźnika zajętości, użytkownik może odnieść wrażenie, że nic się nie dzieje. W szczególności OCR skanowanego PDF może długo działać (domyślny limit 300 stron, wywołanie Tesseracta z limitem 120 s na stronę). Bez konkretnego pliku i logu nie można wykluczyć innej usterki.
 
-## Zastosowanie do repozytorium
+**Zakres tej poprawki:** widoczny stan „Trwa odczytywanie”, sygnał przy długiej pracy, sprawdzenie obecności i rozmiaru pliku przed wysłaniem, ochrona przed wielokrotnym kliknięciem, nadal standardowy POST. **Nie przyspiesza OCR, nie dodaje kolejki w tle i nie gwarantuje, że każdy plik uda się odczytać.**
 
-1. Zrób kopię źródeł i danych Portable. **Nie uruchamiaj skryptu w katalogu rozpakowanego programu `.exe`.** Skrypt wymaga katalogu źródeł repozytorium GitHub, z plikiem `app.py`.
-2. Rozpakuj tę paczkę i na komputerze z Pythonem wykonaj (podmień ścieżkę):
+## Gdzie wrzucić na GitHub
 
-   ```bat
-   py ZASTOSUJ_POPRAWKE.py "C:\sciezka\do\Kancelaria-RK"
-   ```
+Repozytorium: `Rak19937/Kancelaria-RK`, gałąź `main`.
 
-3. W repo uruchom testy:
+1. `ZASTOSUJ_SKRZYNKA_FIX.py` → **katalog główny repozytorium** (obok `app.py`).
+2. `TEST_INBOX_FIX_0310.py` → **katalog główny repozytorium**.
+3. `.github/workflows/main.yml` → **podmień plik o tej samej ścieżce**.
 
-   ```bat
-   cd /d "C:\sciezka\do\Kancelaria-RK"
-   py TEST_INBOX_REVIEW.py
-   py -m py_compile app.py rk_inbox.py
-   ```
+**Wgrywaj w tej kolejności.** Najpierw skrypt, potem test, a workflow na końcu. Po ostatnim commicie GitHub Actions rozpocznie kompilację.
 
-4. Sprawdź zmiany (`git diff`) i wyślij wyłącznie **pliki źródłowe**, nie bazę, OCR prawdziwych klientów ani backupy. Skrypt doda `.rk_inbox_patch_backups/` do `.gitignore`.
-5. Utwórz nowy build przez **Actions → Build RK KANCELARIA Windows Portable → Run workflow**. Workflow uruchamia też testy skrzynki. Pobierz nowy artefakt `RK-KANCELARIA-WINDOWS-PORTABLE`.
-6. Przed produkcyjnym użyciem wykonaj dodatkową próbę na kopii bazy, wczytaj skan i sprawdź, czy podgląd, OCR, zatwierdzanie, monity i terminy działają poprawnie w gotowym `EXE`.
+Workflow uruchomi skrypt w trybie `--dry-run`, następnie zastosuje zmianę, uruchomi istniejące testy i nowy test, zapisze zmienione źródła do `main` oraz zbuduje Portable EXE. Skrypt tworzy kopie oryginalnych plików w `.rk_inbox_fix_backup_0310` w katalogu repozytorium. Na ponownym uruchomieniu widzi znacznik poprawki i nie modyfikuje jej drugi raz.
 
-## Zachowanie funkcji
+**Nie wgrywaj ani nie commituj katalogu `Data`, dokumentów, prawdziwych danych osobowych czy kopii bezpieczeństwa.**
 
-- Z menu **Skrzynka wpływu** wgrywasz dokument (PDF, DOCX, obraz, TXT/RTF), maksymalnie 20 MB.
-- Oryginał trafia do lokalnej, oczekującej kolejki `_inbox`. Program odczytuje tekst przez istniejący mechanizm OCR, podpowiada sygnatury i typ dokumentu oraz sugeruje zadania, monity i weryfikację terminów.
-- Otwierasz oryginał i tekst OCR, **wybierasz sprawę ręcznie**, poprawiasz tytuł, typ, daty i proponowane zadania. Każdą pozycję można odznaczyć, zmienić lub dopisać nowe.
-- Terminy jawnie podane w piśmie są rozpoznawane jako propozycja do **ręcznego obliczenia i potwierdzenia**. Program nie dopisuje żadnej domyślnej daty ani samoczynnie nie tworzy wpisu w kalendarzu.
-- Dopiero końcowy formularz i zaznaczenie potwierdzenia powodują zapis dokumentu w kartotece, wybranych czynności, alertów (tylko dla czynności z datą) i historii/audytu.
-- Odrzucenie usuwa roboczy plik. Próba podwójnego zatwierdzenia nie duplikuje dokumentu ani zadań.
-- Nie ma zewnętrznych zapytań AI ani wysyłania treści dokumentów do usług online. OCR obrazów wymaga lokalnego Tesseracta, zgodnie z dotychczasową aplikacją.
+## Jak sprawdzić po pobraniu nowego Portable
 
-## Granice rozwiązania
+1. Uruchom **nowo wygenerowany EXE** w bezpiecznej kopii aplikacji, na kopii danych.
+2. Wejdź w **Skrzynka wpływu** i wybierz mały plik tekstowy `.txt` z fikcyjną treścią, np. `Sąd zobowiązuje do złożenia dokumentów w terminie 7 dni`.
+3. Kliknij **Odczytaj i przygotuj propozycje**. Przycisk powinien pokazać **Trwa odczytywanie…**, a następnie powinien otworzyć się ekran **Sprawdź pismo przed przyjęciem**.
+4. Powtórz próbę na skanie PDF. Jeśli `.txt` działa, a skan PDF długo czeka, problem leży zapewne w wolnym OCR lub konkretnym pliku, nie w obsłudze kliknięcia.
 
-Reguły wykrywania są **heurystyczne**. Mogą przeoczyć niestandardowe sformułowanie albo potraktować cytat jako zobowiązanie. Nie ustalają biegu terminów według przepisów, nie rozpoznają wiarygodnie adresata zobowiązania i nie zastępują oceny prawnika. Ekran wymusza ręczny wybór sprawy i potwierdzenie kontroli, ale nie może zagwarantować poprawności tej kontroli.
+Jeśli nadal nie ma przekierowania, sprawdź lokalne pliki:
+- Portable: `Data/rk_kancelaria_bledy.log` i `Data/rk_kancelaria_wolne_operacje.log` obok EXE;
+- wersja zainstalowana: katalog danych RK KANCELARIA pod `%LOCALAPPDATA%`.
 
-**Status:** kod modułu i testy zostały sprawdzone lokalnie. Nie wykonano testów całego oryginalnego repozytorium ani builda Windows w tej sesji; po nałożeniu poprawki uruchom GitHub Actions i test na kopii danych.
+Dla bezpieczeństwa udostępniaj tylko **fragment logu bez danych klientów**. Nie wysyłaj rzeczywistych pism sądowych do publicznego repozytorium.
+
+## Kontrole wykonane przy tworzeniu
+
+- Testy poprawki na syntetycznych źródłach: 5/5 zaliczonych.
+- Składnia Python i JavaScript poprawna; workflow ma poprawną składnię YAML.
+- Wstępnie sprawdzone kotwice i SHA plików z repozytorium `main` 0.3.10-dev1.
+- **Nie wykonano pełnych testów oryginalnego repozytorium ani testu Qt Desktop z prawdziwym plikiem.** Te kontrole powinny przejść w nowej kompilacji i w użytkowym teście na kopii danych.
