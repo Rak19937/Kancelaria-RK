@@ -57,6 +57,14 @@ jobs:
             throw 'Kompilacja zatrzymana: źródła nie zawierają wersji 0.3.10-dev1.'
           }
 
+      - name: Popraw widoczność odczytu w skrzynce wpływu
+        shell: pwsh
+        run: |
+          python ZASTOSUJ_SKRZYNKA_FIX.py . --dry-run
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python ZASTOSUJ_SKRZYNKA_FIX.py .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Testy zrodel przed buildem
         shell: pwsh
         run: |
@@ -66,6 +74,7 @@ jobs:
             'rk_workspace_plus.py','rk_case_categories.py','rk_caseflow.py',
             'rk_ux.py','rk_navigation.py','rk_routes.py','rk_dashboard_data.py',
             'rk_search_data.py','rk_document_data.py','ZASTOSUJ_AKTUALIZACJE.py',
+            'ZASTOSUJ_SKRZYNKA_FIX.py',
             'ZASTOSUJ_CASEFLOW.py','ZASTOSUJ_WORKSPACE_PLUS.py',
             'ZASTOSUJ_KATEGORIE.py','ZASTOSUJ_NAWIGACJE.py',
             'ZASTOSUJ_PODGLAD.py','ZASTOSUJ_OBIEG.py','ZASTOSUJ_KORESPONDENCJE.py',
@@ -82,6 +91,7 @@ jobs:
             'TEST_CASE_RELATIONS_DOCUMENTS_DEV5.py',
             'TEST_CLOSED_CASE_ACTIONS_DEV6.py',
             'TEST_INBOX_REVIEW.py',
+            'TEST_INBOX_FIX_0310.py',
             'TEST_STABILIZACJA.py',
             'TEST_DOCUMENT_HUB.py',
             'TEST_AKTUALIZACJA_ZBIORCZA.py',
@@ -114,7 +124,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- app.py rk_caseflow.py assets/rk_app.js rk_ux.py assets/rk_ux.js TEST_STABILIZACJA.py TEST_AKTUALIZACJA_ZBIORCZA.py TEST_UI_PERFORMANCE_DEV4.py
+          git add -- app.py rk_caseflow.py assets/rk_app.js rk_inbox.py rk_ux.py assets/rk_ux.js TEST_STABILIZACJA.py TEST_AKTUALIZACJA_ZBIORCZA.py TEST_UI_PERFORMANCE_DEV4.py
           git diff --cached --quiet
           if ($LASTEXITCODE -eq 1) {
             git commit -m "RK KANCELARIA 0.3.10-dev1: UX and architecture"
