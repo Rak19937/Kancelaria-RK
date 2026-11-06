@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Statyczny test spięcia modułów po wykonaniu aktualizacji (bez danych użytkownika)."""
+"""Regresja po refaktoryzacji: rzeczywiste połączenie komponentów, a nie lokalizacja kodu."""
 import ast
 import unittest
 from pathlib import Path
@@ -13,41 +13,48 @@ class StabilitySmokeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.src = (ROOT / 'app.py').read_text(encoding='utf-8')
+        cls.schema = (ROOT / 'rk_core/schema.py').read_text(encoding='utf-8')
 
     def test_source_compiles(self):
         ast.parse(self.src, filename='app.py')
+        ast.parse(self.schema, filename='rk_core/schema.py')
 
     def test_inbox_wired(self):
-        # Przy rozszerzaniu Handler o nowe moduły nie zakładaj konkretnej
-        # kolejności klas bazowych ani liczby mixinów. Weryfikuj strukturę AST.
         tree = ast.parse(self.src, filename='app.py')
         handlers = [node for node in tree.body
                     if isinstance(node, ast.ClassDef) and node.name == 'Handler']
         self.assertEqual(len(handlers), 1, 'Oczekiwano jednej klasy Handler')
         bases = {base.id for base in handlers[0].bases if isinstance(base, ast.Name)}
-        for required_base in ('DocumentHubMixin', 'InboxMixin', 'BaseHTTPRequestHandler'):
-            with self.subTest(handler_base=required_base):
-                self.assertIn(required_base, bases)
+        for required in ('DocumentHubMixin', 'InboxMixin', 'BaseHTTPRequestHandler'):
+            with self.subTest(handler_base=required):
+                self.assertIn(required, bases)
 
         for marker in (
             'from rk_inbox import InboxMixin, ensure_inbox_schema',
-            'ensure_inbox_schema(con)',
+            'from rk_core.schema import initialize_database',
+            'initialize_database(db, schema_version=SCHEMA_VERSION,',
+            'ensure_inbox_schema=ensure_inbox_schema',
             'if path == "/inbox/upload": return self.inbox_upload(fields, files)',
             'self.inbox_approve(', 'self.inbox_discard(',
         ):
-            with self.subTest(marker=marker):
+            with self.subTest(app_marker=marker):
                 self.assertIn(marker, self.src)
-        items = [item for section,links in NAV_SECTIONS for item in links]
-        self.assertIn(('/inbox','✉','Skrzynka wpływu','inbox'), items)
-        self.assertEqual(GET_ROUTES['/inbox'], ('inbox_page',''))
+        for marker in ('def initialize_database(', 'ensure_inbox_schema(con)',
+                       'ensure_document_hub_schema(con)', 'ensure_action_center_schema(con)'):
+            with self.subTest(schema_marker=marker):
+                self.assertIn(marker, self.schema)
+
+        items = [item for section, links in NAV_SECTIONS for item in links]
+        self.assertIn(('/inbox', '✉', 'Skrzynka wpływu', 'inbox'), items)
+        self.assertEqual(GET_ROUTES['/inbox'], ('inbox_page', ''))
 
     def test_about_and_license(self):
         self.assertIn('def about_page(self):', self.src)
-        items = [item for section,links in NAV_SECTIONS for item in links]
-        self.assertIn(('/about','ⓘ','O programie','about'), items)
-        self.assertEqual(GET_ROUTES['/about'], ('about_page',''))
+        items = [item for section, links in NAV_SECTIONS for item in links]
+        self.assertIn(('/about', 'ⓘ', 'O programie', 'about'), items)
+        self.assertEqual(GET_ROUTES['/about'], ('about_page', ''))
         self.assertTrue((ROOT / 'LICENSE.txt').is_file())
 
 
 if __name__ == '__main__':
-    unittest.main()
+    unittest.main(verbosity=2)

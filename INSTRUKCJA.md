@@ -1,30 +1,28 @@
-# RK KANCELARIA 0.3.10 — poprawka instalatora skrzynki wpływu (GitHub Actions)
+# RK KANCELARIA 0.4.0-dev2 — hotfix testów po podziale schematu
 
-## Co się stało?
+Dotyczy nieudanego GitHub Actions: https://github.com/Rak19937/Kancelaria-RK/actions/runs/42223670328
 
-GitHub Actions, uruchomienie #42202006608, przeszło instalację 0.3.10, ale etap „Popraw widoczność odczytu w skrzynce wpływu” zakończył się komunikatem `rk_inbox.py: niezgodna wersja źródła`.
+Przyczyna: `TEST_STABILIZACJA.py` szukał wywołania `ensure_inbox_schema(con)` w `app.py`, mimo że w dev2 właściwa logika została wydzielona do `rk_core/schema.py`. Drugi test `TEST_AKTUALIZACJA_ZBIORCZA.py` zawiera podobne nieaktualne założenie, a `TEST_ARCHITEKTURA_040.py` sprawdzał na sztywno wcześniejszą wersję dev1.
 
-GitHub potwierdza, że blob `rk_inbox.py` na `main` odpowiada dokładnie wartości oczekiwanej przez instalator. Najbardziej prawdopodobną przyczyną jest transformacja zakończeń linii LF → CRLF podczas checkoutu Windows. Poprzedni instalator porównywał bezpośrednio bajty.
+## Wgranie
 
-## Co wrzucić na GitHub?
+Wgraj do katalogu GŁÓWNEGO repozytorium (nadpisując):
+- `TEST_STABILIZACJA.py`
+- `TEST_AKTUALIZACJA_ZBIORCZA.py`
+- `TEST_ARCHITEKTURA_040.py`
 
-Zastąp **tylko jeden** plik w katalogu głównym repozytorium:
+Nie zmieniaj `.github/workflows/main.yml`, instalatora dev2 ani istniejących katalogów danych. Po commit GitHub Actions uruchomi instalator dev2, testy i próbę budowania Portable.
 
-`ZASTOSUJ_SKRZYNKA_FIX.py`
+## Co zmieniono
 
-Adres: https://github.com/Rak19937/Kancelaria-RK/blob/main/ZASTOSUJ_SKRZYNKA_FIX.py
+Testy nadal kontrolują klasę Handler, rejestr tras, wpięcie modułów, nazwy funkcji i wywołania `ensure_*`. Teraz sprawdzają je we właściwych plikach: `app.py` oraz `rk_core/schema.py`.
 
-1. Na GitHub otwórz link i kliknij ołówek (Edit this file).
-2. Zastąp zawartość zawartością pliku z tej paczki i wybierz Commit changes.
-3. Poczekaj na automatyczne uruchomienie workflow i sprawdź jego wynik.
+Test architektury porównuje wersję `0.4.0-dev2`, zachowując wszystkie pozostałe testy (m.in. transakcje, multipart, OCR, przepływ skrzynki, daty).
 
-Nie trzeba ruszać `.github/workflows/main.yml`, `rk_inbox.py` ani katalogu `Data`.
+## Weryfikacja
 
-## Zakres techniczny
+- Sprawdzono składnię trzech plików (`py_compile`).
+- Porównano bazowy `TEST_ARCHITEKTURA_040.py` z dokładnym SHA pliku na GitHub: `0da71151a9b203d8e68bf272a052ab7954c22fcf`.
+- Sprawdzono na podstawie instalatora dev2, że przeniesiona inicjalizacja zawiera wymagane wywołania, a `app.py` deleguje do `initialize_database`.
 
-- `baseline_matches()` uznaje plik za zgodny, jeśli hash Git blob pasuje bezpośrednio lub po konwersji samych końców linii CRLF → LF.
-- Każda inna zmiana źródła powoduje zatrzymanie instalacji przed zapisem.
-- Nie zmienia kodu aplikacji, schematu bazy ani przechowywanych akt; zmienia tylko sposób sprawdzania zgodności przez instalator.
-- Wykonane lokalnie: 5 testów regresyjnych oryginalnego instalatora + testy akceptacji CRLF, odmowy przy rzeczywistej zmianie, kopii i ponownego uruchomienia.
-
-**Uwaga:** naprawia blokadę kompilacji, nie dowodzi jeszcze, że OCR zadziała z konkretnym plikiem. Po zielonym buildzie sprawdź funkcjonalność w nowym Portable na pliku testowym. Jeśli nadal nie przechodzi, zbadaj log `Data/rk_kancelaria_bledy.log` (bez danych klientów).
+Uwaga: po wcześniejszym błędzie CI zatrzymało się na TEST_STABILIZACJA.py. Dalsze testy i Windows EXE jeszcze nie zostały zweryfikowane w bieżącym runie. Kolejny run pokaże pełny wynik.

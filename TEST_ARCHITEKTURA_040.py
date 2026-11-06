@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""0.4.0-dev1: real tests without customer files and without network access."""
+"""0.4.0-dev2: real tests without customer files and without network access."""
 from __future__ import annotations
 
 import ast
@@ -72,7 +72,7 @@ class ArchitectureTests(unittest.TestCase):
     def test_source_wiring_preserves_public_interfaces(self):
         app=(ROOT/'app.py').read_text(encoding='utf-8')
         inbox=(ROOT/'rk_inbox.py').read_text(encoding='utf-8')
-        self.assertIn('VERSION = "0.4.0-dev1"',app)
+        self.assertIn('VERSION = "0.4.0-dev2"',app)
         self.assertIn('from rk_core.database import db_connection',app)
         self.assertIn('from rk_core.http import parse_multipart',app)
         self.assertIn('from rk_domains.documents.ocr import extract_document_text as _extract_document_text',app)
