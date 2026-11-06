@@ -44,26 +44,17 @@ jobs:
           python -m pip install "pyinstaller>=6.10,<7"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # RK_0310_WORKFLOW — sprawdź i zastosuj jedną aktualizację 0.3.10.
-      # Na kolejnym uruchomieniu instalator rozpoznaje wersję 0.3.10 i niczego nie dubluje.
-      - name: Aktywuj RK KANCELARIA 0.3.10 - UX i architektura
+      # RK KANCELARIA 0.4: jedno przejście A+B+C. Dane klienta nie są częścią CI.
+      - name: Zastosuj RK 0.4.0-dev1 — modularyzacja A+B+C
         shell: pwsh
         run: |
-          python ZASTOSUJ_AKTUALIZACJE.py . --dry-run
+          python ZASTOSUJ_040.py . --dry-run
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python ZASTOSUJ_AKTUALIZACJE.py .
+          python ZASTOSUJ_040.py .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (!(Select-String -Path app.py -SimpleMatch 'VERSION = "0.3.10-dev1"' -Quiet)) {
-            throw 'Kompilacja zatrzymana: źródła nie zawierają wersji 0.3.10-dev1.'
+          if (!(Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev1"' -Quiet)) {
+            throw 'Źródła nie zawierają wersji 0.4.0-dev1.'
           }
-
-      - name: Popraw widoczność odczytu w skrzynce wpływu
-        shell: pwsh
-        run: |
-          python ZASTOSUJ_SKRZYNKA_FIX.py . --dry-run
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python ZASTOSUJ_SKRZYNKA_FIX.py .
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Testy zrodel przed buildem
         shell: pwsh
@@ -74,15 +65,18 @@ jobs:
             'rk_workspace_plus.py','rk_case_categories.py','rk_caseflow.py',
             'rk_ux.py','rk_navigation.py','rk_routes.py','rk_dashboard_data.py',
             'rk_search_data.py','rk_document_data.py','ZASTOSUJ_AKTUALIZACJE.py',
-            'ZASTOSUJ_SKRZYNKA_FIX.py',
             'ZASTOSUJ_CASEFLOW.py','ZASTOSUJ_WORKSPACE_PLUS.py',
             'ZASTOSUJ_KATEGORIE.py','ZASTOSUJ_NAWIGACJE.py',
             'ZASTOSUJ_PODGLAD.py','ZASTOSUJ_OBIEG.py','ZASTOSUJ_KORESPONDENCJE.py',
             'RK_STABILIZACJA.py','RK_AKTUALIZACJA_ZBIORCZA.py',
             'RK_WYCZYSC_PODPOWIEDZI.py','desktop.py','rk_paths.py','rk_sync.py',
-            'RK_KANCELARIA_DESKTOP.pyw'
+            'RK_KANCELARIA_DESKTOP.pyw','ZASTOSUJ_040.py',
+            'TEST_ARCHITEKTURA_040.py','TEST_MIGRATOR_040.py',
+            'RAPORT_JAKOSCI_040.py'
           )
           python -m py_compile @modules
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m compileall -q rk_core rk_domains
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $tests = @(
             'TEST_TRUE_PORTABLE_PATHS.py',
@@ -91,7 +85,6 @@ jobs:
             'TEST_CASE_RELATIONS_DOCUMENTS_DEV5.py',
             'TEST_CLOSED_CASE_ACTIONS_DEV6.py',
             'TEST_INBOX_REVIEW.py',
-            'TEST_INBOX_FIX_0310.py',
             'TEST_STABILIZACJA.py',
             'TEST_DOCUMENT_HUB.py',
             'TEST_AKTUALIZACJA_ZBIORCZA.py',
@@ -107,7 +100,10 @@ jobs:
             'TEST_INTEGRACJA_CASEFLOW.py',
             'TEST_UX_039.py',
             'TEST_ARCHITEKTURA_0310.py',
-            'TEST_INTEGRACJA_PACZKI_0310.py'
+            'TEST_INTEGRACJA_PACZKI_0310.py',
+            'TEST_INBOX_FIX_0310.py',
+            'TEST_MIGRATOR_040.py',
+            'TEST_ARCHITEKTURA_040.py'
           )
           foreach ($test in $tests) {
             Write-Host "TEST: $test"
@@ -116,23 +112,25 @@ jobs:
           }
           python RK_KANCELARIA_DESKTOP.pyw --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python RAPORT_JAKOSCI_040.py . --out RAPORT_JAKOSCI_040.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # Commitujemy wyłącznie pliki zmienione przez instalator. Nie dotykamy Data.
-      - name: Zapisz przetestowane źródła 0.3.10 na main
+      - name: Zapisz przetestowane źródła 0.4.0 na main
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- app.py rk_caseflow.py assets/rk_app.js rk_inbox.py rk_ux.py assets/rk_ux.js TEST_STABILIZACJA.py TEST_AKTUALIZACJA_ZBIORCZA.py TEST_UI_PERFORMANCE_DEV4.py
+          git add -- app.py rk_inbox.py rk_workspace_plus.py rk_correspondence.py rk_document_hub.py rk_core rk_domains
           git diff --cached --quiet
           if ($LASTEXITCODE -eq 1) {
-            git commit -m "RK KANCELARIA 0.3.10-dev1: UX and architecture"
-            if ($LASTEXITCODE -ne 0) { throw 'Nie udało się zapisać źródeł 0.3.10.' }
+            git commit -m "RK KANCELARIA 0.4.0-dev1: architecture A+B+C"
+            if ($LASTEXITCODE -ne 0) { throw 'Nie udało się zapisać źródeł 0.4.0.' }
             git push origin HEAD:main
-            if ($LASTEXITCODE -ne 0) { throw 'Nie udało się wysłać źródeł 0.3.10 na main.' }
+            if ($LASTEXITCODE -ne 0) { throw 'Nie udało się wysłać źródeł 0.4.0 na main.' }
           } elseif ($LASTEXITCODE -eq 0) {
-            Write-Host 'Źródła 0.3.10 są już zapisane.'
+            Write-Host 'Źródła 0.4.0 są już zapisane.'
           } else {
             throw 'Nie udało się porównać zmian.'
           }
@@ -191,4 +189,13 @@ jobs:
           name: RK-KANCELARIA-WINDOWS-PORTABLE
           path: RK_KANCELARIA_WINDOWS_PORTABLE.zip
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Udostepnij raport jakosci kodu 0.4
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RK-KANCELARIA-RAPORT-ARCHITEKTURY-040
+          path: RAPORT_JAKOSCI_040.json
+          if-no-files-found: ignore
           retention-days: 30
