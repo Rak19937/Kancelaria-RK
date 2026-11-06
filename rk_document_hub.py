@@ -10,6 +10,7 @@ import html
 import sqlite3
 import sys
 from urllib.parse import quote
+from rk_domains.documents.repository import case_document_rows
 
 
 def esc(value) -> str:
@@ -40,17 +41,6 @@ def ensure_document_hub_schema(con: sqlite3.Connection) -> None:
     ''')
 
 
-def case_document_rows(con: sqlite3.Connection, case_id: int):
-    """Dokumenty główne i współdzielone, bez powielania identyfikatorów."""
-    return con.execute('''
-        SELECT d.* FROM documents d
-        WHERE d.case_id=? OR EXISTS (
-            SELECT 1 FROM document_case_links l
-            WHERE l.document_id=d.id AND l.case_id=?
-        )
-        ORDER BY COALESCE(NULLIF(d.delivered_date,''),NULLIF(d.received_date,''),
-                          NULLIF(d.doc_date,''),d.created_at) DESC,d.id DESC
-    ''', (case_id, case_id)).fetchall()
 
 
 class DocumentHubMixin:

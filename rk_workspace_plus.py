@@ -10,6 +10,8 @@ import sqlite3
 import sys
 from datetime import date, timedelta
 from urllib.parse import quote
+from rk_domains.terms.validation import date_iso, time_hm
+from rk_domains.tasks.assignments import selected_ids, set_task_assignees, task_assignees_map
 
 
 def esc(x):
@@ -20,26 +22,8 @@ def _app(obj):
     return sys.modules[type(obj).__module__]
 
 
-def date_iso(value, required=True):
-    value = str(value or '').strip()
-    if not value and not required:
-        return ''
-    try:
-        parsed = date.fromisoformat(value)
-    except (TypeError, ValueError):
-        raise ValueError('Podaj poprawną datę w formacie RRRR-MM-DD.')
-    if value != parsed.isoformat():
-        raise ValueError('Data musi być w formacie RRRR-MM-DD.')
-    return value
 
 
-def time_hm(value):
-    value = str(value or '').strip()
-    if not value:
-        return ''
-    if not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', value):
-        raise ValueError('Godzina musi mieć format GG:MM.')
-    return value
 
 
 def ensure_workspace_plus_schema(con: sqlite3.Connection):
@@ -104,32 +88,8 @@ def ensure_workspace_plus_schema(con: sqlite3.Connection):
                    AND NOT EXISTS(SELECT 1 FROM task_assignees a WHERE a.task_id=t.id)''')
 
 
-def selected_ids(fields, con, prefix='assign_user_'):
-    """Formularz zawiera osobne klucze checkboxów (read_post nie zachowuje tablic)."""
-    ids = []
-    for key, value in fields.items():
-        if not key.startswith(prefix) or str(value) not in ('1', 'on', 'yes'):
-            continue
-        raw = key[len(prefix):]
-        if raw.isascii() and raw.isdigit():
-            ids.append(int(raw))
-    ids = sorted(set(ids))
-    if ids:
-        q = ','.join('?' for _ in ids)
-        valid = {x[0] for x in con.execute(f'SELECT id FROM users WHERE is_active=1 AND id IN ({q})', ids)}
-        if valid != set(ids):
-            raise ValueError('Wskazano nieaktywnego lub nieistniejącego użytkownika.')
-    return ids
 
 
-def set_task_assignees(con, task_id, ids):
-    row=con.execute('SELECT case_id FROM tasks WHERE id=?',(task_id,)).fetchone()
-    if not row:
-        raise ValueError('Nie znaleziono zadania.')
-    ids=sorted(set(int(x) for x in ids))
-    con.execute('DELETE FROM task_assignees WHERE task_id=?',(task_id,))
-    con.executemany('INSERT INTO task_assignees(task_id,user_id) VALUES(?,?)',[(task_id,i) for i in ids])
-    con.execute('UPDATE tasks SET assigned_user_id=? WHERE id=?',(ids[0] if ids else None,task_id))
 
 
 def assignee_html(con, entity, entity_id=0, selected=None):
@@ -151,14 +111,6 @@ def assignee_html(con, entity, entity_id=0, selected=None):
             '</div></div>')
 
 
-def task_assignees_map(con, task_ids):
-    ids=sorted({int(x) for x in task_ids})
-    if not ids:return {}
-    placeholders=','.join('?' for _ in ids)
-    rows=con.execute(f'''SELECT ta.task_id, GROUP_CONCAT(u.author_name, ', ') display
-            FROM task_assignees ta JOIN users u ON u.id=ta.user_id
-            WHERE ta.task_id IN ({placeholders}) GROUP BY ta.task_id''',ids).fetchall()
-    return {r['task_id']:r['display'] for r in rows}
 
 
 def nav_strip(title=''):

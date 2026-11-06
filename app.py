@@ -60,6 +60,12 @@ from rk_dashboard_data import dashboard_snapshot
 from rk_routes import dispatch_static_get, dispatch_static_post
 from rk_inbox import InboxMixin, ensure_inbox_schema
 from rk_paths import resolve_runtime_paths, installed_data_dir
+from rk_core.database import db_connection
+from rk_core.http import parse_multipart
+from rk_core.files import atomic_write_bytes
+from rk_core.diagnostics import write_exception, write_slow_request
+from rk_domains.documents.ocr import extract_document_text as _extract_document_text
+from rk_domains.cases.repository import load_external_signature_map
 from rk_smart import (
     ACTIONABLE_ALERT_TYPES, ALERT_PRIORITIES, ALERT_TYPES, LAW_REGISTRY, RELATION_TYPES as SMART_RELATION_TYPES,
     add_custom_eli_act, auto_create_structural_links, build_unified_timeline,
@@ -71,7 +77,7 @@ from rk_smart import (
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.3.10-dev1"
+VERSION = "0.4.0-dev1"
 SCHEMA_VERSION = 330
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
@@ -603,26 +609,9 @@ RELATION_TYPES = {
 
 @contextlib.contextmanager
 def db():
-    """Transakcyjne, krótko żyjące połączenie SQLite."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(DB_PATH, timeout=15, cached_statements=256)
-    con.row_factory = sqlite3.Row
-    try:
-        con.execute("PRAGMA foreign_keys = ON")
-        con.execute("PRAGMA busy_timeout = 15000")
-        con.execute("PRAGMA synchronous = NORMAL")
-        con.execute("PRAGMA temp_store = MEMORY")
-        con.execute("PRAGMA cache_size = -32768")
-        con.execute("PRAGMA mmap_size = 134217728")
+    """Zachowane API: połączenie z bazą na kontekst żądania."""
+    with db_connection(DB_PATH, DATA_DIR) as con:
         yield con
-        con.commit()
-    except Exception:
-        try: con.rollback()
-        except Exception: pass
-        raise
-    finally:
-        try: con.close()
-        except Exception: pass
 
 
 def row_get(row, key: str, default=''):
@@ -636,26 +625,10 @@ def row_get(row, key: str, default=''):
 
 
 def log_app_exception(path: str, exc: Exception) -> None:
-    """Zapisuje pełny traceback lokalnie; nie wysyła żadnych danych na zewnątrz."""
-    try:
-        import traceback
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        with ERROR_LOG.open('a', encoding='utf-8') as f:
-            f.write(f"\n[{datetime.now().isoformat(timespec='seconds')}] {path}\n")
-            traceback.print_exc(file=f)
-    except Exception:
-        pass
+    return write_exception(ERROR_LOG, path, exc)
 
 def log_slow_request(path: str, elapsed: float) -> None:
-    """Zapisuj tylko realnie wolne żądania; log nie rośnie przy normalnej pracy."""
-    if elapsed < 0.75:
-        return
-    try:
-        DATA_DIR.mkdir(parents=True,exist_ok=True)
-        with PERF_LOG.open('a',encoding='utf-8') as f:
-            f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {elapsed*1000:.0f} ms | {path}\n")
-    except Exception:
-        pass
+    return write_slow_request(PERF_LOG, path, elapsed)
 
 
 
@@ -847,15 +820,6 @@ def apply_pending_restore_if_any() -> str:
     log_event(msg,'WARNING'); return msg
 
 
-def atomic_write_bytes(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True,exist_ok=True); tmp=path.with_name(path.name+f'.tmp_{uuid.uuid4().hex}')
-    try:
-        with tmp.open('wb') as f:
-            f.write(data); f.flush(); os.fsync(f.fileno())
-        os.replace(tmp,path)
-    finally:
-        try: tmp.unlink(missing_ok=True)
-        except OSError: pass
 
 
 def init_db() -> None:
@@ -2042,94 +2006,10 @@ def _run_tesseract_on_file(cmd: str, image_path: Path, lang: str) -> str:
 
 
 def extract_document_text(filename: str, data: bytes, force_ocr: bool=False) -> tuple[str,int,str,str]:
-    """Zwraca: tekst, ocr_used(0/1), ocr_status, ocr_language.
-
-    OCR uruchamia się automatycznie tylko dla skanów/obrazów bez sensownej warstwy tekstowej.
-    Nie OCR-ujemy DOCX z poprawnym tekstem.
-    """
-    ext=Path(filename or '').suffix.lower()
-    tcmd=find_tesseract(); lang=ocr_language_for(tcmd) if tcmd else ''
-    min_text=max(10,int(os.getenv('RK_OCR_MIN_TEXT','40') or 40))
-    max_pages=max(1,int(os.getenv('RK_OCR_MAX_PAGES','300') or 300))
-    dpi=max(120,min(350,int(os.getenv('RK_OCR_DPI','200') or 200)))
-    try:
-        if ext=='.docx':
-            with zipfile.ZipFile(io.BytesIO(data),'r') as z:
-                xml=z.read('word/document.xml')
-            root=ET.fromstring(xml); texts=[]
-            for el in root.iter():
-                if el.tag.endswith('}t') and el.text: texts.append(el.text)
-                elif el.tag.endswith('}tab'): texts.append('\t')
-                elif el.tag.endswith('}br'): texts.append('\n')
-            return (' '.join(texts),0,'tekst','')
-        if ext=='.pdf':
-            page_text=[]
-            try:
-                from pypdf import PdfReader
-            except Exception:
-                try: from PyPDF2 import PdfReader
-                except Exception: PdfReader=None
-            reader=PdfReader(io.BytesIO(data)) if PdfReader else None
-            if reader:
-                for page in reader.pages[:max_pages]:
-                    try: page_text.append(page.extract_text() or '')
-                    except Exception: page_text.append('')
-            combined='\n'.join(page_text)
-            needs_ocr=force_ocr or not combined.strip() or sum(len(x.strip()) for x in page_text)<min_text*max(1,len(page_text))
-            if not needs_ocr:
-                return (combined,0,'tekst','')
-            if not tcmd:
-                return (combined,0,'ocr_brak_silnika','')
-            try:
-                import fitz
-            except Exception:
-                return (combined,0,'ocr_brak_pymupdf',lang)
-            doc=fitz.open(stream=data,filetype='pdf'); out=[]; used=False
-            total=min(len(doc),max_pages)
-            for i in range(total):
-                existing=page_text[i] if i<len(page_text) else ''
-                if not force_ocr and len(existing.strip())>=min_text:
-                    out.append(existing); continue
-                page=doc.load_page(i)
-                pix=page.get_pixmap(matrix=fitz.Matrix(dpi/72,dpi/72),alpha=False)
-                with tempfile.NamedTemporaryFile(suffix='.png',delete=False) as tf: img=Path(tf.name)
-                try:
-                    pix.save(str(img)); ocr=_run_tesseract_on_file(tcmd,img,lang); out.append(ocr or existing); used=used or bool(ocr.strip())
-                finally:
-                    try: img.unlink()
-                    except OSError: pass
-            if len(doc)>max_pages: out.append(f'\n[OCR ograniczony do pierwszych {max_pages} stron]')
-            return ('\n'.join(out),1 if used else 0,'ocr_ok' if used else 'ocr_brak_tekstu',lang)
-        if ext in {'.png','.jpg','.jpeg','.tif','.tiff','.bmp','.webp'}:
-            if not tcmd: return ('',0,'ocr_brak_silnika','')
-            with tempfile.NamedTemporaryFile(suffix=ext or '.png',delete=False) as tf:
-                tf.write(data); img=Path(tf.name)
-            try: text=_run_tesseract_on_file(tcmd,img,lang)
-            finally:
-                try: img.unlink()
-                except OSError: pass
-            return (text,1 if text.strip() else 0,'ocr_ok' if text.strip() else 'ocr_brak_tekstu',lang)
-        if ext in {'.xlsx','.xlsm'}:
-            try:
-                import openpyxl
-                wb=openpyxl.load_workbook(io.BytesIO(data),read_only=True,data_only=True)
-                parts=[]
-                for ws in wb.worksheets[:12]:
-                    parts.append(f'### Arkusz: {ws.title}')
-                    for n,row in enumerate(ws.iter_rows(values_only=True),1):
-                        vals=['' if v is None else str(v) for v in row[:40]]
-                        if any(v.strip() for v in vals): parts.append('\t'.join(vals))
-                        if n>=500: parts.append('[podgląd ograniczony do 500 wierszy arkusza]'); break
-                wb.close(); return ('\n'.join(parts),0,'tekst','')
-            except Exception:
-                return ('',0,'blad_podgladu_xlsx','')
-        if ext in {'.txt','.md','.csv','.log','.rtf'}:
-            for enc in ('utf-8','cp1250','latin-1'):
-                try: return (data.decode(enc),0,'tekst','')
-                except Exception: pass
-    except Exception:
-        return ('',0,'blad_indeksowania',lang)
-    return ('',0,'nieobslugiwany_format','')
+    """Kompatybilność interfejsu; obsługę formatów realizuje moduł dokumentów."""
+    return _extract_document_text(filename, data, force_ocr,
+        find_tesseract=find_tesseract, ocr_language_for=ocr_language_for,
+        run_tesseract=_run_tesseract_on_file)
 
 
 def update_document_index(con: sqlite3.Connection, document_id: int, data: bytes|None=None, force_ocr: bool=False) -> None:
@@ -2602,25 +2482,6 @@ def primary_signature_text(case_id: int, court_signature: str = '', internal_sig
         return value
     return f"{kind or 'Sygnatura'}: {value}"
 
-def load_external_signature_map(con: sqlite3.Connection, case_ids) -> dict[int, tuple[str,str]]:
-    """Jedno zbiorcze zapytanie zamiast N+1 połączeń SQLite na listach spraw."""
-    ids=[]
-    seen=set()
-    for raw in case_ids:
-        try: cid=int(raw)
-        except (TypeError,ValueError): continue
-        if cid and cid not in seen:
-            ids.append(cid); seen.add(cid)
-    out: dict[int, tuple[str,str]] = {}
-    for pos in range(0,len(ids),500):
-        chunk=ids[pos:pos+500]
-        if not chunk: continue
-        ph=','.join('?' for _ in chunk)
-        rows=con.execute(f"SELECT case_id,label,signature,id FROM case_external_signatures WHERE case_id IN ({ph}) AND TRIM(signature)<>'' ORDER BY case_id,id",chunk).fetchall()
-        for r in rows:
-            if r['case_id'] not in out:
-                out[r['case_id']]=((r['label'] or 'Sygnatura innego organu').strip(),(r['signature'] or '').strip())
-    return out
 
 def primary_signature_fast(case_id: int, court_signature: str = '', external_map: dict[int,tuple[str,str]]|None=None) -> str:
     court=(court_signature or '').strip()
@@ -2635,33 +2496,6 @@ def primary_signature_fast(case_id: int, court_signature: str = '', external_map
 
 
 
-def parse_multipart(headers, body: bytes):
-    ctype = headers.get("Content-Type", "")
-    synthetic = (f"Content-Type: {ctype}\r\nMIME-Version: 1.0\r\n\r\n").encode() + body
-    msg = BytesParser(policy=email_policy).parsebytes(synthetic)
-    fields: dict[str, str] = {}
-    files: dict[str, object] = {}
-    if not msg.is_multipart():
-        return fields, files
-    for part in msg.iter_parts():
-        name = part.get_param("name", header="content-disposition")
-        filename = part.get_filename()
-        payload = part.get_payload(decode=True) or b""
-        if not name:
-            continue
-        if filename:
-            item = (filename, payload, part.get_content_type())
-            # Pola zakończone [] mogą zawierać wiele plików (np. załączniki do pisma).
-            if name.endswith("[]"):
-                files.setdefault(name, [])
-                files[name].append(item)
-            else:
-                files[name] = item
-        else:
-            charset = part.get_content_charset() or "utf-8"
-            try: fields[name] = payload.decode(charset)
-            except Exception: fields[name] = payload.decode("utf-8", "replace")
-    return fields, files
 
 
 
