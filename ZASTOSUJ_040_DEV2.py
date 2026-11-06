@@ -446,10 +446,20 @@ from rk_core.sync_atomic import commit_staged,pending_sync_journal,SyncRecoveryR
     sw=replace_once(sw,"  '/assets/rk_app.js',",
                     "  '/assets/rk_app.js',\n  '/assets/rk_csrf.js',",'SW CSRF script')
     src['assets/service-worker.js']=sw
+    # Test architektury może zostać wgrany przed instalatorem dev2.
+    # Wtedy ma już nowy warunek wersji; nie próbuj nadpisywać nieistniejącej kotwicy.
+    # Jednocześnie odrzucaj nieznaną treść zamiast pomijać walidację.
     arch=src['TEST_ARCHITEKTURA_040.py']
-    arch=replace_once(arch,"self.assertIn('VERSION = \"0.4.0-dev1\"',app)",
-        "self.assertTrue('VERSION = \"0.4.0-dev1\"' in app or 'VERSION = \"0.4.0-dev2\"' in app)",
-        'old architecture test version tolerance')
+    old_arch = "self.assertIn('VERSION = \"0.4.0-dev1\"',app)"
+    dev2_arch = "self.assertIn('VERSION = \"0.4.0-dev2\"',app)"
+    compatible_arch = "self.assertTrue('VERSION = \"0.4.0-dev1\"' in app or 'VERSION = \"0.4.0-dev2\"' in app)"
+    if arch.count(old_arch)==1:
+        arch=replace_once(arch,old_arch,compatible_arch,'old architecture test version tolerance')
+    elif arch.count(dev2_arch)==1 or arch.count(compatible_arch)==1:
+        # Test jest już przystosowany do dev2; zostaw jego treść bez zmian.
+        pass
+    else:
+        raise RuntimeError('Nieznana wersja TEST_ARCHITEKTURA_040.py. Nic nie zmieniono.')
     src['TEST_ARCHITEKTURA_040.py']=arch
     src['RAPORT_JAKOSCI_040.py']=src['RAPORT_JAKOSCI_040.py'].replace("'version':'0.4.0-dev1'","'version':'0.4.0-dev2'")
 
