@@ -48,12 +48,27 @@ jobs:
       - name: Zastosuj RK 0.4.0-dev1 — modularyzacja A+B+C
         shell: pwsh
         run: |
-          python ZASTOSUJ_040.py . --dry-run
+          if (Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev2"' -Quiet) {
+            Write-Host '0.4.0-dev2 już aktywna. Pomijam migrator 0.4.0-dev1.'
+          } else {
+            python ZASTOSUJ_040.py . --dry-run
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            python ZASTOSUJ_040.py .
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if (!(Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev1"' -Quiet)) {
+              throw 'Źródła nie zawierają wymaganej wersji 0.4.0-dev1.'
+            }
+          }
+
+      - name: Zastosuj RK 0.4.0-dev2 — stabilizacja i bezpieczeństwo
+        shell: pwsh
+        run: |
+          python ZASTOSUJ_040_DEV2.py . --dry-run
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python ZASTOSUJ_040.py .
+          python ZASTOSUJ_040_DEV2.py .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (!(Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev1"' -Quiet)) {
-            throw 'Źródła nie zawierają wersji 0.4.0-dev1.'
+          if (!(Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev2"' -Quiet)) {
+            throw 'Źródła nie zawierają wersji 0.4.0-dev2.'
           }
 
       - name: Testy zrodel przed buildem
@@ -72,7 +87,9 @@ jobs:
             'RK_WYCZYSC_PODPOWIEDZI.py','desktop.py','rk_paths.py','rk_sync.py',
             'RK_KANCELARIA_DESKTOP.pyw','ZASTOSUJ_040.py',
             'TEST_ARCHITEKTURA_040.py','TEST_MIGRATOR_040.py',
-            'RAPORT_JAKOSCI_040.py'
+            'RAPORT_JAKOSCI_040.py','rk_sync.py','rk_cloud.py','rk_cloud_server.py',
+            'ZASTOSUJ_040_DEV2.py','ODZYSKAJ_SYNCHRONIZACJE_040.py',
+            'TEST_STABILIZACJA_040_DEV2.py','TEST_UI_HTTP_040_DEV2.py','TEST_MIGRATOR_040_DEV2.py'
           )
           python -m py_compile @modules
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -103,7 +120,10 @@ jobs:
             'TEST_INTEGRACJA_PACZKI_0310.py',
             'TEST_INBOX_FIX_0310.py',
             'TEST_MIGRATOR_040.py',
-            'TEST_ARCHITEKTURA_040.py'
+            'TEST_ARCHITEKTURA_040.py',
+            'TEST_STABILIZACJA_040_DEV2.py',
+            'TEST_UI_HTTP_040_DEV2.py',
+            'TEST_MIGRATOR_040_DEV2.py'
           )
           foreach ($test in $tests) {
             Write-Host "TEST: $test"
@@ -116,21 +136,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # Commitujemy wyłącznie pliki zmienione przez instalator. Nie dotykamy Data.
-      - name: Zapisz przetestowane źródła 0.4.0 na main
+      - name: Zapisz przetestowane źródła 0.4.0-dev2 na main
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- app.py rk_inbox.py rk_workspace_plus.py rk_correspondence.py rk_document_hub.py rk_core rk_domains
+          git add -- app.py rk_inbox.py rk_sync.py rk_cloud.py rk_cloud_server.py rk_workspace_plus.py rk_correspondence.py rk_document_hub.py rk_core rk_domains assets/service-worker.js assets/rk_csrf.js TEST_ARCHITEKTURA_040.py RAPORT_JAKOSCI_040.py ODZYSKAJ_SYNCHRONIZACJE_040.py
           git diff --cached --quiet
           if ($LASTEXITCODE -eq 1) {
-            git commit -m "RK KANCELARIA 0.4.0-dev1: architecture A+B+C"
+            git commit -m "RK KANCELARIA 0.4.0-dev2: hardening, async OCR, sync recovery"
             if ($LASTEXITCODE -ne 0) { throw 'Nie udało się zapisać źródeł 0.4.0.' }
             git push origin HEAD:main
             if ($LASTEXITCODE -ne 0) { throw 'Nie udało się wysłać źródeł 0.4.0 na main.' }
           } elseif ($LASTEXITCODE -eq 0) {
-            Write-Host 'Źródła 0.4.0 są już zapisane.'
+            Write-Host 'Źródła 0.4.0-dev2 są już zapisane.'
           } else {
             throw 'Nie udało się porównać zmian.'
           }
