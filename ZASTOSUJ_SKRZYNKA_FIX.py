@@ -27,6 +27,18 @@ def sha_git(data: bytes) -> str:
     return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
 
 
+def baseline_matches(name: str, raw: bytes) -> bool:
+    """Sprawdza ten sam Git blob niezależnie od checkoutu LF/CRLF na Windows.
+
+    Akceptujemy wyłącznie dokładny zatwierdzony blob albo identyczny tekst
+    z końcami linii CRLF. Inne zmiany nadal zatrzymują aktualizację.
+    """
+    expected = BASE_SHA[name]
+    if sha_git(raw) == expected:
+        return True
+    return b'\r\n' in raw and sha_git(raw.replace(b'\r\n', b'\n')) == expected
+
+
 def once(src: str, old: str, new: str, name: str) -> str:
     count = src.count(old)
     if count != 1:
@@ -132,8 +144,8 @@ def apply(repo: Path, dry_run=False) -> str:
     if MARKER in inbox or JS_MARKER in js:
         raise RuntimeError('Wykryto niepełną poprawkę. Nie modyfikowano plików.')
     for name, path in paths.items():
-        if sha_git(path.read_bytes()) != BASE_SHA[name]:
-            raise RuntimeError(f'{name}: niezgodna wersja źródła. Bez zmian.')
+        if not baseline_matches(name, path.read_bytes()):
+            raise RuntimeError(f'{name}: niezgodna wersja źródła. Bez zmian. Sprawdź zmiany w pliku; dopuszczalne są LF i CRLF.')
     changes = {'rk_inbox.py': fix_inbox(inbox), 'assets/rk_app.js': fix_js(js)}
     if dry_run:
         return 'DRY RUN OK — oba pliki zgodne z RK 0.3.10; żaden plik nie został zmieniony.'
