@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """HTTP E2E: setup, CSRF rejection, async upload, review and access control."""
 from __future__ import annotations
+import contextlib
 import http.cookiejar
 import os
 import re
@@ -86,7 +87,8 @@ def main():
                 if "name='verified'" in html:break
                 time.sleep(.2)
             else:raise AssertionError('Asynchroniczny OCR nie otworzył weryfikacji (40 prób).')
-            with sqlite3.connect(Path(tmp)/'sprawnik.sqlite3') as con:
+            # Ensure Windows releases the test DB before deleting tmp.
+            with contextlib.closing(sqlite3.connect(Path(tmp)/'sprawnik.sqlite3')) as con:
                 state=con.execute('SELECT COUNT(*) FROM documents').fetchone()[0]
                 assert state==0,'Dodano dokument bez ręcznego zatwierdzenia!'
                 proposals=con.execute('SELECT suggestions_json FROM inbox_items LIMIT 1').fetchone()[0]

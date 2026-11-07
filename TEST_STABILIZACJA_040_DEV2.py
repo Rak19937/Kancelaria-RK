@@ -105,17 +105,23 @@ class WorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);f=root/'documents';f.mkdir()
             dbfile=root/'db.sqlite3'
-            with sqlite3.connect(dbfile) as con:
+            # Context manager on sqlite3.Connection commits, but does not close.
+            # Explicit closing prevents WinError 32 in Windows CI.
+            with contextlib.closing(sqlite3.connect(dbfile)) as con:
                 con.execute('''CREATE TABLE inbox_items(id INTEGER PRIMARY KEY,original_name TEXT,stored_name TEXT,file_hash TEXT,
                     extracted_text TEXT,ocr_status TEXT,ocr_used INTEGER,ocr_language TEXT,suggestions_json TEXT,created_by TEXT,
                     status TEXT DEFAULT 'pending')''')
                 con.execute('CREATE TABLE documents(id INTEGER PRIMARY KEY)')
                 ensure_async_schema(con)
+                con.commit()
             @contextlib.contextmanager
             def getdb():
-                with sqlite3.connect(dbfile,timeout=15) as con:
+                # Preserve transaction commit/rollback semantics AND reliably close
+                # every connection, including the OCR worker's background handles.
+                with contextlib.closing(sqlite3.connect(dbfile,timeout=15)) as con:
                     con.row_factory=sqlite3.Row
-                    yield con
+                    with con:
+                        yield con
             def fake_ocr(name,data):
                 time.sleep(0.25)
                 return ('Sąd zobowiązuje w terminie 14 dni',0,'tekst','')
