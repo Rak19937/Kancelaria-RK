@@ -7,6 +7,10 @@ on:
   pull_request:
     branches: [main, master]
 
+concurrency:
+  group: rk-kancelaria-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -71,89 +75,25 @@ jobs:
             throw 'Źródła nie zawierają wersji 0.4.0-dev2.'
           }
 
-      - name: Testy zrodel przed buildem
+      - name: Zastosuj zbiorczy patch po migracji dev2
         shell: pwsh
         run: |
-          $modules = @(
-            'app.py','rk_inbox.py','rk_document_hub.py','rk_unified_preview.py',
-            'rk_action_center.py','rk_correspondence.py','rk_record_navigation.py',
-            'rk_workspace_plus.py','rk_case_categories.py','rk_caseflow.py',
-            'rk_ux.py','rk_navigation.py','rk_routes.py','rk_dashboard_data.py',
-            'rk_search_data.py','rk_document_data.py','ZASTOSUJ_AKTUALIZACJE.py',
-            'ZASTOSUJ_CASEFLOW.py','ZASTOSUJ_WORKSPACE_PLUS.py',
-            'ZASTOSUJ_KATEGORIE.py','ZASTOSUJ_NAWIGACJE.py',
-            'ZASTOSUJ_PODGLAD.py','ZASTOSUJ_OBIEG.py','ZASTOSUJ_KORESPONDENCJE.py',
-            'RK_STABILIZACJA.py','RK_AKTUALIZACJA_ZBIORCZA.py',
-            'RK_WYCZYSC_PODPOWIEDZI.py','desktop.py','rk_paths.py','rk_sync.py',
-            'RK_KANCELARIA_DESKTOP.pyw','ZASTOSUJ_040.py',
-            'TEST_ARCHITEKTURA_040.py','TEST_MIGRATOR_040.py',
-            'RAPORT_JAKOSCI_040.py','rk_sync.py','rk_cloud.py','rk_cloud_server.py',
-            'ZASTOSUJ_040_DEV2.py','ODZYSKAJ_SYNCHRONIZACJE_040.py',
-            'TEST_STABILIZACJA_040_DEV2.py','TEST_UI_HTTP_040_DEV2.py','TEST_MIGRATOR_040_DEV2.py'
-          )
-          python -m py_compile @modules
+          python PATCH_RK_040_DEV2_ALL.py . --dry-run
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m compileall -q rk_core rk_domains
+          python PATCH_RK_040_DEV2_ALL.py .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $tests = @(
-            'TEST_TRUE_PORTABLE_PATHS.py',
-            'TEST_CASE_WORKSPACE.py',
-            'TEST_UI_PERFORMANCE_DEV4.py',
-            'TEST_CASE_RELATIONS_DOCUMENTS_DEV5.py',
-            'TEST_CLOSED_CASE_ACTIONS_DEV6.py',
-            'TEST_INBOX_REVIEW.py',
-            'TEST_STABILIZACJA.py',
-            'TEST_DOCUMENT_HUB.py',
-            'TEST_AKTUALIZACJA_ZBIORCZA.py',
-            'TEST_UNIFIED_PREVIEW.py',
-            'TEST_ACTION_CENTER.py',
-            'TEST_KORESPONDENCJE.py',
-            'TEST_NAWIGACJA.py',
-            'TEST_INTEGRACJA_NAWIGACJI.py',
-            'TEST_WORKSPACE_PLUS.py',
-            'TEST_CASE_CATEGORIES.py',
-            'TEST_INTEGRACJA_KATEGORII.py',
-            'TEST_CASEFLOW.py',
-            'TEST_INTEGRACJA_CASEFLOW.py',
-            'TEST_UX_039.py',
-            'TEST_ARCHITEKTURA_0310.py',
-            'TEST_INTEGRACJA_PACZKI_0310.py',
-            'TEST_INBOX_FIX_0310.py',
-            'TEST_MIGRATOR_040.py',
-            'TEST_ARCHITEKTURA_040.py',
-            'TEST_STABILIZACJA_040_DEV2.py',
-            'TEST_UI_HTTP_040_DEV2.py',
-            'TEST_MIGRATOR_040_DEV2.py'
-          )
-          foreach ($test in $tests) {
-            Write-Host "TEST: $test"
-            python $test
-            if ($LASTEXITCODE -ne 0) { throw "Test nie przeszedł: $test" }
-          }
+          python PATCH_RK_040_DEV2_ALL.py . --verify
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Analiza całego kodu i wszystkie testy (raport zbiorczy)
+        shell: pwsh
+        run: |
+          python AUDYT_I_TESTY_RK_040_DEV2.py --root . --out RAPORT_AUDYT_040_DEV2.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python RK_KANCELARIA_DESKTOP.pyw --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python RAPORT_JAKOSCI_040.py . --out RAPORT_JAKOSCI_040.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      # Commitujemy wyłącznie pliki zmienione przez instalator. Nie dotykamy Data.
-      - name: Zapisz przetestowane źródła 0.4.0-dev2 na main
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        shell: pwsh
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- app.py rk_inbox.py rk_sync.py rk_cloud.py rk_cloud_server.py rk_workspace_plus.py rk_correspondence.py rk_document_hub.py rk_core rk_domains assets/service-worker.js assets/rk_csrf.js TEST_ARCHITEKTURA_040.py RAPORT_JAKOSCI_040.py ODZYSKAJ_SYNCHRONIZACJE_040.py
-          git diff --cached --quiet
-          if ($LASTEXITCODE -eq 1) {
-            git commit -m "RK KANCELARIA 0.4.0-dev2: hardening, async OCR, sync recovery"
-            if ($LASTEXITCODE -ne 0) { throw 'Nie udało się zapisać źródeł 0.4.0.' }
-            git push origin HEAD:main
-            if ($LASTEXITCODE -ne 0) { throw 'Nie udało się wysłać źródeł 0.4.0 na main.' }
-          } elseif ($LASTEXITCODE -eq 0) {
-            Write-Host 'Źródła 0.4.0-dev2 są już zapisane.'
-          } else {
-            throw 'Nie udało się porównać zmian.'
-          }
 
       - name: Zbuduj prawdziwe EXE na Windows
         shell: pwsh
@@ -196,6 +136,26 @@ jobs:
           }
           Get-ChildItem $out | Format-Table Name, Length, Mode
 
+      # Commitujemy wyłącznie pliki zmienione przez instalator. Nie dotykamy Data.
+      - name: Zapisz przetestowane źródła 0.4.0-dev2 na main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- app.py rk_inbox.py rk_sync.py rk_cloud.py rk_cloud_server.py rk_workspace_plus.py rk_correspondence.py rk_document_hub.py rk_core rk_domains assets/service-worker.js assets/rk_csrf.js TEST_ARCHITEKTURA_040.py RAPORT_JAKOSCI_040.py ODZYSKAJ_SYNCHRONIZACJE_040.py
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 1) {
+            git commit -m "RK KANCELARIA 0.4.0-dev2: hardening, async OCR, sync recovery"
+            if ($LASTEXITCODE -ne 0) { throw 'Nie udało się zapisać źródeł 0.4.0.' }
+            git push origin HEAD:main
+            if ($LASTEXITCODE -ne 0) { throw 'Nie udało się wysłać źródeł 0.4.0 na main.' }
+          } elseif ($LASTEXITCODE -eq 0) {
+            Write-Host 'Źródła 0.4.0-dev2 są już zapisane.'
+          } else {
+            throw 'Nie udało się porównać zmian.'
+          }
+
       - name: Spakuj finalny Portable ZIP
         shell: pwsh
         run: |
@@ -209,6 +169,18 @@ jobs:
           name: RK-KANCELARIA-WINDOWS-PORTABLE
           path: RK_KANCELARIA_WINDOWS_PORTABLE.zip
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Udostępnij audyt i logi wszystkich testów
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RK-KANCELARIA-RAPORT-TESTY-040-DEV2
+          path: |
+            RAPORT_AUDYT_040_DEV2.json
+            CI_AUDYT_LOGI/*.log
+            RAPORT_JAKOSCI_040.json
+          if-no-files-found: warn
           retention-days: 30
 
       - name: Udostepnij raport jakosci kodu 0.4
