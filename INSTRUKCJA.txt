@@ -1,0 +1,21 @@
+RK KANCELARIA 0.4.0-dev3 — HOTFIX TZDATA
+
+Naprawa logu GitHub Actions 42414935233:
+RK DEV3 ERROR: Niekompletna instalacja dev3: requirements.txt
+
+PRZEPIS:
+1. Rozpakuj ZIP.
+2. Na GitHubie w Rak19937/Kancelaria-RK otworz katalog glowny repozytorium.
+3. Zastap w nim tylko requirements.txt plikiem z tej paczki.
+4. Commit changes i sprawdz nowy run GitHub Actions.
+
+ZMIANA:
+Dodano jedna zaleznosc: tzdata>=2025.2,<2028
+Pozostale zaleznosci nie sa zmienione.
+
+Instalator ZASTOSUJ_040_DEV3.py sprawdza obecnosc tej deklaracji.
+W poprzedniej poprawce metadanych Windows zostal wgrany starszy requirements.txt.
+Nie zmienia sie app.py, baz danych, katalogu Data ani skryptu instalatora.
+
+Podglad stanu przed aktualizacja: run 42414935233 — brak tzdata w requirements.txt.
+Ten hotfix nie jest jeszcze potwierdzony pelnym buildem Windows.
