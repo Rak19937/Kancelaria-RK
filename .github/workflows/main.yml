@@ -180,6 +180,29 @@ jobs:
             throw 'Nie udało się porównać zmian.'
           }
 
+      # Manifest pozwala sprawdzic integralnosc plikow bez obchodzenia antywirusa.
+      # Wydawca musi osobno podpisac EXE certyfikatem Authenticode.
+      - name: Metadane wydania i sumy SHA-256
+        shell: pwsh
+        run: |
+          $out = "dist\RK KANCELARIA PORTABLE"
+          $exe = "$out\RK KANCELARIA.exe"
+          if (!(Test-Path $exe)) { throw 'Brak EXE do kontroli' }
+          $vi = (Get-Item $exe).VersionInfo
+          if ($vi.ProductName -ne 'RK KANCELARIA') { throw 'Niepoprawne metadane wydawcy w EXE' }
+          Copy-Item -Force SPRAWDZ_POCHODZENIE.py "$out\SPRAWDZ_POCHODZENIE.py"
+          $files = Get-ChildItem $out -Recurse -File | Where-Object {
+            $_.FullName -notmatch '[\\/]Data[\\/]' -and $_.Name -ne 'SHA256SUMS.txt'
+          } | Sort-Object FullName
+          $lines = foreach ($file in $files) {
+            $rel = [System.IO.Path]::GetRelativePath((Resolve-Path $out).Path, $file.FullName).Replace('\', '/')
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $rel"
+          }
+          [System.IO.File]::WriteAllLines((Join-Path (Resolve-Path $out).Path 'SHA256SUMS.txt'), [string[]]$lines, (New-Object System.Text.UTF8Encoding($false)))
+          python SPRAWDZ_POCHODZENIE.py "$out"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Spakuj finalny Portable ZIP
         shell: pwsh
         run: |
