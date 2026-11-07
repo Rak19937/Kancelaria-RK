@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import quote
 from rk_domains.inbox.analysis import analyze_letter, SIGNATURE_RE, DEADLINE_RE, _excerpt
 from rk_domains.inbox.service import stage_inbox_upload, InboxUploadValidationError
+from rk_domains.inbox.worker import ensure_async_schema,job_state,retry_job
 from rk_unified_preview import render_preview, serve_local_file
 
 ALLOWED_SUFFIXES = {'.pdf','.doc','.docx','.odt','.rtf','.txt','.md','.csv','.xlsx','.xlsm','.ods','.pptx',
@@ -66,6 +67,7 @@ def ensure_inbox_schema(con) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_inbox_items_status ON inbox_items(status,id DESC);
     """)
+    ensure_async_schema(con)
 
 
 
@@ -103,7 +105,7 @@ class InboxMixin:
         <form method='post' action='/inbox/upload' enctype='multipart/form-data' data-rk-inbox-upload="1">
         <label>Załącznik (pisma, zdjęcia, audio, wideo i inne; maks. 20 MB)</label>
         <input type='file' name='file' required accept='.pdf,.doc,.docx,.odt,.rtf,.txt,.md,.csv,.xlsx,.xlsm,.ods,.pptx,.png,.jpg,.jpeg,.bmp,.gif,.tif,.tiff,.webp,.mp3,.wav,.ogg,.oga,.m4a,.aac,.flac,.opus,.mp4,.m4v,.webm,.mov,.avi,.mkv,.wmv,.mpg,.mpeg,.eml,.zip'>
-        <p class='small muted'>Analiza działa lokalnie. Data końcowa terminu, adresat zobowiązania i przypisanie sprawy zawsze wymagają ręcznej kontroli.</p>
+        <p class='small muted'>Odczyt tekstu obsługuje PDF, DOCX, ODT, XLSX, ODS, PPTX, EML, pliki tekstowe i część obrazów. Stare DOC, ZIP oraz audio/wideo można dołączyć, ale nie są transkrybowane. Propozycje i terminy zawsze wymagają ręcznej kontroli.</p>
         <button class='btn primary' type='submit'>Odczytaj i przygotuj propozycje</button><p id='rk-inbox-upload-feedback' class='small muted' role='status' aria-live='polite' hidden></p></form></div>
         <div class='card'><h2>Oczekujące ({len(rows)})</h2><div class='table-scroll'>
         <table><tr><th>Dodano</th><th>Dokument</th><th>Akcja</th></tr>{items}</table></div></div>"""
@@ -128,8 +130,22 @@ class InboxMixin:
         with a.db() as con:
             row = con.execute('SELECT * FROM inbox_items WHERE id=?', (item_id,)).fetchone()
             cases = con.execute("SELECT id,signature,internal_signature,title FROM cases ORDER BY status='closed',title").fetchall()
+            job = job_state(con,item_id)
         if not row:
             return self.send_error(404)
+        if job and job['state'] in ('queued','processing'):
+            state='Oczekuje na OCR' if job['state']=='queued' else 'Trwa odczyt OCR'
+            body=(f"<div class='card'><h1>{state}</h1><p>Plik został zapisany. Analiza działa poza żądaniem HTTP. Ta strona odświeży się automatycznie.</p>"
+                  "<p><a class='btn' href='/inbox'>Wróć do skrzynki</a></p></div><script>setTimeout(()=>location.reload(),3500)</script>")
+            return self.send_html(a.layout('Analiza wpływu',body,'inbox'))
+        if job and job['state']=='error':
+            body=("<div class='card'><h1>Nie udało się przeanalizować pisma</h1>"
+                  "<p>Oryginalny plik jest bezpiecznie zapisany i nie trafił do sprawy."
+                  " Możesz ponowić analizę albo odrzucić wpływ.</p>"
+                  f"<p class='small muted'>{escape(job['error'])}</p>"
+                  f"<form method='post' action='/inbox/{item_id}/retry'><button class='btn primary'>Ponów OCR</button></form>"
+                  "<a class='btn' href='/inbox'>Wróć</a></div>")
+            return self.send_html(a.layout('Błąd OCR',body,'inbox'),500)
         if row['status'] != 'pending':
             return self.redirect(f"/document/{row['document_id']}/open" if row['document_id'] else '/inbox')
         analysis = json.loads(row['suggestions_json'])
@@ -236,8 +252,11 @@ class InboxMixin:
             return self._inbox_error('Nieprawidłowy rodzaj dokumentu.', target=f'/inbox/{item_id}')
         with a.db() as con:
             row = con.execute('SELECT * FROM inbox_items WHERE id=?', (item_id,)).fetchone()
+            job = job_state(con,item_id)
         if not row:
             return self.send_error(404)
+        if job and job['state'] != 'ready':
+            return self._inbox_error('Analiza pliku nie została jeszcze zakończona.',409,f'/inbox/{item_id}')
         if row['status'] == 'approved' and row['document_id']:
             return self.redirect(f"/document/{row['document_id']}/open")
         if row['status'] != 'pending':
@@ -322,6 +341,12 @@ class InboxMixin:
             return self._inbox_error('Nie udało się zapisać pisma i czynności; nie zatwierdzono zmian.', 500, f'/inbox/{item_id}')
         staged.unlink(missing_ok=True)
         return self.redirect(f'/document/{doc_id}/open')
+
+    def inbox_retry(self,item_id:int,fields):
+        a=self._app()
+        if not retry_job(a,item_id):
+            return self._inbox_error('Nie można ponowić tej analizy.',409,f'/inbox/{item_id}')
+        return self.redirect(f'/inbox/{item_id}')
 
     def inbox_discard(self, item_id: int, fields):
         a = self._app()

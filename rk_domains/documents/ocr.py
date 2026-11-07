@@ -4,7 +4,9 @@ import io
 import os
 import tempfile
 import zipfile
+import time
 import xml.etree.ElementTree as ET
+from rk_domains.documents.format_support import extract_extra_text,xml_member
 from pathlib import Path
 
 def extract_document_text(filename: str, data: bytes, force_ocr: bool=False, *, find_tesseract, ocr_language_for, run_tesseract) -> tuple[str,int,str,str]:
@@ -16,13 +18,13 @@ def extract_document_text(filename: str, data: bytes, force_ocr: bool=False, *, 
     ext=Path(filename or '').suffix.lower()
     tcmd=find_tesseract(); lang=ocr_language_for(tcmd) if tcmd else ''
     min_text=max(10,int(os.getenv('RK_OCR_MIN_TEXT','40') or 40))
-    max_pages=max(1,int(os.getenv('RK_OCR_MAX_PAGES','300') or 300))
+    max_pages=max(1,min(60,int(os.getenv('RK_OCR_MAX_PAGES','35') or 35)))
     dpi=max(120,min(350,int(os.getenv('RK_OCR_DPI','200') or 200)))
     try:
+        if ext in {'.odt','.ods','.pptx','.eml'}:
+            return extract_extra_text(filename,data)
         if ext=='.docx':
-            with zipfile.ZipFile(io.BytesIO(data),'r') as z:
-                xml=z.read('word/document.xml')
-            root=ET.fromstring(xml); texts=[]
+            root=xml_member(data,'word/document.xml'); texts=[]
             for el in root.iter():
                 if el.tag.endswith('}t') and el.text: texts.append(el.text)
                 elif el.tag.endswith('}tab'): texts.append('\t')
@@ -52,11 +54,18 @@ def extract_document_text(filename: str, data: bytes, force_ocr: bool=False, *, 
                 return (combined,0,'ocr_brak_pymupdf',lang)
             doc=fitz.open(stream=data,filetype='pdf'); out=[]; used=False
             total=min(len(doc),max_pages)
+            started=time.monotonic()
             for i in range(total):
+                if time.monotonic()-started>180:
+                    out.append('[Limit czasu OCR 180 sekund; pozostałe strony wymagają ręcznej kontroli]')
+                    break
                 existing=page_text[i] if i<len(page_text) else ''
                 if not force_ocr and len(existing.strip())>=min_text:
                     out.append(existing); continue
                 page=doc.load_page(i)
+                if page.rect.width*page.rect.height*(dpi/72)**2>18_000_000:
+                    out.append(existing or '[Strona przekracza limit rozmiaru obrazu do OCR]')
+                    continue
                 pix=page.get_pixmap(matrix=fitz.Matrix(dpi/72,dpi/72),alpha=False)
                 with tempfile.NamedTemporaryFile(suffix='.png',delete=False) as tf: img=Path(tf.name)
                 try:
@@ -95,4 +104,4 @@ def extract_document_text(filename: str, data: bytes, force_ocr: bool=False, *, 
                 except Exception: pass
     except Exception:
         return ('',0,'blad_indeksowania',lang)
-    return ('',0,'nieobslugiwany_format','')
+    return ('',0,'bez_odczytu_formatu','')

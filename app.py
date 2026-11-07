@@ -60,6 +60,12 @@ from rk_dashboard_data import dashboard_snapshot
 from rk_routes import dispatch_static_get, dispatch_static_post
 from rk_inbox import InboxMixin, ensure_inbox_schema
 from rk_paths import resolve_runtime_paths, installed_data_dir
+from rk_core.schema import initialize_database
+from rk_core.schema_version import SCHEMA_VERSION as CURRENT_SCHEMA_VERSION
+from rk_core.sync_atomic import pending_sync_journal
+from rk_core.request_security import csrf_for_session, csrf_valid, csrf_html, same_origin_request
+from rk_core.cloud_security import validate_cloud_url, CloudCryptoError, encrypt_cloud_snapshot, decrypt_cloud_snapshot
+from rk_domains.inbox.worker import start_worker
 from rk_core.database import db_connection
 from rk_core.http import parse_multipart
 from rk_core.files import atomic_write_bytes
@@ -77,8 +83,10 @@ from rk_smart import (
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.4.0-dev1"
-SCHEMA_VERSION = 330
+VERSION = "0.4.0-dev2"
+RK_040_DEV2_AUDIT_PATCH_20261106_R1 = True
+INBOX_ASYNC_MODE = True
+SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_PATHS = resolve_runtime_paths(__file__)
 APP_MODE = RUNTIME_PATHS.mode
@@ -108,7 +116,7 @@ PRE_IMPORT_BACKUPS_DIR = DATA_DIR / "backup_przed_importem"
 BACKUP_KEY_FILE = RUNTIME_PATHS.backup_key_file
 TRASH_RETENTION_DAYS = 30
 # Ochrona przed przypadkowym wczytaniem wieluset MB/GB do pamięci przez pojedynczy formularz.
-MAX_POST_BYTES = 256 * 1024 * 1024
+MAX_POST_BYTES = 64 * 1024 * 1024
 ERROR_LOG = RUNTIME_PATHS.error_log
 PERF_LOG = RUNTIME_PATHS.perf_log
 DRAFTS_DIR = RUNTIME_PATHS.drafts_dir
@@ -771,525 +779,91 @@ def schedule_backup_restore(backup_path: Path) -> tuple[bool,str]:
 
 
 def apply_pending_restore_if_any() -> str:
-    if not PENDING_RESTORE_MARKER.exists() or not PENDING_RESTORE_DB.exists(): return ''
-    try: meta=json.loads(PENDING_RESTORE_MARKER.read_text(encoding='utf-8'))
-    except Exception: meta={}
-    ok,why=sqlite_integrity(PENDING_RESTORE_DB)
-    if not ok: log_event(f'Odrzucono pending restore: {why}','ERROR'); return f'Nie przywrócono kopii: {why}'
-    RECOVERY_DIR.mkdir(parents=True,exist_ok=True)
-    if DB_PATH.exists() and _looks_like_sqlite(DB_PATH):
-        safety=RECOVERY_DIR/f"baza_przed_restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sqlite3"; _sqlite_backup(DB_PATH,safety)
-    os.replace(PENDING_RESTORE_DB,DB_PATH)
+    """Switch DB and attachments as one recoverable operation.
 
+    SQLite and directories cannot be swapped in one filesystem syscall.
+    Prepare everything on the same volume, back up both, then journal the
+    replacement; on exception the original state is restored. Power loss
+    leaves a recovery journal that prevents unsafe startup.
+    """
+    if not PENDING_RESTORE_MARKER.exists() or not PENDING_RESTORE_DB.exists():
+        return ''
+    if pending_sync_journal(DATA_DIR):
+        raise RuntimeError('Wykryto niedokończoną synchronizację. Przywróć jej kopię przed uruchomieniem RK KANCELARIA.')
+    try:
+        meta=json.loads(PENDING_RESTORE_MARKER.read_text(encoding='utf-8'))
+        if not isinstance(meta,dict):raise ValueError('Nieprawidłowy znacznik przywracania.')
+    except Exception as exc:
+        raise RuntimeError('Nie można odczytać znacznika przywracania. Dane pozostawiono bez zmian.') from exc
+    ok,why=sqlite_integrity(PENDING_RESTORE_DB)
+    if not ok:
+        raise RuntimeError('Nie przywrócono bazy: uszkodzony przygotowany snapshot: '+str(why))
     kind=meta.get('kind','backup_restore')
-    if kind in {'installed_import','cloud_snapshot','data_snapshot'}:
-        try:
-            if PENDING_IMPORT_DOCS.exists():
-                if FILES_DIR.exists(): shutil.rmtree(FILES_DIR,ignore_errors=True)
-                shutil.copytree(PENDING_IMPORT_DOCS,FILES_DIR,copy_function=shutil.copy2)
-            else:
-                FILES_DIR.mkdir(parents=True,exist_ok=True)
-            if PENDING_IMPORT_DRAFTS.exists():
-                if DRAFTS_DIR.exists(): shutil.rmtree(DRAFTS_DIR,ignore_errors=True)
-                shutil.copytree(PENDING_IMPORT_DRAFTS,DRAFTS_DIR,copy_function=shutil.copy2)
-            else:
-                DRAFTS_DIR.mkdir(parents=True,exist_ok=True)
-        finally:
-            shutil.rmtree(PENDING_IMPORT_DOCS,ignore_errors=True)
-            shutil.rmtree(PENDING_IMPORT_DRAFTS,ignore_errors=True)
+    full=kind in {'installed_import','cloud_snapshot','data_snapshot'}
+    if full and (not PENDING_IMPORT_DOCS.is_dir() or not PENDING_IMPORT_DRAFTS.is_dir()):
+        raise RuntimeError('Niekompletny snapshot: brak przygotowanych dokumentów lub projektów. Dane nietknięte.')
+    from rk_core.sync_atomic import commit_staged
+    import rk_sync
+    DATA_DIR.mkdir(parents=True,exist_ok=True)
+    stage=Path(tempfile.mkdtemp(prefix='.rk_pending_stage_',dir=str(DATA_DIR)))
+    try:
+        staged_db=stage/'sprawnik.sqlite3'
+        _sqlite_backup(PENDING_RESTORE_DB,staged_db)
         if kind=='cloud_snapshot':
-            try:
-                rawcon=sqlite3.connect(DB_PATH)
-                rawcon.execute("CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
-                for key,value in {
-                    'cloud_last_version':str(meta.get('cloud_version') or 0),
-                    'cloud_last_sync':datetime.now().isoformat(timespec='seconds')
-                }.items():
-                    rawcon.execute("INSERT INTO app_settings(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",(key,value))
-                rawcon.commit(); rawcon.close()
-            except Exception as exc:
-                log_event(f'Nie udało się zapisać stanu Cloud po restore: {exc}','ERROR')
-            msg=f"Pobrano stan Cloud v{meta.get('cloud_version','?')}: {meta.get('source','serwer Cloud')}"
-        elif kind=='data_snapshot':
-            msg=f"Przywrócono pełny snapshot: {meta.get('source','wybrany plik')}"
-        else:
-            msg=f"Zaimportowano dane z Installed: {meta.get('source','stara instalacja')}"
+            # Set Cloud state IN THE STAGED DB, before committing any files.
+            with contextlib.closing(sqlite3.connect(staged_db,timeout=10)) as rawcon:
+                with rawcon:
+                    rawcon.execute("CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+                    for key,value in {
+                        'cloud_last_version':str(meta.get('cloud_version') or 0),
+                        'cloud_last_sync':datetime.now().isoformat(timespec='seconds'),
+                    }.items():
+                        rawcon.execute("INSERT INTO app_settings(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",(key,value))
+        managed=('dokumenty','projekty_pism') if full else ()
+        if full:
+            shutil.copytree(PENDING_IMPORT_DOCS,stage/'dokumenty',copy_function=shutil.copy2)
+            shutil.copytree(PENDING_IMPORT_DRAFTS,stage/'projekty_pism',copy_function=shutil.copy2)
+        backup=rk_sync.backup_destination(DATA_DIR,'przed_pending_restore')
+        commit_staged(DATA_DIR,backup,staged_db,stage,managed,rk_sync._replace_dir,sqlite_integrity)
+    except Exception as exc:
+        log_event('Bezpieczne przywracanie snapshotu: '+str(exc),'ERROR')
+        raise RuntimeError('Nie udało się przywrócić pełnego stanu. Sprawdź dziennik synchronizacji i kopię danych: '+str(exc)) from exc
+    finally:
+        shutil.rmtree(stage,ignore_errors=True)
+    # Only after successful DB+directory commit may the pending data be discarded.
+    PENDING_RESTORE_MARKER.unlink()
+    PENDING_RESTORE_DB.unlink(missing_ok=True)
+    shutil.rmtree(PENDING_IMPORT_DOCS,ignore_errors=True)
+    shutil.rmtree(PENDING_IMPORT_DRAFTS,ignore_errors=True)
+    if kind=='cloud_snapshot':
+        message=f"Pobrano stan Cloud v{meta.get('cloud_version','?')}: {meta.get('source','serwer Cloud')}"
+    elif kind=='data_snapshot':
+        message=f"Przywrócono pełny snapshot: {meta.get('source','wybrany plik')}"
+    elif kind=='installed_import':
+        message=f"Zaimportowano dane z Installed: {meta.get('source','stara instalacja')}"
     else:
-        msg=f"Przywrócono backup: {meta.get('source','wybrana kopia')}"
-    PENDING_RESTORE_MARKER.unlink(missing_ok=True)
-    log_event(msg,'WARNING'); return msg
+        message=f"Przywrócono backup: {meta.get('source','wybrana kopia')}"
+    log_event(message,'WARNING')
+    return message
 
 
 
 
 def init_db() -> None:
-    with db() as con:
-        try:
-            con.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.DatabaseError:
-            pass
-        con.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS cases (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                signature TEXT DEFAULT '',
-                internal_signature TEXT DEFAULT '',
-                client TEXT DEFAULT '',
-                title TEXT NOT NULL,
-                court TEXT DEFAULT '',
-                department TEXT DEFAULT '',
-                category TEXT DEFAULT '',
-                subject TEXT DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'active',
-                next_step TEXT DEFAULT '',
-                next_date TEXT DEFAULT '',
-                notes TEXT DEFAULT '',
-                created_by TEXT DEFAULT '',
-                updated_by TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS parties (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-                name TEXT NOT NULL,
-                role TEXT DEFAULT '',
-                notes TEXT DEFAULT '',
-                created_by TEXT DEFAULT '',
-                updated_by TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-                event_date TEXT DEFAULT '',
-                event_type TEXT DEFAULT 'Czynność',
-                title TEXT NOT NULL,
-                description TEXT DEFAULT '',
-                created_by TEXT DEFAULT '',
-                updated_by TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS process_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-                event_date TEXT DEFAULT '',
-                event_type TEXT DEFAULT 'Inna czynność',
-                title TEXT NOT NULL,
-                description TEXT DEFAULT '',
-                court TEXT DEFAULT '',
-                signature TEXT DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'done',
-                document_id INTEGER,
-                next_date TEXT DEFAULT '',
-                created_by TEXT DEFAULT '',
-                updated_by TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS tasks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-                title TEXT NOT NULL,
-                due_date TEXT DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'open',
-                priority TEXT NOT NULL DEFAULT 'normal',
-                depends_on TEXT DEFAULT '',
-                notes TEXT DEFAULT '',
-                created_by TEXT DEFAULT '',
-                updated_by TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS documents (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-                doc_date TEXT DEFAULT '',
-                received_date TEXT DEFAULT '',
-                doc_type TEXT DEFAULT 'Inne',
-                title TEXT NOT NULL,
-                description TEXT DEFAULT '',
-                stored_name TEXT DEFAULT '',
-                original_name TEXT DEFAULT '',
-                created_by TEXT DEFAULT '',
-                updated_by TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS case_relations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-                target_case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-                relation_type TEXT NOT NULL DEFAULT 'related',
-                note TEXT DEFAULT '',
-                created_by TEXT DEFAULT '',
-                updated_by TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                CHECK (source_case_id <> target_case_id)
-            );
-            CREATE TABLE IF NOT EXISTS case_notes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-                note TEXT NOT NULL,
-                author TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS case_external_signatures (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-                label TEXT NOT NULL,
-                signature TEXT NOT NULL,
-                created_by TEXT DEFAULT '',
-                updated_by TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS tags (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE COLLATE NOCASE
-            );
-            CREATE TABLE IF NOT EXISTS case_tags (
-                case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-                tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
-                PRIMARY KEY(case_id, tag_id)
-            );
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL UNIQUE COLLATE NOCASE,
-                author_name TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                password_salt TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'user',
-                function TEXT NOT NULL DEFAULT '',
-                is_active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS user_sessions (
-                token_hash TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                expires_at TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS user_case_pins (
-                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY(user_id,case_id)
-            );
-            CREATE TABLE IF NOT EXISTS user_case_recent (
-                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-                opened_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY(user_id,case_id)
-            );
-            CREATE TABLE IF NOT EXISTS audit_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                case_id INTEGER,
-                entity_type TEXT NOT NULL DEFAULT '',
-                entity_id INTEGER,
-                action TEXT NOT NULL DEFAULT '',
-                description TEXT NOT NULL DEFAULT '',
-                author TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS recycle_bin (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                entity_type TEXT NOT NULL,
-                entity_id INTEGER,
-                case_id INTEGER,
-                label TEXT NOT NULL DEFAULT '',
-                payload_json TEXT NOT NULL,
-                deleted_by TEXT NOT NULL DEFAULT '',
-                deleted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS immutable_audit (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                case_id INTEGER,
-                entity_type TEXT NOT NULL DEFAULT '',
-                entity_id INTEGER,
-                action TEXT NOT NULL DEFAULT '',
-                description TEXT NOT NULL DEFAULT '',
-                author TEXT NOT NULL DEFAULT '',
-                username TEXT NOT NULL DEFAULT '',
-                user_id INTEGER,
-                remote_addr TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS entities (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                entity_type TEXT NOT NULL DEFAULT 'person',
-                display_name TEXT NOT NULL,
-                first_name TEXT DEFAULT '',
-                last_name TEXT DEFAULT '',
-                company_name TEXT DEFAULT '',
-                pesel TEXT DEFAULT '',
-                nip TEXT DEFAULT '',
-                krs TEXT DEFAULT '',
-                email TEXT DEFAULT '',
-                phone TEXT DEFAULT '',
-                address TEXT DEFAULT '',
-                notes TEXT DEFAULT '',
-                created_by TEXT DEFAULT '',
-                updated_by TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS case_entities (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-                entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE RESTRICT,
-                role TEXT NOT NULL DEFAULT 'Uczestnik',
-                notes TEXT DEFAULT '',
-                created_by TEXT DEFAULT '',
-                updated_by TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS app_settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL DEFAULT '',
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS checklist_templates (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                category TEXT DEFAULT '',
-                created_by TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS checklist_template_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                template_id INTEGER NOT NULL REFERENCES checklist_templates(id) ON DELETE CASCADE,
-                label TEXT NOT NULL,
-                sort_order INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS case_checklist_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-                label TEXT NOT NULL,
-                is_done INTEGER NOT NULL DEFAULT 0,
-                sort_order INTEGER NOT NULL DEFAULT 0,
-                template_id INTEGER,
-                created_by TEXT DEFAULT '',
-                updated_by TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS writing_projects (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                case_id INTEGER REFERENCES cases(id) ON DELETE SET NULL,
-                title TEXT NOT NULL,
-                doc_type TEXT DEFAULT 'Pismo procesowe',
-                status TEXT NOT NULL DEFAULT 'Roboczy',
-                due_date TEXT DEFAULT '',
-                content TEXT DEFAULT '',
-                notes TEXT DEFAULT '',
-                stored_name TEXT DEFAULT '',
-                original_name TEXT DEFAULT '',
-                created_by TEXT DEFAULT '',
-                updated_by TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE INDEX IF NOT EXISTS idx_cases_signature ON cases(signature);
-            CREATE INDEX IF NOT EXISTS idx_cases_title ON cases(title);
-            CREATE INDEX IF NOT EXISTS idx_events_case ON events(case_id);
-            CREATE INDEX IF NOT EXISTS idx_tasks_case ON tasks(case_id);
-            CREATE INDEX IF NOT EXISTS idx_process_events_case ON process_events(case_id,event_date);
-            CREATE INDEX IF NOT EXISTS idx_docs_case ON documents(case_id);
-            CREATE INDEX IF NOT EXISTS idx_parties_case ON parties(case_id);
-            CREATE INDEX IF NOT EXISTS idx_notes_case ON case_notes(case_id);
-            CREATE INDEX IF NOT EXISTS idx_extsig_case ON case_external_signatures(case_id);
-            CREATE INDEX IF NOT EXISTS idx_extsig_signature ON case_external_signatures(signature);
-            CREATE INDEX IF NOT EXISTS idx_extsig_label ON case_external_signatures(label);
-            CREATE INDEX IF NOT EXISTS idx_rel_source ON case_relations(source_case_id);
-            CREATE INDEX IF NOT EXISTS idx_rel_target ON case_relations(target_case_id);
-            CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name);
-            CREATE INDEX IF NOT EXISTS idx_case_tags_case ON case_tags(case_id);
-            CREATE INDEX IF NOT EXISTS idx_case_tags_tag ON case_tags(tag_id);
-            CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
-            CREATE INDEX IF NOT EXISTS idx_sessions_user ON user_sessions(user_id);
-            CREATE INDEX IF NOT EXISTS idx_sessions_expires ON user_sessions(expires_at);
-            CREATE INDEX IF NOT EXISTS idx_writing_projects_case ON writing_projects(case_id);
-            CREATE INDEX IF NOT EXISTS idx_writing_projects_status ON writing_projects(status);
-            """
-        )
-
-        def ensure_columns(table: str, columns: dict[str, str]):
-            existing = {r[1] for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
-            for col, ddl in columns.items():
-                if col not in existing:
-                    con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
-
-        ensure_columns("cases", {
-            "internal_signature": "TEXT DEFAULT ''",
-            "client": "TEXT DEFAULT ''",
-            "created_by": "TEXT DEFAULT ''",
-            "updated_by": "TEXT DEFAULT ''",
-            "waiting_for": "TEXT DEFAULT ''",
-            "lead_user_id": "INTEGER",
-        })
-        ensure_columns("parties", {"created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''", "created_at": "TEXT DEFAULT ''"})
-        ensure_columns("events", {"created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''"})
-        ensure_columns("process_events", {
-            "event_date": "TEXT DEFAULT ''", "event_type": "TEXT DEFAULT 'Inna czynność'",
-            "title": "TEXT DEFAULT ''", "description": "TEXT DEFAULT ''", "court": "TEXT DEFAULT ''",
-            "signature": "TEXT DEFAULT ''", "status": "TEXT NOT NULL DEFAULT 'done'", "document_id": "INTEGER",
-            "next_date": "TEXT DEFAULT ''", "created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''",
-            "created_at": "TEXT DEFAULT ''", "updated_at": "TEXT DEFAULT ''"
-        })
-        ensure_columns("tasks", {
-            "created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''", "assigned_user_id": "INTEGER",
-            "deadline_base_date": "TEXT DEFAULT ''", "deadline_days": "INTEGER", "deadline_rule": "TEXT DEFAULT ''",
-            "deadline_source": "TEXT DEFAULT ''", "deadline_manual": "INTEGER NOT NULL DEFAULT 0",
-            "completed_at": "TEXT DEFAULT ''", "completed_by": "TEXT DEFAULT ''",
-            "task_type": "TEXT DEFAULT 'Zadanie'"
-        })
-        ensure_columns("documents", {
-            "received_date": "TEXT DEFAULT ''", "delivered_date": "TEXT DEFAULT ''",
-            "sender": "TEXT DEFAULT ''", "document_author": "TEXT DEFAULT ''", "tags": "TEXT DEFAULT ''",
-            "linked_task_id": "INTEGER", "created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''",
-            "file_hash": "TEXT DEFAULT ''", "extracted_text": "TEXT DEFAULT ''", "indexed_at": "TEXT DEFAULT ''",
-            "doc_status": "TEXT DEFAULT 'Aktywny'", "ocr_used": "INTEGER NOT NULL DEFAULT 0",
-            "ocr_status": "TEXT DEFAULT ''", "ocr_language": "TEXT DEFAULT ''",
-            "parent_document_id": "INTEGER", "attachment_order": "INTEGER NOT NULL DEFAULT 0"
-        })
-        ensure_columns("cases", {"closed_edit_unlocked": "INTEGER NOT NULL DEFAULT 0"})
-        ensure_columns("parties", {"entity_id": "INTEGER"})
-        ensure_columns("case_relations", {"note": "TEXT DEFAULT ''", "created_by": "TEXT DEFAULT ''", "updated_by": "TEXT DEFAULT ''"})
-        ensure_columns("case_notes", {"author": "TEXT DEFAULT ''", "created_at": "TEXT DEFAULT ''"})
-        ensure_columns("users", {"function": "TEXT NOT NULL DEFAULT ''"})
-        ensure_columns("case_checklist_items", {"completed_at": "TEXT DEFAULT ''", "completed_by": "TEXT DEFAULT ''"})
-
-        con.execute("""CREATE TABLE IF NOT EXISTS saved_views (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            target TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(user_id,name)
-        )""")
-
-        con.execute("""CREATE TABLE IF NOT EXISTS draft_templates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            doc_type TEXT NOT NULL DEFAULT 'Pismo procesowe',
-            content TEXT NOT NULL DEFAULT '',
-            notes TEXT NOT NULL DEFAULT '',
-            created_by TEXT DEFAULT '',
-            updated_by TEXT DEFAULT '',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )""")
-        con.execute("""CREATE TABLE IF NOT EXISTS draft_versions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_id INTEGER NOT NULL REFERENCES writing_projects(id) ON DELETE CASCADE,
-            version_no INTEGER NOT NULL,
-            title TEXT NOT NULL,
-            doc_type TEXT DEFAULT '',
-            status TEXT DEFAULT '',
-            due_date TEXT DEFAULT '',
-            content TEXT DEFAULT '',
-            notes TEXT DEFAULT '',
-            stored_name TEXT DEFAULT '',
-            original_name TEXT DEFAULT '',
-            change_note TEXT DEFAULT '',
-            created_by TEXT DEFAULT '',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(project_id,version_no)
-        )""")
-        con.execute("""CREATE TABLE IF NOT EXISTS system_checks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            check_type TEXT NOT NULL,
-            result TEXT NOT NULL,
-            details TEXT DEFAULT '',
-            created_by TEXT DEFAULT '',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )""")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_draft_versions_project ON draft_versions(project_id,version_no DESC)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_documents_linked_task ON documents(linked_task_id)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_documents_delivered ON documents(delivered_date)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_documents_parent ON documents(parent_document_id,attachment_order,id)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type,status,due_date)")
-
-        # HOTFIX 0.12.13: wersja 0.13 używała w audit_log nazw actor/details,
-        # podczas gdy stabilna gałąź 0.12 używa author/description. Ponieważ DATA_DIR
-        # jest wspólny dla wersji, po powrocie z 0.13 część spraw z historią zmian
-        # kończyła się błędem sqlite3.Row: "No item with that key".
-        ensure_columns("audit_log", {
-            "case_id": "INTEGER",
-            "entity_type": "TEXT NOT NULL DEFAULT ''",
-            "entity_id": "INTEGER",
-            "action": "TEXT NOT NULL DEFAULT ''",
-            "description": "TEXT NOT NULL DEFAULT ''",
-            "author": "TEXT NOT NULL DEFAULT ''",
-            "created_at": "TEXT DEFAULT ''",
-        })
-        audit_cols = {r[1] for r in con.execute("PRAGMA table_info(audit_log)").fetchall()}
-        if "details" in audit_cols:
-            con.execute("UPDATE audit_log SET description=COALESCE(NULLIF(description,''),details,'') WHERE COALESCE(description,'')='' AND COALESCE(details,'')<>''")
-        if "actor" in audit_cols:
-            con.execute("UPDATE audit_log SET author=COALESCE(NULLIF(author,''),actor,'') WHERE COALESCE(author,'')='' AND COALESCE(actor,'')<>''")
-
-        # Usuń wyłącznie historyczne triggery pozostawione przez eksperymentalną 0.13.
-        # Stabilna gałąź zapisuje audyt jawnie w kodzie i nie potrzebuje tych triggerów;
-        # ich pozostawienie powodowałoby podwójne wpisy historii.
-        for legacy_trigger in (
-            "audit_cases_u", "audit_tasks_i", "audit_tasks_u", "audit_tasks_d",
-            "audit_docs_i", "audit_docs_u", "audit_events_i", "audit_notes_i"
-        ):
-            con.execute(f"DROP TRIGGER IF EXISTS {legacy_trigger}")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_cases_internal_signature ON cases(internal_signature)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_cases_client ON cases(client)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_cases_lead_user ON cases(lead_user_id)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_tasks_assigned_user ON tasks(assigned_user_id)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_recent_user ON user_case_recent(user_id, opened_at)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_audit_case ON audit_log(case_id, created_at)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_trash_deleted ON recycle_bin(deleted_at)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_immutable_audit_case ON immutable_audit(case_id, created_at)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(display_name)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_entities_pesel ON entities(pesel)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_entities_nip ON entities(nip)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_entities_krs ON entities(krs)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_case_entities_case ON case_entities(case_id)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_case_entities_entity ON case_entities(entity_id)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_checklist_case ON case_checklist_items(case_id,sort_order)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_doc_hash ON documents(file_hash)")
-        try:
-            con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS document_fts USING fts5(document_id UNINDEXED, case_id UNINDEXED, title, filename, body)")
-        except sqlite3.DatabaseError:
-            pass
-
-        con.execute("CREATE INDEX IF NOT EXISTS idx_cases_status_nextdate ON cases(status,next_date)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_cases_nextdate ON cases(next_date,id)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status_due_case ON tasks(status,due_date,case_id)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_events_date_case ON events(event_date,case_id)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_process_events_date_case ON process_events(event_date,case_id)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_process_events_nextdate_case ON process_events(next_date,case_id)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_docs_status_case ON documents(doc_status,case_id)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_writing_projects_status_due ON writing_projects(status,due_date,updated_at)")
-
-        # Warstwa 0.3: czytelny widok sprawy, alerty, relacje i lokalna biblioteka prawa.
-        # CREATE IF NOT EXISTS + INSERT OR IGNORE zachowują pełną zgodność z danymi DEV9.
-        ensure_smart_schema(con)
-        ensure_inbox_schema(con)
-        ensure_document_hub_schema(con)
-        ensure_action_center_schema(con)
-        ensure_correspondence_schema(con)
-        ensure_workspace_plus_schema(con)
-        ensure_case_categories_schema(con)
-        ensure_caseflow_schema(con)
-        # Scala stare osobne monity/alerty i zadania. Operacja jest idempotentna.
-        reconcile_task_alerts(con)
-
-        # Jawny numer wersji schematu przygotowuje bezpieczne migracje.
-        con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-
-        # 0.15.x automatycznie wstawiała do każdej pustej instalacji prywatny zestaw
-        # danych demonstracyjnych. W 0.2 demo jest wyłącznie jawnie opt-in.
-        count = con.execute("SELECT COUNT(*) FROM cases").fetchone()[0]
-        seed_requested = os.getenv("RK_KANCELARIA_SEED_DEMO", "0").strip().lower() in {"1", "true", "yes", "tak"}
-        if count == 0 and seed_requested:
-            seed_demo(con)
+    """Cienka fasada migracji i uruchomienia kolejki OCR."""
+    if pending_sync_journal(DATA_DIR):
+        raise RuntimeError('Przerwana synchronizacja! Nie otwieraj RK KANCELARIA przed odzyskaniem z kopii Data. Użyj ODZYSKAJ_SYNCHRONIZACJE_040.py.')
+    initialize_database(db, schema_version=SCHEMA_VERSION,
+        ensure_smart_schema=ensure_smart_schema,
+        ensure_inbox_schema=ensure_inbox_schema,
+        ensure_document_hub_schema=ensure_document_hub_schema,
+        ensure_action_center_schema=ensure_action_center_schema,
+        ensure_correspondence_schema=ensure_correspondence_schema,
+        ensure_workspace_plus_schema=ensure_workspace_plus_schema,
+        ensure_case_categories_schema=ensure_case_categories_schema,
+        ensure_caseflow_schema=ensure_caseflow_schema,
+        reconcile_task_alerts=reconcile_task_alerts, seed_demo=seed_demo)
+    start_worker(sys.modules[__name__])
 
 
 def password_hash(password: str, salt_hex: str | None = None) -> tuple[str, str]:
@@ -1785,13 +1359,12 @@ def create_data_snapshot_zip() -> tuple[bytes,str]:
     try:
         _sqlite_backup(DB_PATH,tmp)
         # Pełny snapshot nie przenosi lokalnych sesji ani sekretów urządzenia.
-        try:
-            sc=sqlite3.connect(tmp)
-            sc.execute("DELETE FROM user_sessions")
-            sc.execute("DELETE FROM app_settings WHERE key IN ('backup_key_dpapi','backup_key_verifier','cloud_token')")
-            sc.commit(); sc.close()
-        except Exception as exc:
-            log_event(f'Nie udało się oczyścić lokalnych sekretów w snapshot: {exc}','WARNING')
+        # Fail closed: never export a snapshot if secret removal fails.
+        # Closing the handle explicitly is essential for Windows file cleanup.
+        with contextlib.closing(sqlite3.connect(tmp,timeout=15)) as sc:
+            with sc:
+                sc.execute("DELETE FROM user_sessions")
+                sc.execute("DELETE FROM app_settings WHERE key IN ('backup_key_dpapi','backup_key_verifier','cloud_token')")
         ok,why=sqlite_integrity(tmp)
         if not ok:
             raise RuntimeError(f'Kopia bazy nie przeszła quick_check: {why}')
@@ -1829,7 +1402,10 @@ def cloud_config(con: sqlite3.Connection) -> dict[str,str]:
 def schedule_data_snapshot_restore(raw: bytes, source: str='snapshot', cloud_version: int=0) -> tuple[bool,str]:
     """Zweryfikuj pełny snapshot i przygotuj bezpieczne przełączenie po restarcie."""
     try:
+        if len(raw)>512*1024*1024: return False,'Archiwum snapshotu przekracza limit 512 MB.'
         z=zipfile.ZipFile(io.BytesIO(raw),'r')
+        if z.getinfo('sprawnik.sqlite3').file_size>1024*1024*1024:
+            return False,'Baza w snapshot przekracza limit 1 GB.'
         names=set(z.namelist())
         if 'snapshot.json' not in names or 'sprawnik.sqlite3' not in names:
             return False,'Snapshot nie zawiera snapshot.json i sprawnik.sqlite3.'
@@ -1862,6 +1438,10 @@ def schedule_data_snapshot_restore(raw: bytes, source: str='snapshot', cloud_ver
                 root=PENDING_IMPORT_DRAFTS
             else:
                 continue
+            if any(x in ('..','') for x in Path(rel).parts):
+                raise ValueError('Niedozwolona ścieżka w snapshot.')
+            if info.file_size>256*1024*1024:
+                raise ValueError('Za duży pojedynczy załącznik w snapshot.')
             parts=[x for x in Path(rel).parts if x not in {'','.','..'}]
             if not parts or any('/' in x or '\\' in x for x in parts): continue
             total_unpacked += int(info.file_size or 0)
@@ -1999,7 +1579,7 @@ def _run_tesseract_on_file(cmd: str, image_path: Path, lang: str) -> str:
     if OCR_TESSDATA_DIR.is_dir() and any(OCR_TESSDATA_DIR.glob('*.traineddata')):
         args += ['--tessdata-dir', str(OCR_TESSDATA_DIR)]
     try:
-        cp=subprocess.run(args,capture_output=True,text=True,encoding='utf-8',errors='ignore',timeout=120,creationflags=(subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0))
+        cp=subprocess.run(args,capture_output=True,text=True,encoding='utf-8',errors='ignore',timeout=30,creationflags=(subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0))
         return cp.stdout or '' if cp.returncode==0 else ''
     except Exception:
         return ''
@@ -2712,11 +2292,17 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
         return True
 
     def send_html(self, content: str, status=200):
-        data = content.encode("utf-8")
+        token=csrf_for_session(self.cookie_value(SESSION_COOKIE))
+        content=csrf_html(content,token)
+        data=content.encode('utf-8')
         self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers(); self.wfile.write(data)
+        self.send_header('Content-Type','text/html; charset=utf-8')
+        self.send_header('Content-Length',str(len(data)))
+        self.send_header('Cache-Control','private, no-store')
+        self.send_header('X-Content-Type-Options','nosniff')
+        self.send_header('X-Frame-Options','DENY')
+        self.send_header('Referrer-Policy','same-origin')
+        self.end_headers();self.wfile.write(data)
 
     def redirect(self, url: str):
         if getattr(self, '_autosave_mode', False) or self.headers.get('X-Sprawnik-Autosave') == '1':
@@ -2792,7 +2378,8 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
         return (user['author_name'] if user else '')[:120]
 
     def set_session_cookie(self, token: str):
-        self.send_header('Set-Cookie', f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_HOURS*3600}")
+        secure='; Secure' if os.getenv('RK_HTTPS_PROXY','0').lower() in ('1','true','yes') else ''
+        self.send_header('Set-Cookie',f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_HOURS*3600}"+secure)
 
     def clear_session_cookie(self):
         self.send_header('Set-Cookie', f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
@@ -2924,6 +2511,7 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
         if path == "/system/heartbeat":
             client_heartbeat((qs.get("tab") or [""])[0]); return self.send_no_content()
         if path == "/system/ws":
+            if not self.require_auth(): return
             return self.websocket_presence((qs.get("tab") or [""])[0])
         if path == '/setup': return self.setup_page()
         if path == '/login': return self.login_page(qs)
@@ -3027,6 +2615,9 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
         _REQUEST_CONTEXT.remote_addr = self.client_address[0] if self.client_address else ''
         _REQUEST_CONTEXT.signature_cache = {}
         u = urlparse(self.path); path = u.path
+        # Deny unauthenticated large uploads BEFORE loading request bodies.
+        if path not in ('/setup','/login','/system/closing','/desktop/quit'):
+            if not self.require_auth(): return
         try:
             fields, files = self.read_post()
         except OverflowError as exc:
@@ -3035,6 +2626,11 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
         except Exception as exc:
             log_app_exception(path + '/read-post', exc)
             return self.send_html(auth_layout('Błąd formularza', f"<div class='error'><b>Nie udało się odczytać przesłanych danych.</b><br>{esc(str(exc))}</div>"), 400)
+        if not same_origin_request(self.headers):
+            return self.send_html(auth_layout('Odrzucone żądanie','<div class="error">Niedozwolone pochodzenie żądania.</div>'),403)
+        if path not in ('/setup','/login','/system/closing','/desktop/quit'):
+            if not csrf_valid(self.cookie_value(SESSION_COOKIE),fields,self.headers):
+                return self.send_html(auth_layout('Odrzucone żądanie','<div class="error">Nieprawidłowy token formularza. Odśwież stronę i spróbuj ponownie.</div>'),403)
         if path == "/system/closing":
             client_closing((parse_qs(u.query).get("tab") or [""])[0]); return self.send_no_content()
         if path == '/setup': return self.setup_create(fields)
@@ -3134,6 +2730,7 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
             if re.fullmatch(r"/document/\d+/link",path): return self.document_link_add(int(path.split("/")[2]),fields)
             if re.fullmatch(r"/document/\d+/unlink",path): return self.document_link_remove(int(path.split("/")[2]),fields)
             if path == "/inbox/upload": return self.inbox_upload(fields, files)
+            if re.fullmatch(r"/inbox/\d+/retry",path): return self.inbox_retry(int(path.split('/')[2]),fields)
             if path == "/correspondence/create": return self.correspondence_save(fields)
             if re.fullmatch(r"/correspondence/\d+/update",path): return self.correspondence_save(fields,int(path.split("/")[2]))
             if re.fullmatch(r"/correspondence/\d+/followup",path): return self.correspondence_followup(int(path.split("/")[2]),fields)
@@ -5302,6 +4899,7 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
         self.send_html(layout('Bezpieczne usuwanie sprawy',body,'cases'))
 
     def case_delete(self,cid,f):
+        if not self.require_admin(): return
         with db() as con:
             shared=con.execute("SELECT 1 FROM documents d JOIN document_case_links l ON l.document_id=d.id WHERE d.case_id=? LIMIT 1",(cid,)).fetchone()
             if shared:
@@ -6263,6 +5861,7 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
         self.redirect(f'/case/{cid}' if ok and cid else '/trash')
 
     def trash_purge(self,trash_id,f):
+        if not self.require_admin(): return
         with db() as con:
             tr=con.execute("SELECT * FROM recycle_bin WHERE id=?",(trash_id,)).fetchone()
             if tr:
@@ -6429,7 +6028,7 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
             if pm.get('kind')=='cloud_snapshot': pending="<div class='notice'><b>Pobranie z Cloud jest przygotowane.</b> Zamknij i ponownie uruchom RK KANCELARIA, aby bezpiecznie przełączyć bazę i pliki.</div>"
         body=f"""<div class='topbar'><div><h1>Cloud i urządzenia</h1><div class='sub'>Wersjonowana synchronizacja pełnego stanu + fundament pracy Windows / telefon / tablet.</div></div><a class='btn' href='/recovery'>Recovery</a></div>{msg}{pending}
         <div class='grid'><div class='card span6'><h2>Konfiguracja Cloud Bridge</h2><form method='post' action='/cloud/config'><label>Adres HTTPS serwera</label><input name='url' value='{esc(cfg['url'])}' placeholder='https://cloud.twojakancelaria.pl'><label>ID kancelarii</label><input name='office_id' value='{esc(cfg['office_id'])}' required><label>Token dostępu</label><input type='password' name='token' placeholder='{esc(token_hint)}'><div class='small muted'>Pozostaw token pusty, aby zachować obecny. W produkcji używaj HTTPS/VPN; nie wystawiaj lokalnego HTTP do Internetu.</div><button class='btn primary'>Zapisz konfigurację</button></form></div>
-        <div class='card span6'><h2>Stan synchronizacji</h2><p><b>Lokalnie zapamiętana wersja:</b> v{esc(cfg['last_version'])}<br><b>Ostatnia synchronizacja:</b> {esc(cfg['last_sync'] or '—')}</p><p class='{remote_class}'>{esc(remote)}</p><div class='case-control-bar'><form method='post' action='/cloud/check'><button class='btn'>Sprawdź połączenie</button></form><form method='post' action='/cloud/push' onsubmit="return confirm('Wysłać pełny aktualny snapshot do Cloud? Wersja serwera musi zgadzać się z wersją ostatnio widzianą przez ten komputer.');"><button class='btn primary'>Wyślij do Cloud</button></form></div><br><form method='post' action='/cloud/pull' onsubmit="return confirm('Pobrać stan z Cloud? Bieżący lokalny stan zostanie najpierw zabezpieczony, a podmiana nastąpi dopiero po ponownym uruchomieniu.');"><button class='btn'>Pobierz z Cloud</button></form></div></div>
+        <div class='card span6'><h2>Stan synchronizacji</h2><p><b>Lokalnie zapamiętana wersja:</b> v{esc(cfg['last_version'])}<br><b>Ostatnia synchronizacja:</b> {esc(cfg['last_sync'] or '—')}</p><p class='{remote_class}'>{esc(remote)}</p><div class='case-control-bar'><form method='post' action='/cloud/check'><button class='btn'>Sprawdź połączenie</button></form><form method='post' action='/cloud/push' onsubmit="return confirm('Wysłać pełny aktualny snapshot do Cloud? Wersja serwera musi zgadzać się z wersją ostatnio widzianą przez ten komputer.');"><label>Hasło szyfrowania Cloud (minimum 12 znaków; nie jest zapisywane)</label><input type='password' name='cloud_passphrase' minlength='12' required autocomplete='off'><button class='btn primary'>Wyślij do Cloud</button></form></div><br><form method='post' action='/cloud/pull' onsubmit="return confirm('Pobrać stan z Cloud? Bieżący lokalny stan zostanie najpierw zabezpieczony, a podmiana nastąpi dopiero po ponownym uruchomieniu.');"><label>Hasło odszyfrowania Cloud</label><input type='password' name='cloud_passphrase' minlength='12' required autocomplete='off'><button class='btn'>Pobierz z Cloud</button></form></div></div>
         <br><div class='card'><h2>Telefon / tablet / PWA</h2><p>DEV8 jest przygotowany jako PWA: po wystawieniu tej samej aplikacji przez bezpieczny HTTPS możesz dodać RK KANCELARIA do ekranu głównego telefonu/tabletu. Service Worker buforuje wyłącznie statyczny interfejs — dane spraw i dokumenty nie są utrwalane offline w pamięci przeglądarki.</p><p class='small muted'>Cloud Bridge używa PostgreSQL jako magazynu wersjonowanych snapshotów z kontrolą konfliktu. Nie udaje scalania rekord-po-rekordzie: jeśli dwa urządzenia zmienią dane niezależnie, program blokuje ciche nadpisanie i wymaga świadomego rozstrzygnięcia.</p></div>"""
         self.send_html(layout('Cloud',body,'cloud'))
 
@@ -6438,7 +6037,9 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
         url=(f.get('url','') or '').strip().rstrip('/')
         office=(f.get('office_id','') or 'default').strip()[:180]
         token=(f.get('token','') or '').strip()
-        if url and not re.match(r'^https?://',url,re.I): return self.cloud_page('Adres Cloud musi zaczynać się od http:// lub https://.')
+        if url:
+            try:validate_cloud_url(url)
+            except CloudCryptoError as exc:return self.cloud_page(str(exc))
         with db() as con:
             settings_set(con,'cloud_url',url); settings_set(con,'cloud_office_id',office)
             if token: settings_set(con,'cloud_token',token)
@@ -6456,37 +6057,50 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
         return self.cloud_page(text)
 
     def cloud_push(self,f):
-        if not self.require_admin(): return
-        with db() as con: cfg=cloud_config(con)
+        if not self.require_admin():return
+        if not LOCAL_MODE and os.getenv('RK_HTTPS_PROXY','0').lower() not in ('1','true','yes'):
+            return self.cloud_page('Cloud wymaga bezpiecznego HTTPS dla dostępu przez LAN.')
+        passphrase=str(f.get('cloud_passphrase') or '')
+        if len(passphrase)<12:return self.cloud_page('Podaj hasło szyfrowania Cloud (minimum 12 znaków).')
+        with db() as con:cfg=cloud_config(con)
         try:
             from rk_cloud import get_meta,push_snapshot
+            validate_cloud_url(cfg['url'])
             remote=get_meta(cfg['url'],cfg['office_id'],cfg['token'])
             remembered=int(cfg['last_version'] or 0)
             if remote.version!=remembered:
-                return self.cloud_page(f'Konflikt Cloud: serwer ma v{remote.version}, a ten komputer pamięta v{remembered}. Nie wysłano danych. Najpierw sprawdź/pobierz nowszy stan albo rozwiąż konflikt świadomie.')
-            data,name=create_data_snapshot_zip()
-            result=push_snapshot(cfg['url'],cfg['office_id'],cfg['token'],data,remote.version)
-            now=datetime.now().isoformat(timespec='seconds')
+                return self.cloud_page(f'Konflikt Cloud: serwer ma v{remote.version}, a komputer v{remembered}. Nie wysłano danych.')
+            raw,name=create_data_snapshot_zip()
+            encrypted=encrypt_cloud_snapshot(raw,passphrase)
+            result=push_snapshot(cfg['url'],cfg['office_id'],cfg['token'],encrypted,remote.version)
             with db() as con:
-                settings_set(con,'cloud_last_version',str(result.version)); settings_set(con,'cloud_last_sync',now); settings_set(con,'cloud_last_sha256',result.sha256)
-                immutable_audit(con,None,'cloud',None,'Wysłano snapshot do Cloud',f'{name}\nWersja: {result.version}\nSHA-256: {result.sha256}',self.current_author(f))
-            return self.cloud_page(f'Wysłano pełny stan do Cloud jako wersję v{result.version}.')
-        except Exception as exc:
-            return self.cloud_page(f'Nie wysłano danych: {exc}')
+                settings_set(con,'cloud_last_version',str(result.version))
+                settings_set(con,'cloud_last_sync',datetime.now().isoformat(timespec='seconds'))
+                settings_set(con,'cloud_last_sha256',result.sha256)
+                immutable_audit(con,None,'cloud',None,'Wysłano zaszyfrowany snapshot Cloud',
+                    f'{name}; wersja {result.version}; SHA-256 {result.sha256}',self.current_author(f))
+            return self.cloud_page(f'Zaszyfrowany snapshot przesłano do Cloud (v{result.version}). Zapamiętaj hasło!')
+        except Exception as exc:return self.cloud_page('Nie wysłano danych: '+str(exc))
 
     def cloud_pull(self,f):
-        if not self.require_admin(): return
-        with db() as con: cfg=cloud_config(con)
+        if not self.require_admin():return
+        if not LOCAL_MODE and os.getenv('RK_HTTPS_PROXY','0').lower() not in ('1','true','yes'):
+            return self.cloud_page('Cloud wymaga bezpiecznego HTTPS dla dostępu przez LAN.')
+        passphrase=str(f.get('cloud_passphrase') or '')
+        if len(passphrase)<12:return self.cloud_page('Podaj hasło odszyfrowania Cloud.')
+        with db() as con:cfg=cloud_config(con)
         try:
             from rk_cloud import pull_snapshot
+            validate_cloud_url(cfg['url'])
             raw,meta=pull_snapshot(cfg['url'],cfg['office_id'],cfg['token'])
+            plaintext=decrypt_cloud_snapshot(raw,passphrase) # authenticate before any DB modification
             create_shutdown_backup(retention=30)
-            ok,msg=schedule_data_snapshot_restore(raw,f"Cloud {cfg['office_id']}",meta.version)
+            ok,msg=schedule_data_snapshot_restore(plaintext,f"Cloud {cfg['office_id']}",meta.version)
             if ok:
-                with db() as con: immutable_audit(con,None,'cloud',None,'Zaplanowano pobranie snapshotu z Cloud',f'Wersja: {meta.version}\nSHA-256: {meta.sha256}',self.current_author(f))
+                with db() as con:immutable_audit(con,None,'cloud',None,
+                    'Zaplanowano przywrócenie zaszyfrowanego Cloud',f'Wersja: {meta.version}',self.current_author(f))
             return self.cloud_page(msg)
-        except Exception as exc:
-            return self.cloud_page(f'Nie pobrano danych: {exc}')
+        except Exception as exc:return self.cloud_page('Nie pobrano danych: '+str(exc))
 
 
     def tags_page(self,qs):
@@ -6754,11 +6368,13 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
         self.redirect(f'/case/{cid}')
 
     def case_unlock(self,cid,f):
+        if not self.require_admin(): return
         a=self.current_author(f)
         with db() as con: con.execute('UPDATE cases SET closed_edit_unlocked=1 WHERE id=?',(cid,)); audit(con,cid,'case',cid,'Odblokowano zakończoną sprawę do edycji','Tryb tylko do odczytu wyłączony',a)
         self.redirect(f'/case/{cid}')
 
     def case_lock(self,cid,f):
+        if not self.require_admin(): return
         a=self.current_author(f)
         with db() as con: con.execute('UPDATE cases SET closed_edit_unlocked=0 WHERE id=?',(cid,)); audit(con,cid,'case',cid,'Zablokowano zakończoną sprawę','Tryb tylko do odczytu włączony',a)
         self.redirect(f'/case/{cid}')
@@ -7285,6 +6901,7 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
 
 
     def backup(self):
+        if not self.require_admin(): return
         if not DB_PATH.exists(): init_db()
         # Nie czytamy samego pliku .sqlite3, bo aktywne dane mogą być jeszcze w WAL.
         # SQLite backup API tworzy spójną migawkę.
@@ -7295,6 +6912,8 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
 
 
 def main():
+    if pending_sync_journal(DATA_DIR):
+        raise RuntimeError('Przerwana synchronizacja. Najpierw odzyskaj dane z kopii; nie uruchamiaj programu.')
     apply_pending_restore_if_any()
     recover_database_if_needed()
     init_db()

@@ -93,7 +93,7 @@ class Handler(BaseHTTPRequestHandler):
         if kind=='meta':
             return self.json(200,{'office_id':row[0],'version':row[1],'sha256':row[2],'size':row[3],'updated_at':row[4].isoformat(),'exists':True})
         payload=bytes(row[5])
-        self.send_response(200); self.send_header('Content-Type','application/zip'); self.send_header('Content-Length',str(len(payload)))
+        self.send_response(200); self.send_header('Content-Type','application/octet-stream'); self.send_header('Content-Length',str(len(payload)))
         self.send_header('X-RK-Version',str(row[1])); self.send_header('X-RK-SHA256',row[2]); self.send_header('X-RK-Updated-At',row[4].isoformat())
         self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(payload)
 
@@ -108,7 +108,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError: return self.json(400,{'error':'Błędny X-RK-Base-Version.'})
         payload=self.rfile.read(length)
         if len(payload)!=length: return self.json(400,{'error':'Przerwane przesyłanie snapshotu.'})
-        if payload[:2]!=b'PK': return self.json(400,{'error':'Snapshot nie jest archiwum ZIP.'})
+        if not payload.startswith(b'RKCLD2'): return self.json(400,{'error':'Cloud wymaga zaszyfrowanego snapshotu RKCLD2.'})
         digest=hashlib.sha256(payload).hexdigest(); now=datetime.now(timezone.utc)
         with db() as con:
             row=con.execute('SELECT version FROM rk_office_snapshots WHERE office_id=%s FOR UPDATE',(office,)).fetchone()

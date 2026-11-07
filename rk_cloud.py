@@ -11,6 +11,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+from rk_core.cloud_security import validate_cloud_url,CloudCryptoError
 from dataclasses import dataclass
 
 
@@ -31,13 +32,8 @@ class CloudMeta:
 
 
 def _base(url: str) -> str:
-    value=(url or '').strip().rstrip('/')
-    if not value:
-        raise CloudError('Nie skonfigurowano adresu serwera Cloud.')
-    parsed=urllib.parse.urlparse(value)
-    if parsed.scheme not in {'http','https'} or not parsed.netloc:
-        raise CloudError('Adres Cloud musi zaczynać się od http:// lub https://.')
-    return value
+    try:return validate_cloud_url(url)
+    except CloudCryptoError as exc:raise CloudError(str(exc)) from exc
 
 
 def _headers(token: str, extra: dict[str,str] | None=None) -> dict[str,str]:
@@ -48,9 +44,15 @@ def _headers(token: str, extra: dict[str,str] | None=None) -> dict[str,str]:
     return h
 
 
+class _RKNoCloudRedirect(urllib.request.HTTPRedirectHandler):
+    """Never forward bearer credentials to a redirected URL."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise CloudError('Cloud nie akceptuje przekierowań HTTP. Wskaż końcowy adres HTTPS serwera.')
+
+
 def _request(req: urllib.request.Request, timeout: int=45) -> tuple[bytes,dict[str,str],int]:
     try:
-        with urllib.request.urlopen(req,timeout=timeout) as r:
+        with urllib.request.build_opener(_RKNoCloudRedirect()).open(req,timeout=timeout) as r:
             return r.read(),dict(r.headers.items()),int(r.status)
     except urllib.error.HTTPError as exc:
         raw=exc.read()
@@ -95,7 +97,7 @@ def push_snapshot(url: str, office_id: str, token: str, payload: bytes, base_ver
     req=urllib.request.Request(
         f'{_base(url)}/api/v1/offices/{oid}/snapshot',data=payload,method='PUT',
         headers=_headers(token,{
-            'Content-Type':'application/zip',
+            'Content-Type':'application/octet-stream',
             'Content-Length':str(len(payload)),
             'X-RK-Base-Version':str(int(base_version)),
         })
@@ -111,7 +113,7 @@ def push_snapshot(url: str, office_id: str, token: str, payload: bytes, base_ver
 
 def pull_snapshot(url: str, office_id: str, token: str) -> tuple[bytes,CloudMeta]:
     oid=urllib.parse.quote((office_id or 'default').strip(),safe='')
-    req=urllib.request.Request(f'{_base(url)}/api/v1/offices/{oid}/snapshot',headers=_headers(token,{'Accept':'application/zip'}))
+    req=urllib.request.Request(f'{_base(url)}/api/v1/offices/{oid}/snapshot',headers=_headers(token,{'Accept':'application/octet-stream'}))
     raw,headers,_=_request(req,180)
     return raw,CloudMeta(
         office_id=office_id or 'default', version=int(headers.get('X-RK-Version','0') or 0),

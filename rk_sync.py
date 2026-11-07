@@ -33,8 +33,10 @@ from pathlib import Path
 from typing import Iterable
 
 from rk_paths import installed_data_dir, resolve_runtime_paths
+from rk_core.schema_version import SCHEMA_VERSION as CURRENT_SCHEMA_VERSION
+from rk_core.sync_atomic import commit_staged,pending_sync_journal,SyncRecoveryRequired
 
-SCHEMA_VERSION = 240
+SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 SYNC_FORMAT = 2
 MANAGED_DIRS = ("dokumenty", "projekty_pism")
 LOCAL_SETTING_KEYS = {"backup_key_dpapi", "backup_key_verifier"}
@@ -428,58 +430,35 @@ def _replace_dir(staged: Path, destination: Path) -> None:
 
 
 def copy_full_state(source: Path, destination: Path, label: str) -> Path:
-    source = _norm_path(source)
-    destination = _norm_path(destination)
-    if source == destination:
-        raise SyncError("Źródło i cel synchronizacji są tym samym katalogiem.")
-    if active_lock(source):
-        raise SyncError(f"Źródłowa RK KANCELARIA jest uruchomiona: {source}")
-    if active_lock(destination):
-        raise SyncError(f"Docelowa RK KANCELARIA jest uruchomiona: {destination}")
-
-    src_db = source / "sprawnik.sqlite3"
-    if not src_db.is_file():
-        raise SyncError(f"Brak źródłowej bazy: {src_db}")
-    ok, why = _sqlite_integrity(src_db)
-    if not ok:
-        raise SyncError(f"Źródłowa baza jest uszkodzona: {why}")
-    src_ver = sqlite3.connect(src_db).execute("PRAGMA user_version").fetchone()[0]
-    if int(src_ver) > SCHEMA_VERSION:
-        raise SyncError(f"Źródłowa baza ma nieobsługiwany nowszy schemat {src_ver}.")
-
-    destination.mkdir(parents=True, exist_ok=True)
-    backup = backup_destination(destination, label)
-    local_settings = _local_settings(destination / "sprawnik.sqlite3")
-    stage_root = destination / (".sync_stage_" + uuid.uuid4().hex)
-    stage_root.mkdir(parents=True, exist_ok=False)
+    """Replace the full state with automatic rollback on caught errors."""
+    source=_norm_path(source);destination=_norm_path(destination)
+    if source==destination:raise SyncError('Źródło i cel to ten sam katalog.')
+    if active_lock(source) or active_lock(destination):
+        raise SyncError('Zamknij obie instancje RK KANCELARIA przed synchronizacją.')
+    if pending_sync_journal(destination):
+        raise SyncError('Niedokończona synchronizacja. Najpierw przywróć kopię, nie nadpisuj danych.')
+    src_db=source/'sprawnik.sqlite3'
+    if not src_db.is_file():raise SyncError('Brak źródłowej bazy SQLite: '+str(src_db))
+    ok,why=_sqlite_integrity(src_db)
+    if not ok:raise SyncError('Baza źródłowa jest uszkodzona: '+str(why))
+    conn=sqlite3.connect(src_db)
+    try:src_ver=int(conn.execute('PRAGMA user_version').fetchone()[0])
+    finally:conn.close()
+    if src_ver>SCHEMA_VERSION:raise SyncError(f'Źródłowy schemat {src_ver} jest nowszy niż {SCHEMA_VERSION}.')
+    destination.mkdir(parents=True,exist_ok=True)
+    backup=backup_destination(destination,label)
+    settings=_local_settings(destination/'sprawnik.sqlite3')
+    stage=destination/('.sync_stage_'+uuid.uuid4().hex)
+    stage.mkdir(parents=True,exist_ok=False)
     try:
-        stage_db = stage_root / "sprawnik.sqlite3"
-        _sqlite_backup(src_db, stage_db)
-        _apply_local_settings(stage_db, local_settings)
-        for dirname in MANAGED_DIRS:
-            _copytree(source / dirname, stage_root / dirname)
-
-        # DB najpierw zapisujemy jako plik tymczasowy w tym samym katalogu docelowym.
-        dest_db = destination / "sprawnik.sqlite3"
-        db_tmp = destination / (".sprawnik_sync_" + uuid.uuid4().hex + ".sqlite3")
-        shutil.copy2(stage_db, db_tmp)
-        os.replace(db_tmp, dest_db)
-
-        # Katalogi zarządzane zastępujemy w całości, aby propagować także usunięcia.
-        for dirname in MANAGED_DIRS:
-            staged_dir = stage_root / dirname
-            dest_dir = destination / dirname
-            _replace_dir(staged_dir, dest_dir)
-        ok2, why2 = _sqlite_integrity(dest_db)
-        if not ok2:
-            raise SyncError(f"Baza po synchronizacji nie przeszła kontroli: {why2}")
+        stage_db=stage/'sprawnik.sqlite3'
+        _sqlite_backup(src_db,stage_db)
+        _apply_local_settings(stage_db,settings)
+        for dirname in MANAGED_DIRS:_copytree(source/dirname,stage/dirname)
+        commit_staged(destination,backup,stage_db,stage,MANAGED_DIRS,_replace_dir,_sqlite_integrity)
         return backup
-    except Exception:
-        # Backup pozostaje nienaruszony. Nie próbujemy automatycznie przywracać częściowo
-        # skopiowanego zestawu, bo backup jest czytelnym punktem odzyskiwania.
-        raise
-    finally:
-        shutil.rmtree(stage_root, ignore_errors=True)
+    except SyncRecoveryRequired as exc:raise SyncError(str(exc)) from exc
+    finally:shutil.rmtree(stage,ignore_errors=True)
 
 
 def _check_pair_paths(installed: Path, portable: Path) -> None:
