@@ -10,6 +10,9 @@ NAV_SECTIONS = (
         ('/today', '◷', 'Dzisiaj', 'today'),
         ('/calendar', '▦', 'Kalendarz kancelarii', 'calendar'),
         ('/my-calendar', '▣', 'Mój kalendarz', 'mycalendar'),
+        ('/worktime', '◷', 'Czas pracy i rozliczenia', 'worktime'),
+        ('/stages', '▤', 'Etapy postępowań', 'stages'),
+        ('/vault', '◇', 'Sejf dokumentów', 'vault'),
         ('/cases', '§', 'Sprawy', 'cases'),
         ('/case-categories', '▧', 'Kategorie spraw', 'case-categories'),
         ('/cases?mine=1', '◎', 'Moje sprawy', 'my_cases'),
@@ -43,6 +46,8 @@ ADMIN_ITEMS = (
     ('/security', '◇', 'Bezpieczeństwo', 'security'),
     ('/recovery', '↥', 'Recovery', 'recovery'),
     ('/cloud', '☁', 'Cloud / PWA', 'cloud'),
+    ('/calendar-sync', '▦', 'Google / Outlook', 'calendar-sync'),
+    ('/court-portal', '⚖', 'Portal Informacyjny', 'court-portal'),
     ('/admin/users', '♟', 'Użytkownicy', 'users'),
 )
 

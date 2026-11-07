@@ -11,7 +11,7 @@ datas = [
 ]
 
 # Dodatkowe dane bibliotek, które bywają ładowane dynamicznie.
-for pkg in ('reportlab', 'openpyxl'):
+for pkg in ('reportlab', 'openpyxl', 'tzdata'):
     try:
         datas += collect_data_files(pkg)
     except Exception:
@@ -32,6 +32,7 @@ a = Analysis(
         'pypdf',
         'openpyxl',
         'cryptography',
+        'tzdata',
         'reportlab',
     ],
     hookspath=[],

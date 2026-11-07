@@ -27,7 +27,7 @@ from rk_domains.inbox.service import stage_inbox_upload
 class SecurityTests(unittest.TestCase):
     def test_schema_constant_used_by_sync(self):
         import rk_sync
-        self.assertEqual(SCHEMA_VERSION,330)
+        self.assertEqual(SCHEMA_VERSION,331)
         self.assertEqual(rk_sync.SCHEMA_VERSION,SCHEMA_VERSION)
 
     def test_https_required_outside_loopback(self):

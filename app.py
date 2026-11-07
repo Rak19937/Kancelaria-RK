@@ -59,6 +59,8 @@ from rk_navigation import render_sidebar_navigation
 from rk_dashboard_data import dashboard_snapshot
 from rk_routes import dispatch_static_get, dispatch_static_post
 from rk_inbox import InboxMixin, ensure_inbox_schema
+from rk_dev3 import Dev3Mixin
+from rk_dev3_core import ensure_dev3_schema
 from rk_paths import resolve_runtime_paths, installed_data_dir
 from rk_core.schema import initialize_database
 from rk_core.schema_version import SCHEMA_VERSION as CURRENT_SCHEMA_VERSION
@@ -83,7 +85,8 @@ from rk_smart import (
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.4.0-dev2"
+VERSION = "0.4.0-dev3"
+RK_DEV3_LEGALTECH_NAV_20261107 = True
 RK_040_DEV2_AUDIT_PATCH_20261106_R1 = True
 INBOX_ASYNC_MODE = True
 SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
@@ -863,6 +866,8 @@ def init_db() -> None:
         ensure_case_categories_schema=ensure_case_categories_schema,
         ensure_caseflow_schema=ensure_caseflow_schema,
         reconcile_task_alerts=reconcile_task_alerts, seed_demo=seed_demo)
+    with db() as con:
+        ensure_dev3_schema(con)
     start_worker(sys.modules[__name__])
 
 
@@ -1992,13 +1997,14 @@ def layout(title: str, body: str, active: str = "") -> str:
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#082b36"><meta name="apple-mobile-web-app-capable" content="yes">
 <link rel="stylesheet" href="/assets/rk_app.css?v={VERSION}">
 <link rel="stylesheet" href="/assets/rk_ux.css?v={VERSION}">
-</head><body data-auto-shutdown="{'1' if AUTO_SHUTDOWN else '0'}"><div class="app"><aside class="sidebar"><div class="brand"><img src="/assets/rk_kancelaria_logo.png" alt="RK"><div class="brand-title">RK KANCELARIA<small>Baza spraw · v{VERSION}</small></div></div>{nav_html}
+<link rel="stylesheet" href="/assets/rk_dev3_nav.css?v={VERSION}">
+</head><body data-auto-shutdown="{'1' if AUTO_SHUTDOWN else '0'}"><div class="app"><aside class="sidebar"><div class="dev3-nav-controls"><button type="button" data-dev3-nav-toggle class="dev3-nav-trigger" aria-label="Otwórz lub przypnij menu" aria-expanded="false" title="Rozwiń menu">☰</button><button type="button" data-dev3-nav-pin class="dev3-nav-pin" aria-label="Przypnij menu" aria-pressed="false" title="Przypnij menu">📌</button></div><div class="dev3-nav-filter"><input type="search" data-dev3-nav-filter placeholder="Szukaj zakładki…" aria-label="Wyszukaj zakładkę"></div><div class="brand"><img src="/assets/rk_kancelaria_logo.png" alt="RK"><div class="brand-title">RK KANCELARIA<small>Baza spraw · v{VERSION}</small></div></div>{nav_html}
 {user_box}
 <div class='sidebar-tools'><button type='button' class='sidebar-mini-btn' data-compact-toggle title='Przełącz gęstość interfejsu'>↔ Tryb kompaktowy</button></div><div class='shortcut-help'><span class='kbd'>Ctrl+F</span> szukaj · <span class='kbd'>Ctrl+J</span> dodaj · <span class='kbd'>Ctrl+N</span> sprawa</div>
 <div class="program-author">AUTOR PROGRAMU<b>{APP_AUTHOR}</b></div>
 </aside><main class="main">{startup_notice}{body}</main></div><a class="global-add" href="/quick-add" title="Dodaj czynność" aria-label="Dodaj czynność">＋</a><div id="autosaveStatus" class="autosave-status"></div>
 <script src="/assets/rk_app.js?v={VERSION}" defer></script>
-<script src="/assets/rk_ux.js?v={VERSION}" defer></script></body></html>"""
+<script src="/assets/rk_ux.js?v={VERSION}" defer></script><script src="/assets/rk_dev3_nav.js?v={VERSION}" defer></script></body></html>"""
 
 
 def writing_tabs(active: str) -> str:
@@ -2240,7 +2246,7 @@ def open_containing_folder(path: Path) -> tuple[bool,str]:
     except Exception as exc: return False,str(exc)
 
 
-class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
+class Handler(Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
     server_version = f"{APP_NAME}/{VERSION}"
 
     def handle_one_request(self):
@@ -2518,6 +2524,7 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
         if not self.require_auth():
             return
         try:
+            if self.dev3_get(path, qs): return
             if dispatch_static_get(self, path, qs): return
             if path == '/onboarding': return self.onboarding_page()
             if path == '/account': return self.account_page()
@@ -2658,6 +2665,7 @@ class Handler(CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, Corresponden
 
 
 
+            if self.dev3_post(path, fields, files): return
             if dispatch_static_post(self, path, fields, files): return
             if re.fullmatch(r"/admin/user/\d+/update", path): return self.user_update(int(path.split('/')[3]), fields)
             if re.fullmatch(r"/admin/user/\d+/password", path): return self.user_password_reset(int(path.split('/')[3]), fields)
