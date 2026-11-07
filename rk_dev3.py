@@ -60,17 +60,20 @@ class Dev3Mixin:
         funcs={
             '/worktime/start':lambda:self.dev3_start(fields),
             '/worktime/stop':lambda:self.dev3_stop(fields),
+            '/worktime/cancel':lambda:self.dev3_cancel(),
             '/worktime/add':lambda:self.dev3_time_add(fields),
             '/vault/upload':lambda:self.dev3_vault_upload(fields,files),
             '/court-portal/import':lambda:self.dev3_court_import(files),
             '/calendar-sync/pull':lambda:self.dev3_calendar_pull(fields),
             '/calendar-sync/publish':lambda:self.dev3_calendar_publish(fields),
             '/calendar-sync/accept':lambda:self.dev3_calendar_accept(fields),
+            '/calendar-sync/dismiss':lambda:self.dev3_calendar_dismiss(fields),
         }
         if re.fullmatch(r'/case/\d+/stage',path):fn=lambda:self.dev3_case_stage_save(int(path.split('/')[2]),fields)
         elif re.fullmatch(r'/worktime/\d+/delete',path):fn=lambda:self.dev3_time_delete(int(path.split('/')[2]))
         elif re.fullmatch(r'/vault/\d+/download',path):fn=lambda:self.dev3_vault_download(int(path.split('/')[2]),fields)
         elif re.fullmatch(r'/vault/\d+/grant',path):fn=lambda:self.dev3_vault_grant(int(path.split('/')[2]),fields)
+        elif re.fullmatch(r'/vault/\d+/revoke',path):fn=lambda:self.dev3_vault_revoke(int(path.split('/')[2]),fields)
         elif re.fullmatch(r'/court-portal/\d+/review',path):fn=lambda:self.dev3_court_review(int(path.split('/')[2]),fields)
         else:fn=funcs.get(path)
         if not fn:return False
@@ -122,7 +125,7 @@ class Dev3Mixin:
                 '''+filter_sql+' ORDER BY t.activity_date DESC,t.id DESC LIMIT 120',() if u['role']=='admin' else (u['id'],)).fetchall()
         body=['<div class="topbar"><div><h1>Ewidencja czasu pracy</h1><div class="sub">Stoper, ręczne wpisy i raport rozliczeń. Czas rejestrowany jest przy konkretnej sprawie.</div></div><a class="btn" href="/worktime/export">Eksport CSV</a></div>']
         if running:
-            body.append('<div class="card"><h2>Stoper jest uruchomiony</h2><p><b>%s</b> · od %s UTC</p><form method="post" action="/worktime/stop"><label>Stawka PLN za godzinę</label><input type="number" name="rate" step="0.01" min="0" value="0"><label><input type="checkbox" name="billable" value="1" checked> Rozliczalne</label><button class="btn primary">Zatrzymaj i zapisz</button></form></div>'%(esc(running['case_title']),esc(running['started_at'])))
+            body.append('<div class="card"><h2>Stoper jest uruchomiony</h2><p><b>%s</b> · od %s UTC</p><p>Upłynęło: <output data-rk-dev3-timer-start="%s">—</output></p><form method="post" action="/worktime/stop"><label>Stawka PLN za godzinę</label><input type="number" name="rate" step="0.01" min="0" value="0"><label><input type="checkbox" name="billable" value="1" checked> Rozliczalne</label><button class="btn primary">Zatrzymaj i zapisz</button></form><form method="post" action="/worktime/cancel" onsubmit="return confirm(&#39;Anulować pomiar bez zapisywania czasu?&#39;)"><button class="btn danger">Anuluj pomiar bez zapisywania</button></form></div>'%(esc(running['case_title']),esc(running['started_at']),esc(running['started_at'])))
         else:
             body.append('<div class="card"><h2>Rozpocznij pomiar czasu</h2><form method="post" action="/worktime/start">'+cases_select(cases)+'<label>Opis czynności</label><input name="description" maxlength="1000" placeholder="np. analiza pozwu"><button class="btn primary">Uruchom stoper</button></form></div>')
         body.append('<div class="card"><h2>Dodaj czas ręcznie</h2><form method="post" action="/worktime/add" class="form-grid"><div><label>Sprawa</label>'+cases_select(cases)+'</div><div><label>Data</label><input type="date" name="day" value="%s" required></div><div><label>Minuty</label><input type="number" name="minutes" min="1" max="1440" value="60" required></div><div><label>Stawka PLN/h</label><input type="number" name="rate" step="0.01" min="0" value="0"></div><div class="full"><label>Opis</label><input name="description" maxlength="2000"></div><div class="full"><label><input type="checkbox" name="billable" checked value="1"> Rozliczalne</label></div><button class="btn primary">Zapisz czas</button></form></div>'%date.today().isoformat())
@@ -142,6 +145,13 @@ class Dev3Mixin:
     def dev3_stop(self,f):
         a=self._dev3_app();u=self._dev3_me()
         with a.db() as con:stop_timer(con,u['id'],rate_grosze(f.get('rate') or '0'),bool(f.get('billable')))
+        self.redirect('/worktime')
+
+    def dev3_cancel(self):
+        a=self._dev3_app();u=self._dev3_me()
+        with a.db() as con:
+            changed=con.execute('DELETE FROM dev3_time_running WHERE user_id=?',(u['id'],)).rowcount
+            if not changed:raise ValueError('Nie ma aktywnego stopera do anulowania')
         self.redirect('/worktime')
 
     def dev3_time_add(self,f):
@@ -173,12 +183,15 @@ class Dev3Mixin:
             where='' if u['role']=='admin' else '''WHERE v.owner_id=? OR EXISTS(SELECT 1 FROM dev3_vault_grants g WHERE g.file_id=v.id AND g.user_id=?)'''
             files=con.execute('''SELECT v.*,c.title case_title FROM dev3_vault_files v JOIN cases c ON c.id=v.case_id '''+where+' ORDER BY v.id DESC',() if u['role']=='admin' else (u['id'],u['id'])).fetchall()
             people=con.execute('SELECT id,author_name FROM users WHERE is_active=1 ORDER BY author_name').fetchall()
+            active_grants=con.execute('''SELECT g.file_id,g.user_id,u.author_name FROM dev3_vault_grants g
+                JOIN users u ON u.id=g.user_id WHERE u.is_active=1 ORDER BY u.author_name''').fetchall()
         s=['<div class="topbar"><div><h1>Szyfrowany sejf dokumentów</h1><p class="sub">Osobny, szyfrowany magazyn plików (AES-256-GCM). Nie zmienia istniejących dokumentów. Hasło nie jest zapisywane.</p></div></div>']
         s.append('<div class="card"><h2>Dodaj plik do sejfu</h2><form method="post" action="/vault/upload" enctype="multipart/form-data"><label>Sprawa</label>'+cases_select(cases)+'<label>Nazwa dokumentu</label><input name="title" maxlength="250"><label>Plik (do 16 MB)</label><input type="file" name="file" required><label>Hasło szyfrowania (minimum 12 znaków)</label><input type="password" name="passphrase" minlength="12" required autocomplete="new-password"><button class="btn primary">Zaszyfruj i zapisz</button></form></div>')
         s.append('<div class="card"><h2>Zapisane pliki</h2><table><thead><tr><th>Dokument</th><th>Sprawa</th><th>Dostęp</th><th>Otwieranie</th></tr></thead><tbody>')
         for x in files:
             if u['role']=='admin' or x['owner_id']==u['id']:
                 grants='<form method="post" action="/vault/%d/grant"><label>Udostępnij użytkownikowi</label><select name="user_id">%s</select><button class="btn small">Nadaj dostęp</button></form>'%(x['id'],''.join('<option value="%s">%s</option>'%(p['id'],esc(p['author_name'])) for p in people))
+                grants+=''.join('<form method="post" action="/vault/%d/revoke" onsubmit="return confirm(\'Cofnąć dostęp do pliku?\')"><input type="hidden" name="user_id" value="%s"><button class="btn small">Cofnij dostęp: %s</button></form>'%(x['id'],g['user_id'],esc(g['author_name'])) for g in active_grants if g['file_id']==x['id'])
             else:grants='<span class="small">Udostępniony</span>'
             form='<form method="post" action="/vault/%d/download"><input type="password" name="passphrase" placeholder="Hasło pliku" required><button class="btn small">Odszyfruj i pobierz</button></form>'%x['id']
             s.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'%(esc(x['title']),esc(x['case_title']),grants,form))
@@ -200,6 +213,19 @@ class Dev3Mixin:
             if u['role']!='admin' and row['owner_id']!=u['id']:return self._dev3_error('Brak uprawnień',403)
             if not con.execute('SELECT 1 FROM users WHERE id=? AND is_active=1',(target,)).fetchone():raise ValueError('Nieznany użytkownik')
             con.execute('INSERT OR IGNORE INTO dev3_vault_grants(file_id,user_id) VALUES(?,?)',(file_id,target))
+        self.redirect('/vault')
+
+    def dev3_vault_revoke(self,file_id,f):
+        a=self._dev3_app();u=self._dev3_me()
+        try:target=int(f.get('user_id') or 0)
+        except (TypeError,ValueError):raise ValueError('Nieprawidłowy użytkownik')
+        with a.db() as con:
+            row=con.execute('SELECT owner_id FROM dev3_vault_files WHERE id=?',(file_id,)).fetchone()
+            if not row:return self.send_error(404)
+            if u['role']!='admin' and row['owner_id']!=u['id']:
+                return self._dev3_error('Brak uprawnień',403)
+            if target==row['owner_id']:raise ValueError('Nie można usunąć dostępu właściciela')
+            con.execute('DELETE FROM dev3_vault_grants WHERE file_id=? AND user_id=?',(file_id,target))
         self.redirect('/vault')
 
     def dev3_vault_download(self,file_id,f):
@@ -237,9 +263,9 @@ class Dev3Mixin:
         s.append('<div class="card"><h2>Informacje oczekujące na ocenę</h2>')
         for r in rows:
             s.append('<div class="dev3-item"><b>%s</b> · %s · %s<p>%s</p>'%(esc(r['signature']),esc(r['event_date']),esc(r['document_title']),esc(r['details'])))
-            if not r['reviewed']:
-                s.append('<form method="post" action="/court-portal/%d/review"><label>Przypisz do sprawy</label>%s<button class="btn small">Zatwierdź kontrolę</button></form>'%(r['id'],cases_select(cases)))
-            else:s.append('<p class="small">Zweryfikowano</p>')
+            s.append('<form method="post" action="/court-portal/%d/review"><label>%s</label>%s<button class="btn small">%s</button></form>'%(r['id'],'Zmień przypisanie' if r['reviewed'] else 'Przypisz do sprawy',cases_select(cases,selected=r['case_id']),'Zapisz przypisanie' if r['reviewed'] else 'Zatwierdź kontrolę'))
+            if r['reviewed']:
+                s.append('<form method="post" action="/court-portal/%d/review"><input type="hidden" name="action" value="undo"><button class="btn small">Cofnij weryfikację</button></form>'%r['id'])
             s.append('</div>')
         s.append('</div>')
         self._dev3_html('Portal Informacyjny — import',''.join(s),'court-portal')
@@ -253,10 +279,14 @@ class Dev3Mixin:
 
     def dev3_court_review(self,row_id,f):
         if not self._dev3_admin():return
-        a=self._dev3_app();cid=int(f.get('case_id') or 0)
+        a=self._dev3_app();undo=f.get('action')=='undo'
+        cid=0 if undo else int(f.get('case_id') or 0)
+        if not undo and not cid:raise ValueError('Wybierz sprawę przed zatwierdzeniem')
         with a.db() as con:
+            if not con.execute('SELECT 1 FROM dev3_portal_items WHERE id=?',(row_id,)).fetchone():
+                return self.send_error(404)
             if cid and not con.execute('SELECT 1 FROM cases WHERE id=?',(cid,)).fetchone():raise ValueError('Nieznana sprawa')
-            con.execute('UPDATE dev3_portal_items SET reviewed=1,case_id=? WHERE id=?',(cid or None,row_id))
+            con.execute('UPDATE dev3_portal_items SET reviewed=?,case_id=? WHERE id=?',(0 if undo else 1,cid or None,row_id))
         self.redirect('/court-portal')
 
     def dev3_calendar_page(self):
@@ -275,7 +305,7 @@ class Dev3Mixin:
         s.append('</select><label><input type="checkbox" name="share_title" value="1"> Udostępnij pełny tytuł w zewnętrznym kalendarzu (potencjalne dane poufne)</label><button class="btn primary">Wyślij wybrany termin</button></form></div>')
         s.append('<div class="card"><h2>Oczekujące wydarzenia z kalendarzy</h2>')
         for r in pending:
-            s.append('<div class="dev3-item"><b>%s</b> · %s (%s)<form method="post" action="/calendar-sync/accept"><input type="hidden" name="pending_id" value="%d"><label>Przypisz do sprawy</label>%s<button class="btn small">Zatwierdź i utwórz termin</button></form></div>'%(esc(r['title']),esc(r['start_at']),esc(r['provider']),r['id'],cases_select(cases)))
+            s.append('<div class="dev3-item"><b>%s</b> · %s (%s)<form method="post" action="/calendar-sync/accept"><input type="hidden" name="pending_id" value="%d"><label>Przypisz do sprawy</label>%s<button class="btn small">Zatwierdź i utwórz termin</button></form><form method="post" action="/calendar-sync/dismiss"><input type="hidden" name="pending_id" value="%d"><button class="btn small danger">Odrzuć propozycję</button></form></div>'%(esc(r['title']),esc(r['start_at']),esc(r['provider']),r['id'],cases_select(cases),r['id']))
         s.append('</div><p class="small">Integracja wymaga własnej konfiguracji OAuth. Brak połączenia nie wstrzymuje lokalnego kalendarza. Nie są automatycznie wyliczane terminy procesowe ani odbierane doręczenia.</p>')
         self._dev3_html('Integracje kalendarza',''.join(s),'calendar-sync')
 
@@ -291,6 +321,15 @@ class Dev3Mixin:
         provider=f.get('provider','')
         a=self._dev3_app();token=access_token(provider)
         with a.db() as con:publish_appointment(con,provider,int(f.get('appointment_id') or 0),token,bool(f.get('share_title')))
+        self.redirect('/calendar-sync')
+
+    def dev3_calendar_dismiss(self,f):
+        if not self._dev3_admin():return
+        a=self._dev3_app()
+        with a.db() as con:
+            changed=con.execute("UPDATE dev3_calendar_pending SET status='dismissed' WHERE id=? AND status='pending'",
+                                (int(f.get('pending_id') or 0),)).rowcount
+            if not changed:raise ValueError('Nie znaleziono oczekującej propozycji')
         self.redirect('/calendar-sync')
 
     def dev3_calendar_accept(self,f):

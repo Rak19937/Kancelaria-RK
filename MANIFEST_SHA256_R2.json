@@ -1,0 +1,13 @@
+{
+  "name": "RK KANCELARIA dev3 R2",
+  "base_git_commit": "d69fc63b3dee5411262cd0e678814e29161a5ef8",
+  "files": {
+    "rk_dev3.py": "ba7d3c280ec43237d3b13ae8e13ad7195578b86a169388836da1cdb9e6e50c6a",
+    "assets/rk_dev3_nav.js": "85c11dafdd573b724100e886b787312f39cd0e57ec17321569645efc05494212",
+    "assets/rk_dev3_nav.css": "2c11ca1f34028128d277328c6e05990a3876c4dcaf016dbc248aa5ada7e19f7a",
+    "TEST_RK_DEV3_POLISH.py": "2ae468c43c7b1befb7bbb0e230f29529601d674677cd27d89e66dc5285e61e32",
+    "TEST_NAV_DEV3_NODE.cjs": "edbe01c577625a0b2b4cbb7f43a406bcfd009710c62cabe56a2ba44308c4f326",
+    "INSTRUKCJA_DEV3_R2.md": "ac86df9a968461f33f611686aa493a2ca1aa69880505aa6308dee4daf9b2f31d",
+    "PLAN_TESTOW_DEV3_R2.md": "3a9a40bdaf687aea830adfbfc7bc3d9236ec4f1e3cf517d5e7071001a4ae3a58"
+  }
+}
