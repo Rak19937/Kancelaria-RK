@@ -1,0 +1,46 @@
+{
+  "ZASTOSUJ_040_DEV3.py": {
+    "bytes": 8747,
+    "sha256": "95de15d6923696b05be4ada5569884e5ad687c5d057a508e7a1da9308b00c266"
+  },
+  "rk_dev3.py": {
+    "bytes": 23715,
+    "sha256": "3277f35b8d0bdd11bf6224b3143361b12b407b281fdd13b38f7f55b180924c6f"
+  },
+  "rk_dev3_core.py": {
+    "bytes": 13479,
+    "sha256": "a8c30bc2192865f70420b23cff11a1a3efebcd54c31017d2ea3cb16bedad8c20"
+  },
+  "rk_dev3_calendar.py": {
+    "bytes": 12101,
+    "sha256": "1b93361cee5485eea6c18d702c8f607c1a06cc9df99945e65f0044a78f97a0ca"
+  },
+  "TEST_RK_DEV3.py": {
+    "bytes": 9981,
+    "sha256": "cb1a904a04260ef31fd271457183188ecb70160a1c71ff0b4a3154c1113df5dd"
+  },
+  "TEST_MIGRATOR_040_DEV3.py": {
+    "bytes": 4099,
+    "sha256": "5d384468018cb69a4adfb33807a3c9957badffdc7cb57626e3f0bb1faff8a7b2"
+  },
+  "assets/rk_dev3_nav.js": {
+    "bytes": 1710,
+    "sha256": "37fac0c95fa974d28db213097fa29148c8f816a1bfd15619f6ed42348a3d6442"
+  },
+  "assets/rk_dev3_nav.css": {
+    "bytes": 3360,
+    "sha256": "8ca9d301c06fd37a2b6f293b2e3f3d56f9f592d46c817ac134fd1724766b65e9"
+  },
+  ".github/workflows/main.yml": {
+    "bytes": 8825,
+    "sha256": "f93603e254885f483116bd0f7c43d1fed1b7cc3ba835d864f148fea7b062512b"
+  },
+  "INSTRUKCJA_040_DEV3.md": {
+    "bytes": 6121,
+    "sha256": "d6922b5db3c113c59185e36b2ad68b7bb0759a0dc17084346b4bf831d9b0645b"
+  },
+  "RAPORT_WERYFIKACJI_040_DEV3.md": {
+    "bytes": 1467,
+    "sha256": "bc6f3c05ff8dafd16db34bebf2a3925591585895b0268ff4eb200ea10cf05eeb"
+  }
+}
