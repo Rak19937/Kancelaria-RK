@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import PRZYWROC_0310 as historical_rollback
+
 import ZASTOSUJ_AKTUALIZACJE as install
 
 PKG=Path(__file__).resolve().parent
@@ -181,6 +183,32 @@ def fixture(tmp):
     return repo
 
 
+def freeze_historical_rollback_payload(repo: Path) -> Path:
+    """Capture EXACT installed test-fixture bytes before restoring 0.3.10.
+
+    The live source package may already be dev3 (different navigation, different
+    CRLF/LF). Historical rollback must compare against the historical installed
+    payload, never the latest files from today's package. Strict byte checking
+    remains enabled in PRZYWROC_0310; no production safety check is bypassed.
+    """
+    reference = repo / '_test_0310_frozen_payload'
+    reference.mkdir(exist_ok=False)
+    for name in (*historical_rollback.GENERATED, *historical_rollback.BASE_ONLY):
+        source = repo / name
+        if source.is_file():
+            target = reference / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+    return reference
+
+
+def restore_historical_fixture(repo: Path, reference: Path, *flags: str) -> int:
+    # The rollback's own package root is rebound only during this isolated test.
+    # Production PRZYWROC_0310.py is never modified.
+    with patch.object(historical_rollback, '__file__', str(reference / 'PRZYWROC_0310.py')):
+        return historical_rollback.main([str(repo), *flags])
+
+
 class EndToEndTests(unittest.TestCase):
     def test_clean_038_to_0310_single_transaction_and_idempotence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -203,10 +231,10 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual((repo/'Data/client.db').read_bytes(),b'CONFIDENTIAL_TEST_BYTES')
             self.assertTrue((repo/'.rk_backup_before_0310/app.py').exists())
             self.assertTrue((repo/'rk_routes.py').exists())
-            from PRZYWROC_0310 import main as restore
-            self.assertEqual(restore([str(repo)]),0)  # podgląd bez zmian
+            frozen=freeze_historical_rollback_payload(repo)
+            self.assertEqual(restore_historical_fixture(repo,frozen),0)  # podgląd bez zmian
             self.assertTrue((repo/'rk_routes.py').exists())
-            self.assertEqual(restore([str(repo),'--restore']),0)
+            self.assertEqual(restore_historical_fixture(repo,frozen,'--restore'),0)
             self.assertFalse((repo/'rk_routes.py').exists())
             self.assertIn('VERSION = "0.3.8-dev1"',(repo/'app.py').read_text(encoding='utf-8'))
             self.assertEqual((repo/'Data/client.db').read_bytes(),b'CONFIDENTIAL_TEST_BYTES')
@@ -229,10 +257,28 @@ class EndToEndTests(unittest.TestCase):
             self.assertIn('find_navigation_matches',changes[repo/'rk_caseflow.py'])
             install.write_transaction(repo,changes,originals,'.rk_backup_before_0310')
             self.assertEqual((repo/'Data/client.db').read_bytes(),data_before)
-            from PRZYWROC_0310 import main as restore
-            self.assertEqual(restore([str(repo),'--restore']),0)
+            frozen=freeze_historical_rollback_payload(repo)
+            self.assertEqual(restore_historical_fixture(repo,frozen,'--restore'),0)
             self.assertIn('VERSION = "0.3.9-dev2"',(repo/'app.py').read_text(encoding='utf-8'))
             self.assertTrue((repo/'assets/rk_ux.js').is_file())
+            self.assertEqual((repo/'Data/client.db').read_bytes(),data_before)
+
+    def test_rollback_rejects_modified_historical_module(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo=fixture(tmp)
+            originals={name:install.git_blob_sha((repo/name).read_text(encoding='utf-8'))
+                       for name in install.BASE_BLOBS}
+            with patch.dict(install.BASE_BLOBS,originals,clear=True):
+                changes,old,_=install.build_changes(repo,PKG)
+            install.write_transaction(repo,changes,old,'.rk_backup_before_0310')
+            frozen=freeze_historical_rollback_payload(repo)
+            nav=repo/'rk_navigation.py'
+            nav.write_bytes(nav.read_bytes()+b'\n# deliberate manual edit\n')
+            data_before=(repo/'Data/client.db').read_bytes()
+            with self.assertRaisesRegex(RuntimeError,'rk_navigation\\.py zmieniono'):
+                restore_historical_fixture(repo,frozen,'--restore')
+            self.assertIn(install.NEW_VERSION,(repo/'app.py').read_text(encoding='utf-8'))
+            self.assertTrue(nav.is_file())
             self.assertEqual((repo/'Data/client.db').read_bytes(),data_before)
 
     def test_upgrade_previous_039_dev1_and_hotfix(self):
