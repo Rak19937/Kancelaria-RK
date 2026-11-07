@@ -52,7 +52,7 @@ jobs:
       - name: Zastosuj RK 0.4.0-dev1 — modularyzacja A+B+C
         shell: pwsh
         run: |
-          if (Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev2"' -Quiet) {
+          if ((Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev2"' -Quiet) -or (Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev3"' -Quiet)) {
             Write-Host '0.4.0-dev2 już aktywna. Pomijam migrator 0.4.0-dev1.'
           } else {
             python ZASTOSUJ_040.py . --dry-run
@@ -67,22 +67,46 @@ jobs:
       - name: Zastosuj RK 0.4.0-dev2 — stabilizacja i bezpieczeństwo
         shell: pwsh
         run: |
-          python ZASTOSUJ_040_DEV2.py . --dry-run
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python ZASTOSUJ_040_DEV2.py .
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (!(Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev2"' -Quiet)) {
-            throw 'Źródła nie zawierają wersji 0.4.0-dev2.'
+          if (Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev3"' -Quiet) {
+            Write-Host 'dev3 już aktywna. Pomijam migrator dev2.'
+          } else {
+            python ZASTOSUJ_040_DEV2.py . --dry-run
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            python ZASTOSUJ_040_DEV2.py .
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if (!(Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev2"' -Quiet)) {
+              throw 'Źródła nie zawierają wersji 0.4.0-dev2.'
+            }
           }
 
       - name: Zastosuj zbiorczy patch po migracji dev2
         shell: pwsh
         run: |
-          python PATCH_RK_040_DEV2_ALL.py . --dry-run
+          if (Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev3"' -Quiet) {
+            Write-Host 'dev3 już aktywna. Pomijam patch dev2.'
+          } else {
+            python PATCH_RK_040_DEV2_ALL.py . --dry-run
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            python PATCH_RK_040_DEV2_ALL.py .
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            python PATCH_RK_040_DEV2_ALL.py . --verify
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: RK 0.4.0-dev3 — nawigacja i LegalTech
+        shell: pwsh
+        run: |
+          python ZASTOSUJ_040_DEV3.py . --dry-run
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python PATCH_RK_040_DEV2_ALL.py .
+          python ZASTOSUJ_040_DEV3.py .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python PATCH_RK_040_DEV2_ALL.py . --verify
+          python ZASTOSUJ_040_DEV3.py . --verify
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Zainstaluj nową zależność stref czasowych dev3
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Analiza całego kodu i wszystkie testy (raport zbiorczy)
@@ -137,16 +161,16 @@ jobs:
           Get-ChildItem $out | Format-Table Name, Length, Mode
 
       # Commitujemy wyłącznie pliki zmienione przez instalator. Nie dotykamy Data.
-      - name: Zapisz przetestowane źródła 0.4.0-dev2 na main
+      - name: Zapisz przetestowane źródła 0.4.0-dev3 na main
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- app.py rk_inbox.py rk_sync.py rk_cloud.py rk_cloud_server.py rk_workspace_plus.py rk_correspondence.py rk_document_hub.py rk_core rk_domains assets/service-worker.js assets/rk_csrf.js TEST_ARCHITEKTURA_040.py RAPORT_JAKOSCI_040.py ODZYSKAJ_SYNCHRONIZACJE_040.py
+          git add -- app.py rk_inbox.py rk_sync.py rk_cloud.py rk_cloud_server.py rk_workspace_plus.py rk_correspondence.py rk_document_hub.py rk_navigation.py rk_dev3.py rk_dev3_core.py rk_dev3_calendar.py rk_core rk_domains assets/service-worker.js assets/rk_csrf.js assets/rk_dev3_nav.css assets/rk_dev3_nav.js TEST_ARCHITEKTURA_040.py TEST_STABILIZACJA_040_DEV2.py RAPORT_JAKOSCI_040.py AUDYT_I_TESTY_RK_040_DEV2.py ODZYSKAJ_SYNCHRONIZACJE_040.py RK_KANCELARIA_PORTABLE.spec
           git diff --cached --quiet
           if ($LASTEXITCODE -eq 1) {
-            git commit -m "RK KANCELARIA 0.4.0-dev2: hardening, async OCR, sync recovery"
+            git commit -m "RK KANCELARIA 0.4.0-dev3: navigation, time tracking, vault, calendar gateways"
             if ($LASTEXITCODE -ne 0) { throw 'Nie udało się zapisać źródeł 0.4.0.' }
             git push origin HEAD:main
             if ($LASTEXITCODE -ne 0) { throw 'Nie udało się wysłać źródeł 0.4.0 na main.' }
@@ -175,7 +199,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: RK-KANCELARIA-RAPORT-TESTY-040-DEV2
+          name: RK-KANCELARIA-RAPORT-TESTY-040-DEV3
           path: |
             RAPORT_AUDYT_040_DEV2.json
             CI_AUDYT_LOGI/*.log
