@@ -92,7 +92,7 @@ jobs:
           }
           python -X utf8 ZASTOSUJ_040_DEV5_PELNA.py . --verify
           if ($LASTEXITCODE -ne 0) { throw 'Weryfikacja DEV5 nie przeszla' }
-          python -X utf8 -m py_compile app.py rk_dev3_core.py rk_dev3_calendar.py rk_dev3.py rk_dev4.py rk_routes.py
+          python -X utf8 -m py_compile app.py rk_dev3_core.py rk_dev3_calendar.py rk_dev3.py rk_dev4.py rk_routes.py TEST_RK_DEV4.py TEST_UI_HTTP_040_DEV2.py
           if ($LASTEXITCODE -ne 0) { throw 'Blad skladni po zastosowaniu zmian' }
 
       - name: Testy DEV5 — kalendarze, sejf, kopie, czas i kontrola dostepu
@@ -181,7 +181,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- app.py rk_dev3_core.py rk_dev3_calendar.py rk_dev3.py rk_dev4.py rk_routes.py .github/workflows/main.yml TEST_ARCHITEKTURA_040.py RAPORT_JAKOSCI_040.py AUDYT_I_TESTY_RK_040_DEV2.py rk_windows_version.txt
+          git add -- app.py rk_dev3_core.py rk_dev3_calendar.py rk_dev3.py rk_dev4.py rk_routes.py .github/workflows/main.yml TEST_ARCHITEKTURA_040.py RAPORT_JAKOSCI_040.py AUDYT_I_TESTY_RK_040_DEV2.py rk_windows_version.txt TEST_RK_DEV4.py TEST_UI_HTTP_040_DEV2.py
           git diff --cached --quiet
           if ($LASTEXITCODE -eq 0) {
             Write-Host 'DEV5: brak nowych zmian — juz zatwierdzone.'
