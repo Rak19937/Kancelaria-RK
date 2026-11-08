@@ -72,7 +72,7 @@ class ArchitectureTests(unittest.TestCase):
     def test_source_wiring_preserves_public_interfaces(self):
         app=(ROOT/'app.py').read_text(encoding='utf-8')
         inbox=(ROOT/'rk_inbox.py').read_text(encoding='utf-8')
-        self.assertIn('VERSION = "0.4.0-dev4"',app)
+        self.assertIn('VERSION = "0.4.0-dev5"',app)
         self.assertIn('from rk_core.database import db_connection',app)
         self.assertIn('from rk_core.http import parse_multipart',app)
         self.assertIn('from rk_domains.documents.ocr import extract_document_text as _extract_document_text',app)

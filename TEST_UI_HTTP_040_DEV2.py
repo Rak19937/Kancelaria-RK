@@ -105,8 +105,12 @@ def main():
             assert code==200,('login user',code)
             code,_,_=request(other,base+'/backup')
             assert code==403,'Zwykły użytkownik uzyskał dostęp do surowej bazy danych!'
-            code,user_html,_=request(other,base+'/inbox')
-            assert code==200
+            # dev5 restricts the legacy global inbox for regular accounts.
+            # The user must instead have access to the case-scoped workspace.
+            code,_,_=request(other,base+'/inbox')
+            assert code==403,'Globalna skrzynka wplywu powinna byc niedostepna'
+            code,user_html,_=request(other,base+'/my-cases')
+            assert code==200,('my-cases',code,user_html[:400])
             u_token=re.search(r'<meta name="rk-csrf-token" content="([a-f0-9]{64})">',user_html).group(1)
             code,_,_=request(other,base+'/case/1/unlock',urllib.parse.urlencode({'_rk_csrf':u_token}).encode(),{'Origin':base})
             assert code==403,'Zwykły użytkownik odblokował sprawę!'

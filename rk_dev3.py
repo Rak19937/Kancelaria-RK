@@ -48,7 +48,7 @@ class Dev3Mixin:
         return True
 
     def dev3_get(self,path,qs):
-        if path=='/worktime': self.dev3_worktime_page();return True
+        if path=='/worktime': self.dev3_worktime_page(qs);return True
         if path=='/worktime/export': self.dev3_worktime_export();return True
         if path=='/stages': self.dev3_stages_page();return True
         if re.fullmatch(r'/case/\d+/stage',path):self.dev3_case_stage_page(int(path.split('/')[2]));return True
@@ -69,6 +69,7 @@ class Dev3Mixin:
             '/calendar-sync/publish':lambda:self.dev3_calendar_publish(fields),
             '/calendar-sync/accept':lambda:self.dev3_calendar_accept(fields),
             '/calendar-sync/dismiss':lambda:self.dev3_calendar_dismiss(fields),
+            '/calendar-sync/review':lambda:self.dev3_calendar_review(fields),
         }
         if re.fullmatch(r'/case/\d+/stage',path):fn=lambda:self.dev3_case_stage_save(int(path.split('/')[2]),fields)
         elif re.fullmatch(r'/worktime/\d+/delete',path):fn=lambda:self.dev3_time_delete(int(path.split('/')[2]))
@@ -116,7 +117,11 @@ class Dev3Mixin:
             audit_if_available(con,case_id,u['id'],'Zmiana etapu postępowania',f.get('stage',''))
         self.redirect('/case/%d/stage'%case_id)
 
-    def dev3_worktime_page(self):
+    def dev3_worktime_page(self,qs=None):
+        try: page=max(1,min(10000,int((qs or {}).get('page',['1'])[0])))
+        except (ValueError,TypeError,IndexError): page=1
+        page_size=60
+        offset=(page-1)*page_size
         a=self._dev3_app();u=self._dev3_me()
         with a.db() as con:
             cases=con.execute('SELECT id,signature,title FROM cases ORDER BY status="closed",title LIMIT 1000').fetchall()
@@ -124,10 +129,12 @@ class Dev3Mixin:
             filter_sql='' if u['role']=='admin' else 'WHERE t.user_id=?'
             if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dev4_time_voids'").fetchone():
                 filter_sql+=(' AND ' if filter_sql else 'WHERE ')+"NOT EXISTS(SELECT 1 FROM dev4_time_voids v WHERE v.entry_id=t.id)"
+            params=() if u['role']=='admin' else (u['id'],)
+            total=con.execute('SELECT COUNT(*) FROM dev3_time_entries t '+filter_sql,params).fetchone()[0]
             entries=con.execute('''SELECT t.*,c.title case_title,c.signature,u.author_name
                 FROM dev3_time_entries t JOIN cases c ON c.id=t.case_id LEFT JOIN users u ON u.id=t.user_id
-                '''+filter_sql+' ORDER BY t.activity_date DESC,t.id DESC LIMIT 120',() if u['role']=='admin' else (u['id'],)).fetchall()
-        body=['<div class="topbar"><div><h1>Ewidencja czasu pracy</h1><div class="sub">Stoper, ręczne wpisy i raport rozliczeń. Czas rejestrowany jest przy konkretnej sprawie.</div></div><a class="btn" href="/worktime/export">Eksport CSV</a></div>']
+                '''+filter_sql+' ORDER BY t.activity_date DESC,t.id DESC LIMIT ? OFFSET ?',params+(page_size,offset)).fetchall()
+        body=['<div class="topbar"><div><h1>Ewidencja czasu pracy</h1><div class="sub">Stoper, ręczne wpisy i raport rozliczeń. Czas rejestrowany jest przy konkretnej sprawie.</div></div><div><a class="btn" href="/worktime/history">Historia korekt</a> <a class="btn" href="/worktime/export">Eksport CSV</a></div></div>']
         if running:
             body.append('<div class="card"><h2>Stoper jest uruchomiony</h2><p><b>%s</b> · od %s UTC</p><p>Upłynęło: <output data-rk-dev3-timer-start="%s">—</output></p><form method="post" action="/worktime/stop"><label>Stawka PLN za godzinę</label><input type="number" name="rate" step="0.01" min="0" value="0"><label><input type="checkbox" name="billable" value="1" checked> Rozliczalne</label><button class="btn primary">Zatrzymaj i zapisz</button></form><form method="post" action="/worktime/cancel" onsubmit="return confirm(&#39;Anulować pomiar bez zapisywania czasu?&#39;)"><button class="btn danger">Anuluj pomiar bez zapisywania</button></form></div>'%(esc(running['case_title']),esc(running['started_at']),esc(running['started_at'])))
         else:
@@ -138,7 +145,11 @@ class Dev3Mixin:
             total=(x['minutes']*x['rate_grosze']//60/100) if x['billable'] else 0
             delete=('<a class="btn small" href="/worktime/%d/edit">Popraw</a> <form method="post" style="display:inline" action="/worktime/%d/delete" onsubmit="return confirm(\'Anulować wpis i zachować historię?\')"><button class="btn small danger">Anuluj wpis</button></form>'%(x['id'],x['id'])) if (u['role']=='admin' or x['user_id']==u['id']) else ''
             body.append('<tr><td>%s</td><td>%s<br><span class="small">%s</span></td><td>%s</td><td>%s</td><td>%.2f PLN</td><td>%s</td></tr>'%(esc(x['activity_date']),esc(x['case_title']),esc(x['description']),esc(x['author_name']),x['minutes'],total,delete))
-        body.append('</tbody></table></div>')
+        body.append('</tbody></table>')
+        body.append('<p class="small">Strona %d · wpisy %d–%d z %d</p>'%(page,min(offset+1,total) if total else 0,min(offset+len(entries),total),total))
+        if page>1:body.append('<a class="btn small" href="/worktime?page=%d">← Poprzednia</a> '%(page-1))
+        if offset+page_size<total:body.append('<a class="btn small" href="/worktime?page=%d">Następna →</a>'%(page+1))
+        body.append('</div>')
         self._dev3_html('Czas pracy',''.join(body),'worktime')
 
     def dev3_start(self,f):
@@ -275,7 +286,12 @@ class Dev3Mixin:
         with a.db() as con:
             rows=con.execute('SELECT * FROM dev3_portal_items ORDER BY id DESC LIMIT 150').fetchall()
             cases=con.execute('SELECT id,signature,title FROM cases ORDER BY title LIMIT 1000').fetchall()
-        s=['<div class="topbar"><div><h1>Portal Informacyjny — import do weryfikacji</h1><p class="sub">Obsługa ręcznie wyeksportowanych danych; automatyczne API wymaga autoryzacji i oficjalnej specyfikacji.</p></div><a class="btn" href="https://portal.wroclaw.sa.gov.pl" target="_blank" rel="noopener noreferrer">Otwórz Portal</a></div>']
+        portal_url=os.environ.get('RK_COURT_PORTAL_URL','https://portal.wroclaw.sa.gov.pl/#/login').strip()
+        from urllib.parse import urlsplit
+        parsed=urlsplit(portal_url)
+        if parsed.scheme!='https' or not re.fullmatch(r'portal\.[a-z0-9-]+\.sa\.gov\.pl',parsed.hostname or '') or parsed.username or parsed.password:
+            portal_url='https://portal.wroclaw.sa.gov.pl/#/login'
+        s=['<div class="topbar"><div><h1>Portal Informacyjny — import do weryfikacji</h1><p class="sub">Obsługa ręcznie wyeksportowanych danych; automatyczne API wymaga autoryzacji i oficjalnej specyfikacji.</p></div><a class="btn" href="%s" target="_blank" rel="noopener noreferrer">Otwórz Portal</a></div>'%esc(portal_url)]
         s.append('<div class="card"><h2>Import listy CSV (UTF-8)</h2><p>Kolumny: <code>identyfikator;sygnatura;data;tytul;opis</code>. Import nie odbiera doręczeń ani nie tworzy terminów procesowych.</p><form method="post" action="/court-portal/import" enctype="multipart/form-data"><input type="file" name="file" accept=".csv" required><button class="btn primary">Zaimportuj do kontroli</button></form></div>')
         s.append('<div class="card"><h2>Informacje oczekujące na ocenę</h2>')
         for r in rows:
@@ -313,7 +329,7 @@ class Dev3Mixin:
         with a.db() as con:
             cases=con.execute('SELECT id,signature,title FROM cases ORDER BY title LIMIT 1000').fetchall()
             pending=con.execute("SELECT * FROM dev3_calendar_pending WHERE status='pending' ORDER BY id DESC LIMIT 80").fetchall()
-            terms=con.execute('''SELECT a.id,a.title,a.appointment_date,c.title case_title FROM case_appointments a JOIN cases c ON c.id=a.case_id ORDER BY a.appointment_date DESC LIMIT 120''').fetchall()
+            terms=con.execute('''SELECT a.id,a.title,a.appointment_date,c.title case_title FROM case_appointments a JOIN cases c ON c.id=a.case_id ORDER BY CASE WHEN a.appointment_date >= date('now','localtime') THEN 0 ELSE 1 END, CASE WHEN a.appointment_date >= date('now','localtime') THEN a.appointment_date END ASC, a.appointment_date DESC, a.appointment_time ASC LIMIT 120''').fetchall()
         s=['<div class="topbar"><div><h1>Kalendarze Google i Outlook</h1><p class="sub">Wymiana danych po świadomym uruchomieniu; wydarzenia przychodzące wymagają przypisania do sprawy.</p></div></div>']
         for provider,envname in [('google','RK_GOOGLE_REFRESH_TOKEN'),('outlook','RK_MS_REFRESH_TOKEN')]:
             ready=bool(os.environ.get(envname) and os.environ.get('RK_GOOGLE_CLIENT_ID' if provider=='google' else 'RK_MS_CLIENT_ID'))
@@ -325,6 +341,15 @@ class Dev3Mixin:
         for r in pending:
             s.append('<div class="dev3-item"><b>%s</b> · %s (%s)<form method="post" action="/calendar-sync/accept"><input type="hidden" name="pending_id" value="%d"><label>Przypisz do sprawy</label>%s<button class="btn small">Zatwierdź i utwórz termin</button></form><form method="post" action="/calendar-sync/dismiss"><input type="hidden" name="pending_id" value="%d"><button class="btn small danger">Odrzuć propozycję</button></form></div>'%(esc(r['title']),esc(r['start_at']),esc(r['provider']),r['id'],cases_select(cases),r['id']))
         s.append('</div><p class="small">Integracja wymaga własnej konfiguracji OAuth. Brak połączenia nie wstrzymuje lokalnego kalendarza. Nie są automatycznie wyliczane terminy procesowe ani odbierane doręczenia.</p>')
+        with a.db() as con:
+            changes=con.execute("SELECT * FROM dev5_calendar_changes WHERE status='pending' ORDER BY id DESC LIMIT 100").fetchall()
+        s.append('<div class="card"><h2>Zmiany z kalendarzy wymagające decyzji</h2>')
+        for ch in changes:
+            s.append('<div class="dev3-item"><b>%s</b> · %s · %s — %s%s<form method="post" action="/calendar-sync/review"><input type="hidden" name="change_id" value="%s"><button name="decision" value="accept" class="btn small">Zatwierdź zmianę w RK</button><button name="decision" value="dismiss" class="btn small">Odrzuć zmianę</button></form></div>' % (
+                esc(ch['provider']),esc(ch['title']),esc(ch['start_at']),esc(ch['end_at']),
+                ' · ANULOWANO ZEWNĘTRZNIE' if ch['cancelled'] else ' · BRAK W ZAKRESIE — sprawdź ręcznie' if ch['missing'] else '',int(ch['id'])))
+        if not changes:s.append('<p>Brak zewnętrznych zmian wymagających kontroli.</p>')
+        s.append('</div>')
         self._dev3_html('Integracje kalendarza',''.join(s),'calendar-sync')
 
     def dev3_calendar_pull(self,f):
@@ -356,4 +381,17 @@ class Dev3Mixin:
         if not self._dev3_admin():return
         a=self._dev3_app();u=self._dev3_me()
         with a.db() as con:accept_proposal(con,int(f.get('pending_id') or 0),int(f.get('case_id') or 0),u['id'])
+        self.redirect('/calendar-sync')
+
+    def dev3_calendar_review(self,f):
+        if not self._dev3_admin():return
+        from rk_dev5_calendar_reconcile import accept_change
+        a=self._dev3_app();user=self._dev3_me()
+        try:change_id=int(f.get('change_id') or 0)
+        except (TypeError,ValueError):raise ValueError('Niepoprawny numer propozycji')
+        decision=f.get('decision','')
+        if decision not in ('accept','dismiss'):raise ValueError('Wybierz decyzję')
+        with a.db() as con:
+            appointment_id=accept_change(con,change_id,user['id'],decision=='accept')
+            audit_if_available(con,None,user['id'],'Kontrola kalendarza',f'Wydarzenie {appointment_id}: {decision}')
         self.redirect('/calendar-sync')

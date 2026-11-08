@@ -17,6 +17,7 @@ from rk_dev3_calendar import publish_appointment,pull_proposals,CalendarSyncErro
 from rk_dev4_core import ensure_dev4_schema,void_time,update_time,vault_rotate,vault_delete,vault_file_path
 from ZASTOSUJ_040_DEV4 import apply
 from rk_dev4 import Dev4Mixin
+from rk_dev5_vault import ensure_dev5_vault_schema
 from TEST_RK_DEV3_POLISH import Handler as MockDev3Handler
 
 TZ=ZoneInfo('Europe/Warsaw')
@@ -99,7 +100,7 @@ class Dev4CoreTests(unittest.TestCase):
 
 
 class Dev4UiTests(unittest.TestCase):
-    def setUp(self):self.con=fixture_db();ensure_dev4_schema(self.con)
+    def setUp(self):self.con=fixture_db();ensure_dev4_schema(self.con);ensure_dev5_vault_schema(self.con)
     def tearDown(self):self.con.close()
 
     def handler(self,user_id=1,role='admin',folder=None):

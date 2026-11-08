@@ -61,8 +61,10 @@ from rk_routes import dispatch_static_get, dispatch_static_post
 from rk_inbox import InboxMixin, ensure_inbox_schema
 from rk_dev3 import Dev3Mixin
 from rk_dev4 import Dev4Mixin
+from rk_dev5_acl import Dev5AccessMixin, ensure_dev5_acl_schema
+from rk_dev5_vault import ensure_dev5_vault_schema, recover_vault_journal
 from rk_dev4_core import ensure_dev4_schema, action_log, vault_file_path
-from rk_dev3_core import ensure_dev3_schema
+from rk_dev3_core import ensure_dev3_schema, encrypt_vault, decrypt_vault, MAGIC as VAULT_MAGIC
 from rk_paths import resolve_runtime_paths, installed_data_dir
 from rk_core.schema import initialize_database
 from rk_core.schema_version import SCHEMA_VERSION as CURRENT_SCHEMA_VERSION
@@ -73,6 +75,7 @@ from rk_domains.inbox.worker import start_worker
 from rk_core.database import db_connection
 from rk_core.http import parse_multipart
 from rk_core.files import atomic_write_bytes
+from rk_dev5_snapshot import sha256_path, verify_snapshot_manifest
 from rk_core.diagnostics import write_exception, write_slow_request
 from rk_domains.documents.ocr import extract_document_text as _extract_document_text
 from rk_domains.cases.repository import load_external_signature_map
@@ -87,7 +90,9 @@ from rk_smart import (
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.4.0-dev4"
+VERSION = "0.4.0-dev5"
+RK_040_DEV5_STABILIZATION_20261108 = True
+RK_040_DEV5_FULL_REPAIR_20261108 = True
 RK_040_DEV4_REPAIR_20261108 = True
 RK_DEV3_LEGALTECH_NAV_20261107 = True
 RK_040_DEV2_AUDIT_PATCH_20261106_R1 = True
@@ -523,10 +528,12 @@ _REQUEST_CONTEXT = threading.local()
 _SESSION_CACHE: dict[str, tuple[float, dict]] = {}
 _SESSION_TOUCH: dict[str, float] = {}
 _SESSION_CACHE_LOCK = threading.Lock()
-SESSION_CACHE_SECONDS = 8.0
+SESSION_CACHE_SECONDS = 0.0  # Bezpiecznie: natychmiast sprawdzaj rolę i aktywność w SQLite
 SESSION_TOUCH_SECONDS = 180.0
 
 LOCAL_MODE = HOST in {"127.0.0.1", "localhost", "::1"}
+if not LOCAL_MODE and os.getenv('RK_HTTPS_PROXY','0').strip().lower() not in {'1','true','yes'}:
+    raise RuntimeError('Dostęp sieciowy do RK KANCELARIA wymaga HTTPS i RK_HTTPS_PROXY=1; uruchom lokalnie lub skonfiguruj TLS.')
 _auto_env = os.getenv("SPRAWNIK_AUTO_SHUTDOWN")
 if _auto_env is None:
     AUTO_SHUTDOWN = LOCAL_MODE
@@ -872,6 +879,9 @@ def init_db() -> None:
     with db() as con:
         ensure_dev3_schema(con)
         ensure_dev4_schema(con)
+        ensure_dev5_acl_schema(con)
+        ensure_dev5_vault_schema(con)
+    recover_vault_journal(db,FILES_DIR)
     start_worker(sys.modules[__name__])
 
 
@@ -1380,18 +1390,23 @@ def create_data_snapshot_zip() -> tuple[bytes,str]:
         out=io.BytesIO()
         with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
             z.write(tmp,'sprawnik.sqlite3')
+            file_hashes={'sprawnik.sqlite3':sha256_path(tmp)}
             meta={
                 'format':'RK-KANCELARIA-DATA-SNAPSHOT','version':1,'app_version':VERSION,
                 'schema_version':SCHEMA_VERSION,'created_at':datetime.now().isoformat(timespec='seconds')
             }
-            z.writestr('snapshot.json',json.dumps(meta,ensure_ascii=False,indent=2))
             for root,prefix in ((FILES_DIR,'dokumenty'),(DRAFTS_DIR,'projekty_pism')):
                 if root.exists():
                     for fp in root.rglob('*'):
                         if fp.is_file():
-                            try: z.write(fp,f"{prefix}/{fp.relative_to(root).as_posix()}")
+                            try:
+                                arc=f'{prefix}/{fp.relative_to(root).as_posix()}'
+                                z.write(fp,arc)
+                                file_hashes[arc]=sha256_path(fp)
                             except OSError as exc:
                                 raise RuntimeError(f"Nie można wykonać kompletnej kopii: {fp}") from exc
+            meta['file_sha256']=file_hashes
+            z.writestr('snapshot.json',json.dumps(meta,ensure_ascii=False,indent=2))
         return out.getvalue(),f'RK_KANCELARIA_snapshot_{stamp}.zip'
     finally:
         try: tmp.unlink(missing_ok=True)
@@ -1422,6 +1437,7 @@ def schedule_data_snapshot_restore(raw: bytes, source: str='snapshot', cloud_ver
         meta=json.loads(z.read('snapshot.json').decode('utf-8'))
         if meta.get('format')!='RK-KANCELARIA-DATA-SNAPSHOT':
             return False,'Nieprawidłowy format snapshotu RK KANCELARIA.'
+        verify_snapshot_manifest(z,meta,allow_legacy=True)
         try: source_schema=int(meta.get('schema_version') or 0)
         except Exception: source_schema=0
         if source_schema>SCHEMA_VERSION:
@@ -1944,7 +1960,8 @@ def ensure_daily_backup() -> tuple[str,str]:
                 try:
                     enc=encrypted_blob(tmp.read_bytes(),secret); p=DAILY_BACKUPS_DIR/f'rk_kancelaria_{today}_{stamp}.sqlite3.rkenc'; p.write_bytes(enc); tmp.unlink(missing_ok=True)
                 except Exception:
-                    p=DAILY_BACKUPS_DIR/f'rk_kancelaria_{today}_{stamp}.sqlite3'; os.replace(tmp,p)
+                    tmp.unlink(missing_ok=True)
+                    raise RuntimeError('Nie zapisano kopii: szyfrowanie zawiodło. Nie utworzono jawnej kopii SQLite.')
             else:
                 p=DAILY_BACKUPS_DIR/f'rk_kancelaria_{today}_{stamp}.sqlite3'; os.replace(tmp,p)
         all_files=sorted(list(DAILY_BACKUPS_DIR.glob('rk_kancelaria_*.sqlite3'))+list(DAILY_BACKUPS_DIR.glob('rk_kancelaria_*.sqlite3.rkenc')),key=lambda x:x.stat().st_mtime,reverse=True)
@@ -2251,7 +2268,7 @@ def open_containing_folder(path: Path) -> tuple[bool,str]:
     except Exception as exc: return False,str(exc)
 
 
-class Handler(Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
+class Handler(Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
     server_version = f"{APP_NAME}/{VERSION}"
 
     def handle_one_request(self):
@@ -2529,6 +2546,7 @@ class Handler(Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspaceP
         if not self.require_auth():
             return
         try:
+            if self.dev5_access_get(path, qs): return
             if self.dev4_get(path, qs): return
             if self.dev3_get(path, qs): return
             if dispatch_static_get(self, path, qs): return
@@ -2671,6 +2689,7 @@ class Handler(Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspaceP
 
 
 
+            if self.dev5_access_post(path, fields, files): return
             if self.dev4_post(path, fields, files): return
             if self.dev3_post(path, fields, files): return
             if dispatch_static_post(self, path, fields, files): return
@@ -2996,10 +3015,11 @@ class Handler(Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspaceP
                     return self.user_edit_page(uid,'Nie można usunąć ostatniego aktywnego administratora.')
             # Dane merytoryczne nie mają klucza obcego do konta. Autorzy są zapisani
             # tekstowo przy rekordach, więc usunięcie konta nie usuwa ani nie zmienia historii.
-            # Vault files remain accessible after deleting their original owner.
-            moved=con.execute("UPDATE dev3_vault_files SET owner_id=? WHERE owner_id=?",(me['id'],uid)).rowcount
-            if moved:action_log(con,None,me['id'],'Przejęcie sejfu po usunięciu konta',
-                                f'Użytkownik {uid}; dokumenty {moved}')
+            # Deletion must not silently transfer encrypted files whose passwords
+            # the administrator may not know. Require explicit vault handover first.
+            held=con.execute('SELECT COUNT(*) FROM dev3_vault_files WHERE owner_id=?',(uid,)).fetchone()[0]
+            if held:
+                return self.user_edit_page(uid,'Konto ma %s plików sejfu. Przed usunięciem przekaż pliki i hasła właścicielowi lub dezaktywuj konto; automatyczne przejęcie nie odszyfrowuje dokumentów.'%held)
             con.execute("DELETE FROM users WHERE id=?",(uid,))
         return self.users_page(f"Konto „{u['username']}” zostało usunięte. Wszystkie dane i historyczne informacje o autorach zostały zachowane.")
 
@@ -4813,7 +4833,7 @@ class Handler(Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspaceP
         body=f"""
         <div class='case-hero'><div class='case-hero-main'><div class='eyebrow'>KARTA SPRAWY</div><h1>{esc(primary)}</h1><div class='case-subject'>{esc(c['subject']) or esc(c['title'])}</div><div class='case-hero-meta'>{esc(internal_signature_text(c['internal_signature']))} · {esc(c['title'])} · klient: <b>{esc(c['client']) or '—'}</b></div></div><div class='case-control-bar'>
           <form method='post' action='/case/{cid}/pin'><button class='pin-btn {pin_cls}' title='Przypnij / odepnij'>{pin_char}</button></form>{badge(c['status'])}
-          <a class='btn' href='/case/{cid}/export'>PDF / wyciąg</a><a class='btn' href='/case/{cid}/export/package'>Eksport pełnej sprawy</a><a class='btn primary-soft' href='/case/{cid}/history'>Historia sprawy</a>{'' if readonly else f"<a class='btn' href='/draft/new?case_id={cid}'>+ Projekt pisma</a><a class='btn' href='/case/{cid}/edit'>Edytuj dane</a>"}
+          <a class='btn' href='/case/{cid}/export'>PDF / wyciąg</a><a class='btn' href='/case/{cid}/export/package'>Eksport pełnej sprawy</a><a class='btn primary-soft' href='/case/{cid}/history'>Historia sprawy</a><a class='btn' href='/case/{cid}/access'>Uprawnienia</a>{'' if readonly else f"<a class='btn' href='/draft/new?case_id={cid}'>+ Projekt pisma</a><a class='btn' href='/case/{cid}/edit'>Edytuj dane</a>"}
           <form method='post' action='/case/{cid}/duplicate' onsubmit="return confirm('Utworzyć nową sprawę na podstawie tej? Sygnatury, dokumenty i historia nie będą kopiowane.');"><button class='btn'>Duplikuj sprawę</button></form>
         </div></div><div class='case-nav-strip'><a href='#case-overview'>Pulpit sprawy</a><a href='/case/{cid}/history#process'>Historia procesu</a><a href='#documents'>Dokumenty</a><a href='#case-tasks'>Zadania</a><a href='#case-people'>Osoby</a><a href='#case-notes'>Notatki</a><a href='/case/{cid}/history#activity'>Historia sprawy</a></div><div id='rkCaseContext' data-case-id='{cid}'></div>{readonly_banner}
         <div class='case-summary-grid'>
@@ -5961,7 +5981,7 @@ class Handler(Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspaceP
         state=(f"<span class='backup-ok'>✓ quick_check: {esc(quick_reason)}</span>" if quick_ok else f"<span class='conflict-warning'>⚠ quick_check: {esc(quick_reason)}</span>")
         body=f"""<div class='topbar'><div><h1>Recovery i integralność</h1><div class='sub'>Kontrola bazy, ręczne kopie i pełny przenośny snapshot danych.</div></div><a class='btn' href='/backups'>← Kopie bezpieczeństwa</a></div>{msg}
         <div class='grid'><div class='card span6'><h2>Stan bazy</h2><p>{state}</p><p>{last_html}</p><form method='post' action='/recovery/check'><button class='btn primary'>Uruchom pełny integrity_check</button></form><p class='small muted'>Pełny test jest dokładniejszy niż codzienny quick_check i może potrwać dłużej przy dużej bazie.</p></div>
-        <div class='card span6'><h2>Kopia ratunkowa</h2><p><b>Znalezione kopie:</b> {backups}</p><form method='post' action='/backup/manual' style='margin-bottom:8px'><button class='btn'>Wykonaj backup teraz</button></form><form method='post' action='/recovery/test-restore' style='display:inline'><button class='btn'>Przetestuj odtworzenie</button></form> <a class='btn primary' href='/backup/snapshot'>Pobierz pełny snapshot</a><p class='small muted'>Test tworzy pełny snapshot, odtwarza jego bazę w katalogu tymczasowym i sprawdza obecność wszystkich plików dokumentów. Nie zmienia bieżących danych.</p><hr><form method='post' enctype='multipart/form-data' action='/recovery/snapshot-import' onsubmit="return confirm('Przygotować przywrócenie pełnego snapshotu? Bieżący stan zostanie zabezpieczony, a przełączenie nastąpi po restarcie.');"><label>Przywróć pełny snapshot</label><input type='file' name='snapshot' accept='.zip' required><button class='btn'>Zweryfikuj i przygotuj restore</button></form></div></div>
+        <div class='card span6'><h2>Kopia ratunkowa</h2><p><b>Znalezione kopie:</b> {backups}</p><form method='post' action='/backup/manual' style='margin-bottom:8px'><button class='btn'>Wykonaj backup teraz</button></form><form method='post' action='/recovery/test-restore' style='display:inline'><button class='btn'>Przetestuj odtworzenie</button></form> <a class='btn primary' href='/backup/snapshot'>Pobierz pełny snapshot</a><p class='small muted'>Test tworzy pełny snapshot, odtwarza jego bazę w katalogu tymczasowym i sprawdza obecność wszystkich plików dokumentów. Nie zmienia bieżących danych.</p><hr><form method='post' enctype='multipart/form-data' action='/recovery/snapshot-import' onsubmit="return confirm('Przygotować przywrócenie pełnego snapshotu? Bieżący stan zostanie zabezpieczony, a przełączenie nastąpi po restarcie.');"><label>Przywróć pełny snapshot</label><input type='file' name='snapshot' accept='.zip,.rkenc' required><label>Hasło (tylko dla pliku .rkenc)</label><input type='password' name='passphrase' autocomplete='off'><button class='btn'>Zweryfikuj i przygotuj restore</button></form></div></div>
         <br><div class='card'><h2>Tryb ratunkowy</h2><p>Przy starcie RK KANCELARIA sprawdza bazę i zachowuje kopie przed operacjami przywracania/importu. Uszkodzonego pliku nie nadpisujemy „w ciemno”. Przywrócenie backupu jest planowane i wykonywane dopiero po restarcie programu.</p><p><b>Katalog Recovery:</b><br><code>{esc(str(RECOVERY_DIR))}</code></p></div>"""
         self.send_html(layout('Recovery',body,'recovery'))
 
@@ -5980,6 +6000,8 @@ class Handler(Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspaceP
             raw,name=create_data_snapshot_zip()
             with zipfile.ZipFile(io.BytesIO(raw),'r') as z, tempfile.TemporaryDirectory(prefix='rk_restore_test_') as td:
                 names=set(z.namelist())
+                manifest=json.loads(z.read('snapshot.json').decode('utf-8'))
+                checked=verify_snapshot_manifest(z,manifest,allow_legacy=True)
                 db_copy=Path(td)/'sprawnik.sqlite3'
                 atomic_write_bytes(db_copy,z.read('sprawnik.sqlite3'))
                 ok,details=full_sqlite_integrity(db_copy)
@@ -5997,7 +6019,7 @@ class Handler(Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspaceP
                 finally:
                     test_con.close()
                 if missing: raise RuntimeError(f'brakuje {len(missing)} plików dokumentów; pierwszy: {missing[0]}')
-                details=' · '.join(f'{k}: {v}' for k,v in counts.items())+f' · pliki dokumentów: komplet · {name}'
+                details=' · '.join(f'{k}: {v}' for k,v in counts.items())+f' · pliki dokumentów: komplet · SHA-256: {checked} plików · {name}'
                 result='OK'
         except Exception as exc:
             result='BŁĄD'; details=str(exc)
@@ -6016,18 +6038,44 @@ class Handler(Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspaceP
 
     def full_snapshot_download(self):
         if not self.require_admin(): return
-        data,name=create_data_snapshot_zip()
-        try:
-            with db() as con: immutable_audit(con,None,'snapshot',None,'Pobrano pełny snapshot danych',f'{name} · {len(data)} B',self.current_author())
-        except Exception: pass
-        self.send_response(200); self.send_header('Content-Type','application/zip'); self.send_header('Content-Disposition',f"attachment; filename*=UTF-8''{quote(name)}"); self.send_header('Content-Length',str(len(data))); self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(data)
+        body='''<div class="topbar"><h1>Zaszyfruj pełny snapshot</h1><a class="btn" href="/backups">Wróć</a></div>
+        <div class="card"><p>Pełna kopia zawiera bazę kancelarii i wszystkie załączniki.
+        Wybierz silne hasło (minimum 12 znaków); nie jest ono zapisywane przez aplikację.
+        Bez hasła odzyskanie danych z kopii będzie niemożliwe.</p>
+        <form method="post" action="/backup/snapshot/download">
+        <label>Hasło kopii</label><input type="password" name="passphrase" minlength="12" autocomplete="new-password" required>
+        <label>Powtórz hasło</label><input type="password" name="passphrase_confirm" minlength="12" autocomplete="new-password" required>
+        <button class="btn primary">Pobierz zaszyfrowany snapshot</button></form></div>'''
+        self.send_html(layout('Pełny snapshot',body,'backups'))
+
+    def full_snapshot_download_encrypted(self,f):
+        if not self.require_admin(): return
+        password=f.get('passphrase','') or ''
+        if len(password)<12 or password!=f.get('passphrase_confirm',''):
+            return self.send_html(layout('Błąd hasła','<div class="card">Hasło musi mieć co najmniej 12 znaków, a oba pola muszą być identyczne.</div>','backups'),400)
+        raw,name=create_data_snapshot_zip()
+        data=encrypt_vault(raw,password)
+        secure_name=name+'.rkenc'
+        with db() as con:
+            immutable_audit(con,None,'snapshot',None,'Pobrano zaszyfrowany snapshot',secure_name,self.current_author())
+        self.send_response(200)
+        self.send_header('Content-Type','application/octet-stream')
+        self.send_header('Content-Disposition',f"attachment; filename*=UTF-8''{quote(secure_name)}")
+        self.send_header('Content-Length',str(len(data)))
+        self.send_header('Cache-Control','no-store')
+        self.send_header('X-Content-Type-Options','nosniff')
+        self.end_headers();self.wfile.write(data)
 
     def full_snapshot_import(self,f,files):
         if not self.require_admin(): return
         uploaded=files.get('snapshot')
-        if not uploaded or not uploaded[1]: return self.recovery_page('Wybierz plik snapshot ZIP.')
+        if not uploaded or not uploaded[1]: return self.recovery_page('Wybierz plik snapshot ZIP lub RKENC.')
+        raw=uploaded[1]
+        if raw.startswith(VAULT_MAGIC):
+            try:raw=decrypt_vault(raw,f.get('passphrase',''))
+            except ValueError as exc:return self.recovery_page('Błąd hasła kopii lub uszkodzona kopia: '+str(exc))
         create_shutdown_backup(retention=30)
-        ok,msg=schedule_data_snapshot_restore(uploaded[1],uploaded[0] or 'snapshot',0)
+        ok,msg=schedule_data_snapshot_restore(raw,uploaded[0] or 'snapshot',0)
         if ok:
             try:
                 with db() as con: immutable_audit(con,None,'snapshot',None,'Zaplanowano przywrócenie pełnego snapshotu',uploaded[0] or 'snapshot',self.current_author(f))

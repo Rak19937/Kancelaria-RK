@@ -56,6 +56,7 @@ POST_ROUTES = {
     '/security/ocr/install': ('ocr_install_start', 'f'),
     '/security/key': ('security_key_update', 'f'),
     '/backup/encrypted': ('encrypted_backup', 'f'),
+    '/backup/snapshot/download': ('full_snapshot_download_encrypted', 'f'),
     '/backup/manual': ('manual_backup_now', 'f'),
     '/recovery/check': ('recovery_check', 'f'),
     '/recovery/test-restore': ('recovery_test_restore', 'f'),

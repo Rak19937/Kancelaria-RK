@@ -94,7 +94,15 @@ def ensure_dev3_schema(con: sqlite3.Connection) -> None:
        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','accepted','dismissed')),
        UNIQUE(provider,external_id)
     );
+    CREATE TABLE IF NOT EXISTS dev5_calendar_publish_intents (
+         provider TEXT NOT NULL CHECK(provider IN ('google','outlook')),
+         appointment_id INTEGER NOT NULL REFERENCES case_appointments(id) ON DELETE CASCADE,
+         request_id TEXT NOT NULL,
+         PRIMARY KEY(provider,appointment_id), UNIQUE(provider,request_id)
+     );
     ''')
+    from rk_dev5_calendar_reconcile import ensure_dev5_calendar_schema
+    ensure_dev5_calendar_schema(con)
 
 
 def set_stage(con, case_id: int, stage: str, actor: int, note: str = '') -> None:
@@ -258,7 +266,10 @@ def import_portal_csv(con,raw:bytes,actor:int,max_rows:int=500) -> tuple[int,int
     try:data=raw.decode('utf-8-sig')
     except UnicodeDecodeError:raise ValueError('Wymagany CSV w UTF-8')
     sample=data[:4096]
-    dialect=csv.Sniffer().sniff(sample,delimiters=';,\t') if sample else csv.excel
+    try:
+        dialect=csv.Sniffer().sniff(sample,delimiters=';,\t') if sample else csv.excel
+    except csv.Error as exc:
+        raise ValueError('Nie można odczytać formatu CSV. Sprawdź nagłówki i separator.') from exc
     rows=csv.DictReader(io.StringIO(data),dialect=dialect)
     expected={'sygnatura','data','tytul','identyfikator'}
     if not rows.fieldnames or not expected.issubset(set(rows.fieldnames)):
@@ -269,8 +280,15 @@ def import_portal_csv(con,raw:bytes,actor:int,max_rows:int=500) -> tuple[int,int
         ref=(row.get('identyfikator') or '').strip()
         if not ref:continue
         if len(ref)>200:raise ValueError('Zbyt długi identyfikator')
+        date_value=(row.get('data') or '').strip()
+        if date_value:
+            try:
+                if not re.fullmatch(r'\d{4}-\d{2}-\d{2}',date_value):raise ValueError('format')
+                date.fromisoformat(date_value)
+            except ValueError as exc:
+                raise ValueError(f'Wiersz {i+2}: data musi mieć format RRRR-MM-DD') from exc
         value=(ref,(row.get('sygnatura') or '')[:150],(row.get('tytul') or '')[:250],
-               (row.get('data') or '')[:20],(row.get('opis') or '')[:4000],actor)
+               date_value,(row.get('opis') or '')[:4000],actor)
         existing=con.execute('SELECT id,reviewed FROM dev3_portal_items WHERE external_ref=?',(ref,)).fetchone()
         if existing:
             duplicate+=1
