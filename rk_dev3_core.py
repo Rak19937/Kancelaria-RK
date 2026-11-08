@@ -10,7 +10,9 @@ import re
 import secrets
 import sqlite3
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone, timedelta
+from zoneinfo import ZoneInfo
+from math import ceil
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
@@ -133,18 +135,45 @@ def start_timer(con, user_id: int, case_id: int, description: str='', now: datet
 
 
 def stop_timer(con,user_id: int, rate: int=0, billable: bool=True, now: datetime | None=None) -> int:
+    # Store every minute, splitting runs by local Polish calendar days.
     now=now or _utcnow()
+    if now.tzinfo is None:raise ValueError('Wymagana data ze strefą czasową')
     row=con.execute('SELECT case_id,description,started_at FROM dev3_time_running WHERE user_id=?',(user_id,)).fetchone()
-    if not row: raise ValueError('Stoper nie jest uruchomiony')
-    started=datetime.fromisoformat(row[2])
-    seconds=(now-started).total_seconds()
-    if seconds < 0: raise ValueError('Zegar systemowy przesunął się wstecz')
-    minutes=max(1,int((seconds+59)//60))
-    if minutes>1440:raise ValueError('Stoper działa ponad dobę. Dodaj czas ręcznie w częściach.')
+    if not row:raise ValueError('Stoper nie jest uruchomiony')
+    started=datetime.fromisoformat(row[2]); elapsed=(now-started).total_seconds()
+    if elapsed<0:raise ValueError('Zegar systemowy przesunął się wstecz')
+    # Prevent an accidentally running timer for months from silently creating fake billable work.
+    if elapsed>31*86400:raise ValueError('Pomiar przekracza 31 dni. Zweryfikuj go i anuluj lub rozlicz ręcznie.')
+    if not 0<=rate<=100000000:raise ValueError('Nieprawidłowa stawka')
+    tz=ZoneInfo('Europe/Warsaw')
+    cursor=started.astimezone(timezone.utc)
+    stop_at=now.astimezone(timezone.utc)
+    segments=[]
+    while cursor<stop_at:
+        local_day=cursor.astimezone(tz).date()
+        midnight=datetime.combine(local_day+timedelta(days=1),time.min,tzinfo=tz).astimezone(timezone.utc)
+        boundary=min(midnight,stop_at)
+        if boundary<=cursor:raise ValueError('Nie można ustalić lokalnej daty pomiaru')
+        segments.append((local_day.isoformat(),(boundary-cursor).total_seconds()))
+        cursor=boundary
+    if not segments:segments=[(now.astimezone(tz).date().isoformat(),0)]
+    remaining=max(1,ceil(elapsed/60))
+    rows=[]
+    for i,(day,seconds) in enumerate(segments):
+        minutes=remaining if i==len(segments)-1 else min(remaining,int(seconds//60))
+        remaining-=minutes
+        while minutes>0:
+            piece=min(1440,minutes)
+            rows.append((day,piece))
+            minutes-=piece
+    if remaining:raise ValueError('Niepoprawny podział czasu')
+    first_id=None
+    for day,minutes in rows:
+        cur=con.execute('''INSERT INTO dev3_time_entries(case_id,user_id,activity_date,minutes,description,billable,rate_grosze,source)
+            VALUES(?,?,?,?,?,?,?,'timer')''',(row[0],user_id,day,minutes,row[1],int(bool(billable)),rate))
+        if first_id is None:first_id=cur.lastrowid
     con.execute('DELETE FROM dev3_time_running WHERE user_id=?',(user_id,))
-    cur=con.execute('''INSERT INTO dev3_time_entries(case_id,user_id,activity_date,minutes,description,billable,rate_grosze,source)
-        VALUES(?,?,?,?,?,?,?,'timer')''',(row[0],user_id,now.date().isoformat(),minutes,row[1],int(bool(billable)),rate))
-    return cur.lastrowid
+    return first_id
 
 
 def add_manual_time(con, case_id: int,user_id: int, day: str, minutes: int, description: str,rate: int,billable: bool) -> int:
@@ -163,6 +192,8 @@ def time_csv(con, user_id: int | None=None) -> bytes:
          JOIN cases c ON c.id=t.case_id LEFT JOIN users u ON u.id=t.user_id'''
     args=[]
     if user_id is not None:sql+=' WHERE t.user_id=?';args=[user_id]
+    if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dev4_time_voids'").fetchone():
+        sql+= (' AND ' if args else ' WHERE ')+'NOT EXISTS(SELECT 1 FROM dev4_time_voids v WHERE v.entry_id=t.id)'
     sql+=' ORDER BY t.activity_date,t.id'
     def safe_cell(value):
         value=str('' if value is None else value)
@@ -238,8 +269,17 @@ def import_portal_csv(con,raw:bytes,actor:int,max_rows:int=500) -> tuple[int,int
         ref=(row.get('identyfikator') or '').strip()
         if not ref:continue
         if len(ref)>200:raise ValueError('Zbyt długi identyfikator')
-        r=con.execute('''INSERT OR IGNORE INTO dev3_portal_items(external_ref,signature,document_title,event_date,details,imported_by)
-         VALUES(?,?,?,?,?,?)''',(ref,(row.get('sygnatura') or '')[:150],(row.get('tytul') or '')[:250],(row.get('data') or '')[:20],(row.get('opis') or '')[:4000],actor))
-        if r.rowcount:added+=1
-        else:duplicate+=1
+        value=(ref,(row.get('sygnatura') or '')[:150],(row.get('tytul') or '')[:250],
+               (row.get('data') or '')[:20],(row.get('opis') or '')[:4000],actor)
+        existing=con.execute('SELECT id,reviewed FROM dev3_portal_items WHERE external_ref=?',(ref,)).fetchone()
+        if existing:
+            duplicate+=1
+            # Never silently overwrite a record already confirmed by a lawyer.
+            if not existing['reviewed'] if hasattr(existing,'keys') else not existing[1]:
+                con.execute('''UPDATE dev3_portal_items SET signature=?,document_title=?,event_date=?,details=?
+                    WHERE id=? AND reviewed=0''',(*value[1:5],existing['id'] if hasattr(existing,'keys') else existing[0]))
+        else:
+            con.execute('''INSERT INTO dev3_portal_items(external_ref,signature,document_title,event_date,details,imported_by)
+                VALUES(?,?,?,?,?,?)''',value)
+            added+=1
     return added,duplicate

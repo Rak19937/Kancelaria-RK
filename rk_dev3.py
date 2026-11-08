@@ -12,6 +12,7 @@ from rk_dev3_core import (STAGES,set_stage,rate_grosze,start_timer,stop_timer,ad
                           time_csv,vault_can_view,vault_store,decrypt_vault,import_portal_csv)
 from rk_dev3_calendar import (SUPPORTED,CalendarSyncError,access_token,pull_proposals,
                               publish_appointment,accept_proposal)
+from rk_dev4_core import audit_if_available
 
 
 def esc(value):
@@ -112,6 +113,7 @@ class Dev3Mixin:
             if a.case_read_only(con,case_id):
                 raise ValueError('Sprawa jest zablokowana. Administrator musi ją najpierw odblokować.')
             set_stage(con,case_id,f.get('stage',''),u['id'],f.get('note',''))
+            audit_if_available(con,case_id,u['id'],'Zmiana etapu postępowania',f.get('stage',''))
         self.redirect('/case/%d/stage'%case_id)
 
     def dev3_worktime_page(self):
@@ -120,6 +122,8 @@ class Dev3Mixin:
             cases=con.execute('SELECT id,signature,title FROM cases ORDER BY status="closed",title LIMIT 1000').fetchall()
             running=con.execute('''SELECT t.*,c.title case_title FROM dev3_time_running t JOIN cases c ON c.id=t.case_id WHERE user_id=?''',(u['id'],)).fetchone()
             filter_sql='' if u['role']=='admin' else 'WHERE t.user_id=?'
+            if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dev4_time_voids'").fetchone():
+                filter_sql+=(' AND ' if filter_sql else 'WHERE ')+"NOT EXISTS(SELECT 1 FROM dev4_time_voids v WHERE v.entry_id=t.id)"
             entries=con.execute('''SELECT t.*,c.title case_title,c.signature,u.author_name
                 FROM dev3_time_entries t JOIN cases c ON c.id=t.case_id LEFT JOIN users u ON u.id=t.user_id
                 '''+filter_sql+' ORDER BY t.activity_date DESC,t.id DESC LIMIT 120',() if u['role']=='admin' else (u['id'],)).fetchall()
@@ -132,19 +136,23 @@ class Dev3Mixin:
         body.append('<div class="card"><h2>Ostatnie wpisy</h2><table><thead><tr><th>Data</th><th>Sprawa</th><th>Pracownik</th><th>Minuty</th><th>Kwota</th><th></th></tr></thead><tbody>')
         for x in entries:
             total=(x['minutes']*x['rate_grosze']//60/100) if x['billable'] else 0
-            delete='<form method="post" action="/worktime/%d/delete" onsubmit="return confirm(\'Usunąć wpis?\')"><button class="btn small danger">Usuń</button></form>'%x['id'] if (u['role']=='admin' or x['user_id']==u['id']) else ''
+            delete=('<a class="btn small" href="/worktime/%d/edit">Popraw</a> <form method="post" style="display:inline" action="/worktime/%d/delete" onsubmit="return confirm(\'Anulować wpis i zachować historię?\')"><button class="btn small danger">Anuluj wpis</button></form>'%(x['id'],x['id'])) if (u['role']=='admin' or x['user_id']==u['id']) else ''
             body.append('<tr><td>%s</td><td>%s<br><span class="small">%s</span></td><td>%s</td><td>%s</td><td>%.2f PLN</td><td>%s</td></tr>'%(esc(x['activity_date']),esc(x['case_title']),esc(x['description']),esc(x['author_name']),x['minutes'],total,delete))
         body.append('</tbody></table></div>')
         self._dev3_html('Czas pracy',''.join(body),'worktime')
 
     def dev3_start(self,f):
         a=self._dev3_app();u=self._dev3_me()
-        with a.db() as con:start_timer(con,u['id'],int(f.get('case_id') or 0),f.get('description',''))
+        with a.db() as con:
+            start_timer(con,u['id'],int(f.get('case_id') or 0),f.get('description',''))
+            audit_if_available(con,int(f.get('case_id') or 0),u['id'],'Uruchomienie stopera')
         self.redirect('/worktime')
 
     def dev3_stop(self,f):
         a=self._dev3_app();u=self._dev3_me()
-        with a.db() as con:stop_timer(con,u['id'],rate_grosze(f.get('rate') or '0'),bool(f.get('billable')))
+        with a.db() as con:
+            stop_timer(con,u['id'],rate_grosze(f.get('rate') or '0'),bool(f.get('billable')))
+            audit_if_available(con,None,u['id'],'Zatrzymanie stopera i zapis czasu')
         self.redirect('/worktime')
 
     def dev3_cancel(self):
@@ -152,11 +160,14 @@ class Dev3Mixin:
         with a.db() as con:
             changed=con.execute('DELETE FROM dev3_time_running WHERE user_id=?',(u['id'],)).rowcount
             if not changed:raise ValueError('Nie ma aktywnego stopera do anulowania')
+            audit_if_available(con,None,u['id'],'Anulowanie stopera bez zapisu')
         self.redirect('/worktime')
 
     def dev3_time_add(self,f):
         a=self._dev3_app();u=self._dev3_me()
-        with a.db() as con:add_manual_time(con,int(f.get('case_id') or 0),u['id'],f.get('day',''),int(f.get('minutes') or 0),f.get('description',''),rate_grosze(f.get('rate') or '0'),bool(f.get('billable')))
+        with a.db() as con:
+            add_manual_time(con,int(f.get('case_id') or 0),u['id'],f.get('day',''),int(f.get('minutes') or 0),f.get('description',''),rate_grosze(f.get('rate') or '0'),bool(f.get('billable')))
+            audit_if_available(con,int(f.get('case_id') or 0),u['id'],'Ręczny wpis czasu pracy')
         self.redirect('/worktime')
 
     def dev3_time_delete(self,entry_id):
@@ -194,6 +205,10 @@ class Dev3Mixin:
                 grants+=''.join('<form method="post" action="/vault/%d/revoke" onsubmit="return confirm(\'Cofnąć dostęp do pliku?\')"><input type="hidden" name="user_id" value="%s"><button class="btn small">Cofnij dostęp: %s</button></form>'%(x['id'],g['user_id'],esc(g['author_name'])) for g in active_grants if g['file_id']==x['id'])
             else:grants='<span class="small">Udostępniony</span>'
             form='<form method="post" action="/vault/%d/download"><input type="password" name="passphrase" placeholder="Hasło pliku" required><button class="btn small">Odszyfruj i pobierz</button></form>'%x['id']
+            if u['role']=='admin' or x['owner_id']==u['id']:
+                form+=('<details><summary>Zmień hasło / Usuń dokument</summary>'
+                       '<form method="post" action="/vault/%d/rotate"><input type="password" name="old_passphrase" placeholder="Dotychczasowe hasło" required><input type="password" name="new_passphrase" placeholder="Nowe hasło (min. 12 znaków)" minlength="12" required><button class="btn small">Zmień hasło</button></form>'
+                       '<form method="post" action="/vault/%d/delete"><label>Aby usunąć, wpisz USUŃ</label><input name="confirmation" required><button class="btn small danger">Usuń plik</button></form></details>')%(x['id'],x['id'])
             s.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'%(esc(x['title']),esc(x['case_title']),grants,form))
         s.append('</tbody></table></div><p class="small">Uwaga: utrata hasła uniemożliwi odszyfrowanie pliku. Samo nadanie dostępu nie ujawnia hasła. Sejf chroni zawartość, ale tytuł dokumentu i powiązanie ze sprawą pozostają w bazie danych.</p>')
         self._dev3_html('Sejf dokumentów',''.join(s),'vault')
@@ -213,6 +228,7 @@ class Dev3Mixin:
             if u['role']!='admin' and row['owner_id']!=u['id']:return self._dev3_error('Brak uprawnień',403)
             if not con.execute('SELECT 1 FROM users WHERE id=? AND is_active=1',(target,)).fetchone():raise ValueError('Nieznany użytkownik')
             con.execute('INSERT OR IGNORE INTO dev3_vault_grants(file_id,user_id) VALUES(?,?)',(file_id,target))
+            audit_if_available(con,None,u['id'],'Dostęp do sejfu nadany',f'Plik {file_id}, użytkownik {target}')
         self.redirect('/vault')
 
     def dev3_vault_revoke(self,file_id,f):
@@ -226,6 +242,7 @@ class Dev3Mixin:
                 return self._dev3_error('Brak uprawnień',403)
             if target==row['owner_id']:raise ValueError('Nie można usunąć dostępu właściciela')
             con.execute('DELETE FROM dev3_vault_grants WHERE file_id=? AND user_id=?',(file_id,target))
+            audit_if_available(con,None,u['id'],'Dostęp do sejfu cofnięty',f'Plik {file_id}, użytkownik {target}')
         self.redirect('/vault')
 
     def dev3_vault_download(self,file_id,f):
@@ -287,6 +304,7 @@ class Dev3Mixin:
                 return self.send_error(404)
             if cid and not con.execute('SELECT 1 FROM cases WHERE id=?',(cid,)).fetchone():raise ValueError('Nieznana sprawa')
             con.execute('UPDATE dev3_portal_items SET reviewed=?,case_id=? WHERE id=?',(0 if undo else 1,cid or None,row_id))
+            audit_if_available(con,cid or None,self._dev3_me()['id'],'Weryfikacja importu sądowego',f'Wpis {row_id}; cofnięcie {undo}')
         self.redirect('/court-portal')
 
     def dev3_calendar_page(self):
@@ -300,7 +318,7 @@ class Dev3Mixin:
         for provider,envname in [('google','RK_GOOGLE_REFRESH_TOKEN'),('outlook','RK_MS_REFRESH_TOKEN')]:
             ready=bool(os.environ.get(envname) and os.environ.get('RK_GOOGLE_CLIENT_ID' if provider=='google' else 'RK_MS_CLIENT_ID'))
             s.append('<div class="card"><h2>%s — %s</h2><form method="post" action="/calendar-sync/pull"><input type="hidden" name="provider" value="%s"><button class="btn" %s>Pobierz wydarzenia do weryfikacji</button></form></div>'%(provider.title(),'konfiguracja dostępna' if ready else 'brak autoryzacji OAuth',provider,'' if ready else 'disabled'))
-        s.append('<div class="card"><h2>Opublikuj wybrany termin</h2><form method="post" action="/calendar-sync/publish"><label>Dostawca</label><select name="provider"><option value="google">Google</option><option value="outlook">Outlook</option></select><label>Termin</label><select name="appointment_id">')
+        s.append('<div class="card"><h2>Opublikuj wybrany termin</h2><form method="post" action="/calendar-sync/publish"><label>Dostawca</label><select name="provider"><option value="google">Google</option><option value="outlook">Outlook</option></select><label>Czas wydarzenia (minuty)</label><input type="number" name="duration" value="60" min="1" max="1440" required><label>Termin</label><select name="appointment_id">')
         s.extend('<option value="%d">%s · %s · %s</option>'%(t['id'],esc(t['appointment_date']),esc(t['case_title']),esc(t['title'])) for t in terms)
         s.append('</select><label><input type="checkbox" name="share_title" value="1"> Udostępnij pełny tytuł w zewnętrznym kalendarzu (potencjalne dane poufne)</label><button class="btn primary">Wyślij wybrany termin</button></form></div>')
         s.append('<div class="card"><h2>Oczekujące wydarzenia z kalendarzy</h2>')
@@ -320,7 +338,9 @@ class Dev3Mixin:
         if not self._dev3_admin():return
         provider=f.get('provider','')
         a=self._dev3_app();token=access_token(provider)
-        with a.db() as con:publish_appointment(con,provider,int(f.get('appointment_id') or 0),token,bool(f.get('share_title')))
+        try:duration=int(f.get('duration') or 60)
+        except (TypeError,ValueError):raise ValueError('Nieprawidłowy czas wydarzenia')
+        with a.db() as con:publish_appointment(con,provider,int(f.get('appointment_id') or 0),token,bool(f.get('share_title')),duration)
         self.redirect('/calendar-sync')
 
     def dev3_calendar_dismiss(self,f):

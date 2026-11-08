@@ -138,10 +138,12 @@ def pull_proposals(con,provider:str,token:str,days:int=90)->tuple[int,int]:
             if not str(marker).startswith('https://graph.microsoft.com/'):
                 raise CalendarSyncError('Odrzucono zewnętrzny adres paginacji')
             url=marker
+        if page == 4 and marker:
+            raise CalendarSyncError("Kalendarz zawiera więcej niż 5 stron wydarzeń. Import przerwany, aby nie ukrywać pominiętych terminów.")
     return added,updated
 
 
-def publish_appointment(con,provider:str,appointment_id:int,token:str,share_title:bool=False)->str:
+def publish_appointment(con,provider:str,appointment_id:int,token:str,share_title:bool=False,duration_minutes:int=60)->str:
     if provider not in SUPPORTED:raise CalendarSyncError('Nieznany kalendarz')
     row=con.execute('SELECT a.*,c.title case_title FROM case_appointments a JOIN cases c ON c.id=a.case_id WHERE a.id=?',(appointment_id,)).fetchone()
     if not row:raise CalendarSyncError('Nie znaleziono terminu kancelarii')
@@ -150,7 +152,8 @@ def publish_appointment(con,provider:str,appointment_id:int,token:str,share_titl
         start=datetime.fromisoformat(date_str+'T'+time_str)
         if start.tzinfo is not None:raise ValueError()
     except ValueError as exc:raise CalendarSyncError('Nieprawidłowy termin lokalny') from exc
-    end=start+timedelta(minutes=60)
+    if not 1<=duration_minutes<=1440:raise CalendarSyncError('Czas wydarzenia musi wynosić 1–1440 minut')
+    end=start+timedelta(minutes=duration_minutes)
     title=str(row['title'])[:250] if share_title else 'Termin kancelarii'
     existing=con.execute('SELECT external_id,etag FROM dev3_calendar_links WHERE provider=? AND appointment_id=?',(provider,appointment_id)).fetchone()
     if provider=='google':
