@@ -1,4 +1,4 @@
-name: Build RK KANCELARIA Windows Portable
+name: Build RK KANCELARIA Windows Portable (dev4)
 
 on:
   workflow_dispatch:
@@ -21,95 +21,45 @@ env:
 jobs:
   build-windows:
     runs-on: windows-latest
-    timeout-minutes: 35
-
+    timeout-minutes: 40
     steps:
-      - name: Pobierz kod
+      - name: Pobierz źródła
         uses: actions/checkout@v4
-
       - name: Python 3.13 x64
         uses: actions/setup-python@v5
         with:
           python-version: '3.13'
           architecture: 'x64'
           cache: pip
-
-      - name: Aktualizuj pip
-        shell: pwsh
-        run: python -m pip install --upgrade pip wheel setuptools
-
-      - name: Zainstaluj zaleznosci RK KANCELARIA
+      - name: Zależności i PyInstaller
         shell: pwsh
         run: |
-          python -m pip install -r requirements.txt
+          python -m pip install --upgrade pip setuptools wheel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pip install -r requirements_desktop.txt
+          python -m pip install -r requirements.txt -r requirements_desktop.txt "pyinstaller>=6.10,<7"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pip install "pyinstaller>=6.10,<7"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      # RK KANCELARIA 0.4: jedno przejście A+B+C. Dane klienta nie są częścią CI.
-      - name: Zastosuj RK 0.4.0-dev1 — modularyzacja A+B+C
+      - name: Zweryfikuj bazę dev3 albo uaktualnij starszą wersję
         shell: pwsh
         run: |
-          if ((Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev2"' -Quiet) -or (Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev3"' -Quiet)) {
-            Write-Host '0.4.0-dev2 już aktywna. Pomijam migrator 0.4.0-dev1.'
+          $code = Get-Content app.py -Raw -Encoding UTF8
+          if ($code.Contains('VERSION = "0.4.0-dev4"')) {
+            Write-Host 'Dev4 już obecna — pomijam historyczne migratory.'
+          } elseif ($code.Contains('VERSION = "0.4.0-dev3"')) {
+            python ZASTOSUJ_040_DEV3.py . --verify
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
-            python ZASTOSUJ_040.py . --dry-run
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            python ZASTOSUJ_040.py .
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            if (!(Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev1"' -Quiet)) {
-              throw 'Źródła nie zawierają wymaganej wersji 0.4.0-dev1.'
-            }
+            throw 'Dev4 wymaga działającej wersji dev3 R2. Wstrzymano migrację nieznanej wersji.'
           }
-
-      - name: Zastosuj RK 0.4.0-dev2 — stabilizacja i bezpieczeństwo
+      - name: Zastosuj RK 0.4.0-dev4 — naprawy i migracja bez danych klientów
         shell: pwsh
         run: |
-          if (Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev3"' -Quiet) {
-            Write-Host 'dev3 już aktywna. Pomijam migrator dev2.'
-          } else {
-            python ZASTOSUJ_040_DEV2.py . --dry-run
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            python ZASTOSUJ_040_DEV2.py .
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            if (!(Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev2"' -Quiet)) {
-              throw 'Źródła nie zawierają wersji 0.4.0-dev2.'
-            }
-          }
-
-      - name: Zastosuj zbiorczy patch po migracji dev2
-        shell: pwsh
-        run: |
-          if (Select-String -Path app.py -SimpleMatch 'VERSION = "0.4.0-dev3"' -Quiet) {
-            Write-Host 'dev3 już aktywna. Pomijam patch dev2.'
-          } else {
-            python PATCH_RK_040_DEV2_ALL.py . --dry-run
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            python PATCH_RK_040_DEV2_ALL.py .
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            python PATCH_RK_040_DEV2_ALL.py . --verify
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-
-      - name: RK 0.4.0-dev3 — nawigacja i LegalTech
-        shell: pwsh
-        run: |
-          python ZASTOSUJ_040_DEV3.py . --dry-run
+          python ZASTOSUJ_040_DEV4.py . --dry-run
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python ZASTOSUJ_040_DEV3.py .
+          python ZASTOSUJ_040_DEV4.py .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python ZASTOSUJ_040_DEV3.py . --verify
+          python ZASTOSUJ_040_DEV4.py . --verify
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Zainstaluj nową zależność stref czasowych dev3
-        shell: pwsh
-        run: |
-          python -m pip install -r requirements.txt
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Analiza całego kodu i wszystkie testy (raport zbiorczy)
+      - name: Audyt, testy regresji, samokontrola backendu
         shell: pwsh
         run: |
           python AUDYT_I_TESTY_RK_040_DEV2.py --root . --out RAPORT_AUDYT_040_DEV2.json
@@ -118,123 +68,81 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python RAPORT_JAKOSCI_040.py . --out RAPORT_JAKOSCI_040.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Zbuduj prawdziwe EXE na Windows
+      - name: Buduj EXE na Windows (folder, brak UPX)
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean RK_KANCELARIA_PORTABLE.spec
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Dodaj znacznik Portable i katalog danych
+      - name: Przygotuj przenośny katalog
         shell: pwsh
         run: |
           $out = "dist\RK KANCELARIA PORTABLE"
-          if (!(Test-Path $out)) { throw "Brak katalogu wynikowego: $out" }
+          if (!(Test-Path "$out\RK KANCELARIA.exe")) { throw 'Brak EXE' }
           New-Item -ItemType Directory -Force -Path "$out\Data" | Out-Null
-          Set-Content -Path "$out\portable.flag" -Value "RK KANCELARIA PORTABLE" -Encoding ascii
+          Set-Content "$out\portable.flag" 'RK KANCELARIA PORTABLE' -Encoding ascii
           Copy-Item -Force README_TRUE_PORTABLE.txt "$out\README_TRUE_PORTABLE.txt"
           Copy-Item -Force LICENSE.txt "$out\LICENSE.txt"
           Copy-Item -Force SYNCHRONIZUJ.bat "$out\SYNCHRONIZUJ.bat"
           Copy-Item -Force SYNCHRONIZUJ.vbs "$out\SYNCHRONIZUJ.vbs"
-
       - name: Self-test gotowego EXE
         shell: pwsh
         run: |
-          $exe = Resolve-Path "dist\RK KANCELARIA PORTABLE\RK KANCELARIA.exe"
+          $exe = (Resolve-Path "dist\RK KANCELARIA PORTABLE\RK KANCELARIA.exe").Path
           $p = Start-Process -FilePath $exe -ArgumentList "--self-test" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "Self-test EXE zakonczyl sie kodem $($p.ExitCode)" }
-
-      - name: Sprawdz strukture paczki
+          if ($p.ExitCode -ne 0) { throw "EXE zwrócił $($p.ExitCode)" }
+      - name: Zweryfikuj metadane i spójność przenośnej paczki
         shell: pwsh
         run: |
           $out = "dist\RK KANCELARIA PORTABLE"
-          $must = @(
-            "$out\RK KANCELARIA.exe",
-            "$out\_internal",
-            "$out\portable.flag",
-            "$out\Data",
-            "$out\LICENSE.txt"
-          )
-          foreach ($p in $must) {
-            if (!(Test-Path $p)) { throw "Brakuje: $p" }
+          $vi = (Get-Item "$out\RK KANCELARIA.exe").VersionInfo
+          if ($vi.ProductName -ne 'RK KANCELARIA') { throw 'Brak metadanych produktu' }
+          Copy-Item -Force SPRAWDZ_POCHODZENIE.py "$out\SPRAWDZ_POCHODZENIE.py"
+          $root = (Resolve-Path $out).Path
+          $files = Get-ChildItem $out -Recurse -File | Where-Object {
+            $_.FullName -notmatch '[\\/]Data[\\/]' -and $_.Name -ne 'SHA256SUMS.txt'
+          } | Sort-Object FullName
+          $lines = foreach ($file in $files) {
+            $rel = [System.IO.Path]::GetRelativePath($root, $file.FullName).Replace('\', '/')
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $rel"
           }
-          Get-ChildItem $out | Format-Table Name, Length, Mode
-
-      # Commitujemy wyłącznie pliki zmienione przez instalator. Nie dotykamy Data.
-      - name: Zapisz przetestowane źródła 0.4.0-dev3 na main
+          [System.IO.File]::WriteAllLines((Join-Path $root 'SHA256SUMS.txt'), [string[]]$lines, (New-Object System.Text.UTF8Encoding($false)))
+          python SPRAWDZ_POCHODZENIE.py "$out"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Zapisz przetestowane zmiany źródeł na main
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- app.py rk_inbox.py rk_sync.py rk_cloud.py rk_cloud_server.py rk_workspace_plus.py rk_correspondence.py rk_document_hub.py rk_navigation.py rk_dev3.py rk_dev3_core.py rk_dev3_calendar.py rk_core rk_domains assets/service-worker.js assets/rk_csrf.js assets/rk_dev3_nav.css assets/rk_dev3_nav.js TEST_ARCHITEKTURA_040.py TEST_STABILIZACJA_040_DEV2.py RAPORT_JAKOSCI_040.py AUDYT_I_TESTY_RK_040_DEV2.py ODZYSKAJ_SYNCHRONIZACJE_040.py RK_KANCELARIA_PORTABLE.spec
+          git add -- app.py rk_core/schema_version.py rk_dev3.py rk_dev3_core.py rk_dev3_calendar.py rk_dev4.py rk_dev4_core.py TEST_ARCHITEKTURA_040.py TEST_STABILIZACJA_040_DEV2.py RAPORT_JAKOSCI_040.py AUDYT_I_TESTY_RK_040_DEV2.py rk_windows_version.txt
           git diff --cached --quiet
           if ($LASTEXITCODE -eq 1) {
-            git commit -m "RK KANCELARIA 0.4.0-dev3: navigation, time tracking, vault, calendar gateways"
-            if ($LASTEXITCODE -ne 0) { throw 'Nie udało się zapisać źródeł 0.4.0.' }
+            git commit -m "RK KANCELARIA 0.4.0-dev4: repair deadlines, backups, time, vault and calendar"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             git push origin HEAD:main
-            if ($LASTEXITCODE -ne 0) { throw 'Nie udało się wysłać źródeł 0.4.0 na main.' }
-          } elseif ($LASTEXITCODE -eq 0) {
-            Write-Host 'Źródła 0.4.0-dev2 są już zapisane.'
-          } else {
+            if ($LASTEXITCODE -ne 0) { throw 'Zmiany testowane, ale push nie powiódł się. Nie nadpisuj historii.' }
+          } elseif ($LASTEXITCODE -ne 0) {
             throw 'Nie udało się porównać zmian.'
           }
-
-      # Manifest pozwala sprawdzic integralnosc plikow bez obchodzenia antywirusa.
-      # Wydawca musi osobno podpisac EXE certyfikatem Authenticode.
-      - name: Metadane wydania i sumy SHA-256
+      - name: Utwórz Portable ZIP
         shell: pwsh
         run: |
-          $out = "dist\RK KANCELARIA PORTABLE"
-          $exe = "$out\RK KANCELARIA.exe"
-          if (!(Test-Path $exe)) { throw 'Brak EXE do kontroli' }
-          $vi = (Get-Item $exe).VersionInfo
-          if ($vi.ProductName -ne 'RK KANCELARIA') { throw 'Niepoprawne metadane wydawcy w EXE' }
-          Copy-Item -Force SPRAWDZ_POCHODZENIE.py "$out\SPRAWDZ_POCHODZENIE.py"
-          $files = Get-ChildItem $out -Recurse -File | Where-Object {
-            $_.FullName -notmatch '[\\/]Data[\\/]' -and $_.Name -ne 'SHA256SUMS.txt'
-          } | Sort-Object FullName
-          $lines = foreach ($file in $files) {
-            $rel = [System.IO.Path]::GetRelativePath((Resolve-Path $out).Path, $file.FullName).Replace('\', '/')
-            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
-            "$hash  $rel"
-          }
-          [System.IO.File]::WriteAllLines((Join-Path (Resolve-Path $out).Path 'SHA256SUMS.txt'), [string[]]$lines, (New-Object System.Text.UTF8Encoding($false)))
-          python SPRAWDZ_POCHODZENIE.py "$out"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Spakuj finalny Portable ZIP
-        shell: pwsh
-        run: |
-          $zip = "RK_KANCELARIA_WINDOWS_PORTABLE.zip"
-          if (Test-Path $zip) { Remove-Item $zip -Force }
-          Compress-Archive -Path "dist\RK KANCELARIA PORTABLE\*" -DestinationPath $zip -CompressionLevel Optimal
-
-      - name: Udostepnij gotowa paczke
+          Compress-Archive -Path "dist\RK KANCELARIA PORTABLE\*" -DestinationPath RK_KANCELARIA_WINDOWS_PORTABLE.zip -Force -CompressionLevel Optimal
+      - name: Udostępnij Portable
         uses: actions/upload-artifact@v4
         with:
           name: RK-KANCELARIA-WINDOWS-PORTABLE
           path: RK_KANCELARIA_WINDOWS_PORTABLE.zip
-          if-no-files-found: error
           retention-days: 30
-
-      - name: Udostępnij audyt i logi wszystkich testów
+      - name: Udostępnij raport testów
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: RK-KANCELARIA-RAPORT-TESTY-040-DEV3
+          name: RK-KANCELARIA-DEV4-TESTY
           path: |
             RAPORT_AUDYT_040_DEV2.json
             CI_AUDYT_LOGI/*.log
             RAPORT_JAKOSCI_040.json
           if-no-files-found: warn
-          retention-days: 30
-
-      - name: Udostepnij raport jakosci kodu 0.4
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: RK-KANCELARIA-RAPORT-ARCHITEKTURY-040
-          path: RAPORT_JAKOSCI_040.json
-          if-no-files-found: ignore
           retention-days: 30
