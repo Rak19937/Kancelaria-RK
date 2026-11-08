@@ -1,92 +1,207 @@
-name: RK KANCELARIA - pelna naprawa dev5 (bezpieczny test)
+# RK KANCELARIA: self-starting, fail-closed DEV5 repair and Windows Portable build.
+# Upload THIS single file to .github/workflows/aktualizacja-dev5.yml on main.
+# All other DEV5 Python modules were already uploaded; this workflow never
+# reads, commits or publishes real client Data/.
+name: RK KANCELARIA - automatyczna naprawa DEV5 i Portable
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/aktualizacja-dev5.yml
 
 permissions:
   contents: write
 
 concurrency:
-  group: rk-kancelaria-manual-dev5
+  group: rk-dev5-installation
   cancel-in-progress: false
 
+# Windows runners sometimes use a legacy output codepage. Force UTF-8 for all
+# Python code paths, including error messages written in Polish.
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: 'utf-8'
+  PYTHONDONTWRITEBYTECODE: '1'
+
 jobs:
-  aktualizuj:
+  full-dev5-repair:
     runs-on: windows-latest
-    timeout-minutes: 65
+    timeout-minutes: 75
     steps:
-      - name: Pobierz repozytorium
+      - name: Pobierz aktualne zrodla
         uses: actions/checkout@v4
         with:
           persist-credentials: true
           fetch-depth: 0
-      - name: Python 3.13
+
+      - name: Skonfiguruj Python 3.13 x64
         uses: actions/setup-python@v5
         with:
           python-version: '3.13'
           architecture: x64
-      - name: Instaluj zaleznosci testowe
+          cache: pip
+
+      - name: Zabezpiecz kodowanie Windows i sprawdz wersje
         shell: pwsh
         run: |
-          python -m pip install -r requirements.txt -r requirements_desktop.txt
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Zweryfikuj obecnosc pakietu dev5
-        shell: pwsh
-        run: |
-          foreach ($name in @('ZASTOSUJ_040_DEV5.py', 'ZASTOSUJ_040_DEV5_PELNA.py', 'rk_dev5_snapshot.py', 'TEST_RK_DEV5.py', 'rk_dev5_acl.py', 'rk_dev5_vault.py', 'rk_dev5_calendar_reconcile.py', 'TEST_RK_DEV5_SECURITY.py')) {
-            if (-not (Test-Path $name)) { throw "Brak $name w glownym katalogu repo" }
+          chcp 65001 > $null
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          python -X utf8 -c "import sys,os; print('Python:',sys.version); print('stdout:',sys.stdout.encoding); print('PYTHONUTF8:',os.environ.get('PYTHONUTF8')); print('Znak kontrolny:',chr(322))"
+          if ($LASTEXITCODE -ne 0) { throw 'Nie mozna ustawic UTF-8' }
+          $source = Get-Content app.py -Raw -Encoding UTF8
+          if ((-not $source.Contains('VERSION = "0.4.0-dev4"')) -and (-not $source.Contains('VERSION = "0.4.0-dev5"'))) {
+            throw 'Nieznana wersja zrodel. Nie zmieniono plikow.'
           }
-      - name: Zastosuj poprawki tylko do kodu zrodlowego
+          Write-Host ('Zrodlowa wersja: ' + $(if ($source.Contains('VERSION = "0.4.0-dev4"')) { 'dev4' } else { 'dev5' }))
+
+      - name: Przygotuj zaleznosci i narzedzia kompilacji
         shell: pwsh
         run: |
-          $app = Get-Content app.py -Raw -Encoding UTF8
-          if ($app.Contains('VERSION = "0.4.0-dev4"')) {
-            python ZASTOSUJ_040_DEV5_PELNA.py . --dry-run
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            python ZASTOSUJ_040_DEV5_PELNA.py .
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -X utf8 -m pip install -r requirements.txt -r requirements_desktop.txt "pyinstaller>=6.10,<7"
+          if ($LASTEXITCODE -ne 0) { throw 'Instalacja zaleznosci nie powiodla sie' }
+
+      - name: Sprawdz kompletnosc pakietu naprawczego
+        shell: pwsh
+        run: |
+          $names = @(
+            'ZASTOSUJ_040_DEV5.py', 'ZASTOSUJ_040_DEV5_PELNA.py',
+            'rk_dev5_snapshot.py', 'TEST_RK_DEV5.py',
+            'rk_dev5_acl.py', 'rk_dev5_vault.py',
+            'rk_dev5_calendar_reconcile.py', 'TEST_RK_DEV5_SECURITY.py'
+          )
+          foreach ($n in $names) {
+            if (-not (Test-Path -LiteralPath $n -PathType Leaf)) { throw "Brakuje pliku $n — przerwano przed zmiana zrodel" }
           }
-          python ZASTOSUJ_040_DEV5_PELNA.py . --verify
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Testy regresyjne dev5
+          python -X utf8 -m py_compile ZASTOSUJ_040_DEV5.py ZASTOSUJ_040_DEV5_PELNA.py rk_dev5_snapshot.py rk_dev5_acl.py rk_dev5_vault.py rk_dev5_calendar_reconcile.py TEST_RK_DEV5.py TEST_RK_DEV5_SECURITY.py
+          if ($LASTEXITCODE -ne 0) { throw 'Blad skladni w pakiecie DEV5' }
+
+      - name: Bezpiecznie zastosuj caly dev5 — tylko pliki zrodlowe
         shell: pwsh
         run: |
-          python TEST_RK_DEV5.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python TEST_RK_DEV5_SECURITY.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Pelny audyt i testy dostepne w repo
+          $source = Get-Content app.py -Raw -Encoding UTF8
+          if ($source.Contains('VERSION = "0.4.0-dev4"')) {
+            python -X utf8 ZASTOSUJ_040_DEV5_PELNA.py . --dry-run
+            if ($LASTEXITCODE -ne 0) { throw 'Weryfikacja patchy nie przeszla — nic nie zapisano' }
+            python -X utf8 ZASTOSUJ_040_DEV5_PELNA.py .
+            if ($LASTEXITCODE -ne 0) { throw 'Zastosowanie patchy nie powiodlo sie' }
+          } else {
+            Write-Host 'Wersja DEV5 juz zastosowana — weryfikuje, bez ponownego patchowania.'
+          }
+          python -X utf8 ZASTOSUJ_040_DEV5_PELNA.py . --verify
+          if ($LASTEXITCODE -ne 0) { throw 'Weryfikacja DEV5 nie przeszla' }
+          python -X utf8 -m py_compile app.py rk_dev3_core.py rk_dev3_calendar.py rk_dev3.py rk_dev4.py rk_routes.py
+          if ($LASTEXITCODE -ne 0) { throw 'Blad skladni po zastosowaniu zmian' }
+
+      - name: Testy DEV5 — kalendarze, sejf, kopie, czas i kontrola dostepu
         shell: pwsh
         run: |
-          python AUDYT_I_TESTY_RK_040_DEV2.py --root . --out RAPORT_AUDYT_040_DEV2.json
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python RK_KANCELARIA_DESKTOP.pyw --self-test
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Sprawdz kompilacje Windows Portable i self-test EXE przed commitem
+          python -X utf8 TEST_RK_DEV5.py
+          if ($LASTEXITCODE -ne 0) { throw 'TEST_RK_DEV5.py nie przeszedl' }
+          python -X utf8 TEST_RK_DEV5_SECURITY.py
+          if ($LASTEXITCODE -ne 0) { throw 'TEST_RK_DEV5_SECURITY.py nie przeszedl' }
+
+      - name: Pelny audyt i wszystkie stare testy
         shell: pwsh
         run: |
-          python -m pip install "pyinstaller>=6.10,<7"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m PyInstaller --noconfirm --clean RK_KANCELARIA_PORTABLE.spec
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $exe = (Resolve-Path "dist\RK KANCELARIA PORTABLE\RK KANCELARIA.exe").Path
-          $p = Start-Process -FilePath $exe -ArgumentList "--self-test" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "EXE self-test: $($p.ExitCode)" }
-      - name: Zapisz testowane zmiany dopiero po poprawnych testach
+          python -X utf8 AUDYT_I_TESTY_RK_040_DEV2.py --root . --out RAPORT_AUDYT_040_DEV2.json
+          if ($LASTEXITCODE -ne 0) { throw 'Pelny audyt wykazal regresje — wdrozenie wstrzymane' }
+          python -X utf8 RK_KANCELARIA_DESKTOP.pyw --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'Self-test aplikacji nie przeszedl' }
+          python -X utf8 RAPORT_JAKOSCI_040.py . --out RAPORT_JAKOSCI_040.json
+          if ($LASTEXITCODE -ne 0) { throw 'Raport jakosci nie przeszedl' }
+
+      - name: Kompilacja prawdziwego EXE Windows Portable
+        shell: pwsh
+        run: |
+          python -X utf8 -m PyInstaller --noconfirm --clean RK_KANCELARIA_PORTABLE.spec
+          if ($LASTEXITCODE -ne 0) { throw 'PyInstaller zakonczyl sie bledem' }
+          if (-not (Test-Path 'dist/RK KANCELARIA PORTABLE/RK KANCELARIA.exe')) {
+            throw 'Brak EXE w katalogu wynikowym'
+          }
+
+      - name: Przygotuj katalog przenosny bez danych klientow
+        shell: pwsh
+        run: |
+          $out = 'dist/RK KANCELARIA PORTABLE'
+          New-Item -ItemType Directory -Force -Path "$out/Data" | Out-Null
+          Set-Content "$out/portable.flag" 'RK KANCELARIA PORTABLE' -Encoding ascii
+          foreach ($f in @('README_TRUE_PORTABLE.txt','LICENSE.txt','SYNCHRONIZUJ.bat','SYNCHRONIZUJ.vbs','SPRAWDZ_POCHODZENIE.py')) {
+            if (-not (Test-Path $f)) { throw "Brak wymaganego pliku $f" }
+            Copy-Item -LiteralPath $f -Destination "$out/$f" -Force
+          }
+          if ((Get-ChildItem "$out/Data" -Force | Measure-Object).Count -gt 0) {
+            throw 'Odmowa publikacji: w Data znajduja sie pliki'
+          }
+
+      - name: Test uruchomienia EXE i kontrola pochodzenia
+        shell: pwsh
+        run: |
+          $out = 'dist/RK KANCELARIA PORTABLE'
+          $exe = (Resolve-Path "$out/RK KANCELARIA.exe").Path
+          $p = Start-Process -FilePath $exe -ArgumentList '--self-test' -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "Niepoprawny wynik self-testu EXE: $($p.ExitCode)" }
+          $vi = (Get-Item $exe).VersionInfo
+          if ($vi.ProductName -ne 'RK KANCELARIA') { throw 'Niezgodne metadane produktu' }
+          $root = (Resolve-Path $out).Path
+          $files = Get-ChildItem $root -Recurse -File | Where-Object {
+            $_.FullName -notmatch '[\\/]Data[\\/]' -and $_.Name -ne 'SHA256SUMS.txt'
+          } | Sort-Object FullName
+          $hashes = foreach ($item in $files) {
+            $rel = [System.IO.Path]::GetRelativePath($root,$item.FullName).Replace('\','/')
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $item.FullName).Hash.ToLowerInvariant()
+            "$hash  $rel"
+          }
+          [System.IO.File]::WriteAllLines((Join-Path $root 'SHA256SUMS.txt'),[string[]]$hashes,[System.Text.UTF8Encoding]::new($false))
+          python -X utf8 SPRAWDZ_POCHODZENIE.py "$out"
+          if ($LASTEXITCODE -ne 0) { throw 'Kontrola integralnosci paczki nie przeszla' }
+
+      - name: Utworz finalny ZIP Windows Portable
+        shell: pwsh
+        run: |
+          Compress-Archive -Path 'dist/RK KANCELARIA PORTABLE/*' -DestinationPath 'RK_KANCELARIA_DEV5_WINDOWS_PORTABLE.zip' -Force -CompressionLevel Optimal
+          if (-not (Test-Path RK_KANCELARIA_DEV5_WINDOWS_PORTABLE.zip)) { throw 'Archiwum ZIP nie powstalo' }
+          $z = (Get-Item RK_KANCELARIA_DEV5_WINDOWS_PORTABLE.zip).Length
+          if ($z -lt 1000000) { throw 'Podejrzanie male archiwum ZIP' }
+          Write-Host "DEV5 ZIP: $z bajtow"
+
+      - name: Udostepnij przetestowany program (w tym samym workflow)
+        uses: actions/upload-artifact@v4
+        with:
+          name: RK-KANCELARIA-DEV5-PORTABLE
+          path: RK_KANCELARIA_DEV5_WINDOWS_PORTABLE.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Zapisz na main wylacznie przetestowane pliki zrodlowe
         if: github.ref == 'refs/heads/main'
         shell: pwsh
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- app.py rk_dev3_core.py rk_dev3_calendar.py rk_dev3.py rk_dev4.py rk_routes.py .github/workflows/main.yml TEST_ARCHITEKTURA_040.py RAPORT_JAKOSCI_040.py AUDYT_I_TESTY_RK_040_DEV2.py rk_windows_version.txt rk_dev5_acl.py rk_dev5_vault.py rk_dev5_calendar_reconcile.py rk_dev5_snapshot.py TEST_RK_DEV5.py TEST_RK_DEV5_SECURITY.py ZASTOSUJ_040_DEV5.py ZASTOSUJ_040_DEV5_PELNA.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- app.py rk_dev3_core.py rk_dev3_calendar.py rk_dev3.py rk_dev4.py rk_routes.py .github/workflows/main.yml TEST_ARCHITEKTURA_040.py RAPORT_JAKOSCI_040.py AUDYT_I_TESTY_RK_040_DEV2.py rk_windows_version.txt
           git diff --cached --quiet
-          if ($LASTEXITCODE -eq 1) {
-            git commit -m "RK KANCELARIA 0.4.0-dev5 FULL: case ACL, vault recovery and calendar review"
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host 'DEV5: brak nowych zmian — juz zatwierdzone.'
+          } elseif ($LASTEXITCODE -eq 1) {
+            git commit -m 'RK KANCELARIA 0.4.0-dev5: testowane poprawki funkcji i bezpieczenstwa'
+            if ($LASTEXITCODE -ne 0) { throw 'Nie mozna utworzyc commita' }
             git push origin HEAD:main
-            if ($LASTEXITCODE -ne 0) { throw 'Nie udalo sie zapisac poprawki do main. Sprawdz uprawnienia Actions.' }
-          } elseif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Pokaz wynik
-        shell: pwsh
-        run: |
-          Write-Host 'Dev5 FULL: testy zakonczone. Po push do main uruchomi sie workflow budowania Portable.'
+            if ($LASTEXITCODE -ne 0) { throw 'Nie mozna zapisac zmian do main; artefakt jest dostepny w tym workflow' }
+          } else {
+            throw 'Nie mozna ustalic stanu zmian w repozytorium'
+          }
+
+      - name: Raporty diagnostyczne takze przy bledzie
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RK-DEV5-RAPORTY-I-LOGI
+          path: |
+            RAPORT_AUDYT_040_DEV2.json
+            RAPORT_JAKOSCI_040.json
+            CI_AUDYT_LOGI/*.log
+          if-no-files-found: ignore
+          retention-days: 30
