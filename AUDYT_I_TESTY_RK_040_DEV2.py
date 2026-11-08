@@ -31,7 +31,7 @@ def source_files(root:Path):
 
 def audit(root:Path)->dict:
     files=sorted(source_files(root))
-    report={'version':'0.4.0-dev3','files_scanned':len(files),'py_files':0,'lines_scanned':0,
+    report={'version':'0.4.0-dev4','files_scanned':len(files),'py_files':0,'lines_scanned':0,
             'syntax_errors':[],'js_syntax_errors':[],'top_functions':[],
             'warnings':[],'binary_assets_not_parsed':[], 'test_files':[]}
     fn_sizes=[]

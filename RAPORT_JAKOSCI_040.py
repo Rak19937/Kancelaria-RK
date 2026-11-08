@@ -28,7 +28,7 @@ def analyze(root: Path) -> dict:
                            and node.func.attr in ('execute','executemany','executescript'))
         entries.append({'file':path.relative_to(root).as_posix(),'lines':len(content.splitlines()),
                         'sql_calls':direct_queries,'large_methods':sorted(methods,key=lambda x:-x['lines'])[:20]})
-    return {'version':'0.4.0-dev3','note':'Wskaźniki utrzymywalności; nie certyfikat bezpieczeństwa.',
+    return {'version':'0.4.0-dev4','note':'Wskaźniki utrzymywalności; nie certyfikat bezpieczeństwa.',
             'modules':entries,'total_lines':sum(e['lines'] for e in entries),
             'large_methods_150plus':[(x['file'],m['name'],m['lines']) for x in entries for m in x['large_methods'] if m['lines']>=150]}
 

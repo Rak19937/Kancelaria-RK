@@ -60,6 +60,8 @@ from rk_dashboard_data import dashboard_snapshot
 from rk_routes import dispatch_static_get, dispatch_static_post
 from rk_inbox import InboxMixin, ensure_inbox_schema
 from rk_dev3 import Dev3Mixin
+from rk_dev4 import Dev4Mixin
+from rk_dev4_core import ensure_dev4_schema, action_log, vault_file_path
 from rk_dev3_core import ensure_dev3_schema
 from rk_paths import resolve_runtime_paths, installed_data_dir
 from rk_core.schema import initialize_database
@@ -85,7 +87,8 @@ from rk_smart import (
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
-VERSION = "0.4.0-dev3"
+VERSION = "0.4.0-dev4"
+RK_040_DEV4_REPAIR_20261108 = True
 RK_DEV3_LEGALTECH_NAV_20261107 = True
 RK_040_DEV2_AUDIT_PATCH_20261106_R1 = True
 INBOX_ASYNC_MODE = True
@@ -868,6 +871,7 @@ def init_db() -> None:
         reconcile_task_alerts=reconcile_task_alerts, seed_demo=seed_demo)
     with db() as con:
         ensure_dev3_schema(con)
+        ensure_dev4_schema(con)
     start_worker(sys.modules[__name__])
 
 
@@ -1088,7 +1092,7 @@ def polish_statutory_holidays(year: int) -> set[date]:
         easter + timedelta(days=49),  # Zielone Świątki
         easter + timedelta(days=60),  # Boże Ciało
         date(year,8,15), date(year,11,1), date(year,11,11),
-        date(year,12,25), date(year,12,26),
+        date(year,12,24), date(year,12,25), date(year,12,26),
     }
 
 
@@ -1386,7 +1390,8 @@ def create_data_snapshot_zip() -> tuple[bytes,str]:
                     for fp in root.rglob('*'):
                         if fp.is_file():
                             try: z.write(fp,f"{prefix}/{fp.relative_to(root).as_posix()}")
-                            except OSError: pass
+                            except OSError as exc:
+                                raise RuntimeError(f"Nie można wykonać kompletnej kopii: {fp}") from exc
         return out.getvalue(),f'RK_KANCELARIA_snapshot_{stamp}.zip'
     finally:
         try: tmp.unlink(missing_ok=True)
@@ -2246,7 +2251,7 @@ def open_containing_folder(path: Path) -> tuple[bool,str]:
     except Exception as exc: return False,str(exc)
 
 
-class Handler(Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
+class Handler(Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
     server_version = f"{APP_NAME}/{VERSION}"
 
     def handle_one_request(self):
@@ -2524,6 +2529,7 @@ class Handler(Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, C
         if not self.require_auth():
             return
         try:
+            if self.dev4_get(path, qs): return
             if self.dev3_get(path, qs): return
             if dispatch_static_get(self, path, qs): return
             if path == '/onboarding': return self.onboarding_page()
@@ -2665,6 +2671,7 @@ class Handler(Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, C
 
 
 
+            if self.dev4_post(path, fields, files): return
             if self.dev3_post(path, fields, files): return
             if dispatch_static_post(self, path, fields, files): return
             if re.fullmatch(r"/admin/user/\d+/update", path): return self.user_update(int(path.split('/')[3]), fields)
@@ -2989,6 +2996,10 @@ class Handler(Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, C
                     return self.user_edit_page(uid,'Nie można usunąć ostatniego aktywnego administratora.')
             # Dane merytoryczne nie mają klucza obcego do konta. Autorzy są zapisani
             # tekstowo przy rekordach, więc usunięcie konta nie usuwa ani nie zmienia historii.
+            # Vault files remain accessible after deleting their original owner.
+            moved=con.execute("UPDATE dev3_vault_files SET owner_id=? WHERE owner_id=?",(me['id'],uid)).rowcount
+            if moved:action_log(con,None,me['id'],'Przejęcie sejfu po usunięciu konta',
+                                f'Użytkownik {uid}; dokumenty {moved}')
             con.execute("DELETE FROM users WHERE id=?",(uid,))
         return self.users_page(f"Konto „{u['username']}” zostało usunięte. Wszystkie dane i historyczne informacje o autorach zostały zachowane.")
 
@@ -4933,9 +4944,14 @@ class Handler(Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, C
 
         author=self.current_author(f); folder=FILES_DIR/f"sprawa_{cid}"
         with db() as con:
+            vault_names=[r[0] for r in con.execute(
+                'SELECT stored_name FROM dev3_vault_files WHERE case_id=?',(cid,))]
             immutable_audit(con,None,'case',cid,'Trwale usunięto sprawę po wykonaniu snapshotu',
                             f"{c['title']} · kopia: {backup_path.name}",author)
             con.execute("DELETE FROM cases WHERE id=?",(cid,))
+        for stored in vault_names:
+            try:vault_file_path(FILES_DIR,stored).unlink(missing_ok=True)
+            except (OSError,ValueError) as exc:log_app_exception(f'/case/{cid}/delete-vault',exc)
         if folder.exists():
             try: shutil.rmtree(folder)
             except Exception as exc: log_app_exception(f'/case/{cid}/delete-files',exc)
@@ -5975,6 +5991,9 @@ class Handler(Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, C
                     for d in test_con.execute("SELECT case_id,stored_name FROM documents WHERE stored_name<>''"):
                         expected=f"dokumenty/sprawa_{d['case_id']}/{d['stored_name']}"
                         if expected not in names: missing.append(expected)
+                    for v in test_con.execute('SELECT stored_name FROM dev3_vault_files'):
+                        expected='dokumenty/_vault/'+v[0]
+                        if expected not in names:missing.append(expected)
                 finally:
                     test_con.close()
                 if missing: raise RuntimeError(f'brakuje {len(missing)} plików dokumentów; pierwszy: {missing[0]}')
