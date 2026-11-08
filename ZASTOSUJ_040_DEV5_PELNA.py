@@ -137,6 +137,35 @@ def patch_workflow(s):
       '          python TEST_RK_DEV5.py\n          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n          python TEST_RK_DEV5_SECURITY.py\n          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }', '.github/workflows/main.yml')
 
 
+def patch_test_dev4(s):
+    """Preserve old functional test; initialize the new journal on fixture SQLite."""
+    p='TEST_RK_DEV4.py'
+    s=once(s,'from rk_dev4 import Dev4Mixin\n',
+           'from rk_dev4 import Dev4Mixin\nfrom rk_dev5_vault import ensure_dev5_vault_schema\n',p)
+    s=once(s,
+      'class Dev4UiTests(unittest.TestCase):\n    def setUp(self):self.con=fixture_db();ensure_dev4_schema(self.con)',
+      'class Dev4UiTests(unittest.TestCase):\n    def setUp(self):self.con=fixture_db();ensure_dev4_schema(self.con);ensure_dev5_vault_schema(self.con)',p)
+    return s
+
+
+def patch_test_ui(s):
+    """Keep E2E authorization assertions aligned to dev5 deny-by-default."""
+    p='TEST_UI_HTTP_040_DEV2.py'
+    s=once(s,
+      "            code,user_html,_=request(other,base+'/inbox')\n            assert code==200",
+      """            # dev5 restricts the legacy global inbox for regular accounts.
+            # The user must instead have access to the case-scoped workspace.
+            code,_,_=request(other,base+'/inbox')
+            assert code==403,'Globalna skrzynka wplywu powinna byc niedostepna'
+            code,user_html,_=request(other,base+'/my-cases')
+            assert code==200,('my-cases',code,user_html[:400])""",p)
+    return s
+
+
+TEST_PATCHES={'TEST_RK_DEV4.py':patch_test_dev4,
+              'TEST_UI_HTTP_040_DEV2.py':patch_test_ui}
+
+
 STAGE2={'app.py':patch_app,'rk_dev3_core.py':patch_core,
         'rk_dev3_calendar.py':patch_calendar,'rk_dev3.py':patch_dev3,
         'rk_dev4.py':patch_dev4,'.github/workflows/main.yml':patch_workflow}
@@ -152,7 +181,9 @@ def run(root:Path,verify=False,dry_run=False):
                 'rk_dev3.py':['def dev3_calendar_review','def dev3_worktime_page(self,qs=None)'],
                 'rk_dev4.py':['vault_change_safe','def dev4_time_history'],
                 '.github/workflows/main.yml':['TEST_RK_DEV5_SECURITY.py'],
-                'rk_dev3_calendar.py':['linked_event(con,provider,eid,obj)']}
+                'rk_dev3_calendar.py':['linked_event(con,provider,eid,obj)'],
+                'TEST_RK_DEV4.py':['ensure_dev5_vault_schema(self.con)'],
+                'TEST_UI_HTTP_040_DEV2.py':["base+'/my-cases'", "assert code==403,'Globalna skrzynka wplywu powinna byc niedostepna'"]}
         for rel,items in checks.items():
             data=(root/rel).read_text('utf-8')
             for needle in items:
@@ -169,6 +200,11 @@ def run(root:Path,verify=False,dry_run=False):
         patched=transform(original)
         if rel in STAGE2:patched=STAGE2[rel](patched)
         if rel.endswith('.py'):ast.parse(patched,filename=rel)
+        changes[rel]=(original,patched)
+    for rel,transform in TEST_PATCHES.items():
+        original=(root/rel).read_text('utf-8')
+        patched=transform(original)
+        ast.parse(patched,filename=rel)
         changes[rel]=(original,patched)
     print('Weryfikacja statyczna przeszła, zmienione pliki:')
     for name in sorted(changes):print('  '+name)
