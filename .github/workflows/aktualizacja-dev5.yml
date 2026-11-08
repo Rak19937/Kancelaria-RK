@@ -1,15 +1,14 @@
 # RK KANCELARIA: self-starting, fail-closed DEV5 repair and Windows Portable build.
-# Upload THIS single file to .github/workflows/aktualizacja-dev5.yml on main.
+# Upload together with the manual main.yml and the updated source patcher.
 # All other DEV5 Python modules were already uploaded; this workflow never
 # reads, commits or publishes real client Data/.
 name: RK KANCELARIA - automatyczna naprawa DEV5 i Portable
 
 on:
   workflow_dispatch:
+  workflow_call:
   push:
     branches: [main]
-    paths:
-      - .github/workflows/aktualizacja-dev5.yml
 
 permissions:
   contents: write
@@ -70,12 +69,13 @@ jobs:
             'ZASTOSUJ_040_DEV5.py', 'ZASTOSUJ_040_DEV5_PELNA.py',
             'rk_dev5_snapshot.py', 'TEST_RK_DEV5.py',
             'rk_dev5_acl.py', 'rk_dev5_vault.py',
-            'rk_dev5_calendar_reconcile.py', 'TEST_RK_DEV5_SECURITY.py'
+            'rk_dev5_calendar_reconcile.py', 'TEST_RK_DEV5_SECURITY.py',
+            'RK_DEV5_AUDYT_REPO.py', 'TEST_RK_DEV5_CI.py'
           )
           foreach ($n in $names) {
             if (-not (Test-Path -LiteralPath $n -PathType Leaf)) { throw "Brakuje pliku $n — przerwano przed zmiana zrodel" }
           }
-          python -X utf8 -m py_compile ZASTOSUJ_040_DEV5.py ZASTOSUJ_040_DEV5_PELNA.py rk_dev5_snapshot.py rk_dev5_acl.py rk_dev5_vault.py rk_dev5_calendar_reconcile.py TEST_RK_DEV5.py TEST_RK_DEV5_SECURITY.py
+          python -X utf8 -m py_compile ZASTOSUJ_040_DEV5.py ZASTOSUJ_040_DEV5_PELNA.py rk_dev5_snapshot.py rk_dev5_acl.py rk_dev5_vault.py rk_dev5_calendar_reconcile.py TEST_RK_DEV5.py TEST_RK_DEV5_SECURITY.py RK_DEV5_AUDYT_REPO.py TEST_RK_DEV5_CI.py
           if ($LASTEXITCODE -ne 0) { throw 'Blad skladni w pakiecie DEV5' }
 
       - name: Bezpiecznie zastosuj caly dev5 — tylko pliki zrodlowe
@@ -102,6 +102,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'TEST_RK_DEV5.py nie przeszedl' }
           python -X utf8 TEST_RK_DEV5_SECURITY.py
           if ($LASTEXITCODE -ne 0) { throw 'TEST_RK_DEV5_SECURITY.py nie przeszedl' }
+
+      - name: Dodatkowy audyt struktury i bezpieczenstwa wszystkich plikow
+        shell: pwsh
+        run: |
+          python -X utf8 TEST_RK_DEV5_CI.py
+          if ($LASTEXITCODE -ne 0) { throw 'Testy zabezpieczen CI nie przeszly' }
+          python -X utf8 RK_DEV5_AUDYT_REPO.py --root . --out RAPORT_DEV5_AUDYT_REPO.json
+          if ($LASTEXITCODE -ne 0) { throw 'Krytyczny problem w repo — audyt wstrzymal budowe' }
 
       - name: Pelny audyt i wszystkie stare testy
         shell: pwsh
@@ -181,7 +189,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- app.py rk_dev3_core.py rk_dev3_calendar.py rk_dev3.py rk_dev4.py rk_routes.py .github/workflows/main.yml TEST_ARCHITEKTURA_040.py RAPORT_JAKOSCI_040.py AUDYT_I_TESTY_RK_040_DEV2.py rk_windows_version.txt TEST_RK_DEV4.py TEST_UI_HTTP_040_DEV2.py
+          git add -- app.py rk_dev3_core.py rk_dev3_calendar.py rk_dev3.py rk_dev4.py rk_routes.py TEST_ARCHITEKTURA_040.py RAPORT_JAKOSCI_040.py AUDYT_I_TESTY_RK_040_DEV2.py rk_windows_version.txt TEST_RK_DEV4.py TEST_UI_HTTP_040_DEV2.py
           git diff --cached --quiet
           if ($LASTEXITCODE -eq 0) {
             Write-Host 'DEV5: brak nowych zmian — juz zatwierdzone.'
@@ -201,6 +209,7 @@ jobs:
           name: RK-DEV5-RAPORTY-I-LOGI
           path: |
             RAPORT_AUDYT_040_DEV2.json
+            RAPORT_DEV5_AUDYT_REPO.json
             RAPORT_JAKOSCI_040.json
             CI_AUDYT_LOGI/*.log
           if-no-files-found: ignore
