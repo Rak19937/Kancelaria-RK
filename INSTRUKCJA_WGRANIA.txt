@@ -1,0 +1,36 @@
+RK KANCELARIA - DEV5 (PAKIET DO GITHUB)
+
+UWAGA: GitHub nie rozpakowuje automatycznie przeslanych archiwow ZIP.
+NIE wrzucaj samego ZIP do repozytorium. Najpierw rozpakuj go na komputerze.
+
+CO ZROBIC W PRZEGLADARCE GITHUB:
+
+1. Rozpakuj RK_KANCELARIA_DEV5_WGRAJ_NA_GITHUB.zip.
+2. W repozytorium https://github.com/Rak19937/Kancelaria-RK, na galezi main,
+   wgraj 8 plikow .py z rozpakowanego folderu do katalogu GLOWNEGO.
+   GitHub: Add file -> Upload files. Przy identycznych juz wgranych plikach
+   nie trzeba ich ponownie dodawac.
+3. Otworz katalog .github/workflows repozytorium (NIE katalog glowny).
+   Zastap aktualizacja-dev5.yml NOWYM plikiem z paczki
+   (.github/workflows/aktualizacja-dev5.yml).
+   Zapisz przez Commit changes na galezi main.
+4. Ten workflow jest skonfigurowany, aby uruchomic sie po commicie zmiany
+   aktualizacja-dev5.yml. Jesli nie uruchomi sie sam, otworz:
+   https://github.com/Rak19937/Kancelaria-RK/actions/workflows/aktualizacja-dev5.yml
+   i wybierz Run workflow -> main.
+5. Sprawdz zielony status calego workflow. Przy sukcesie znajdziesz artefakt
+   RK-KANCELARIA-DEV5-PORTABLE z programem Windows Portable.
+   Przy bledzie NIE uzywaj nowej wersji. Zapisz link do czerwonego runu.
+
+DANE:
+- Przed aktualizacja wykonaj osobna kopie katalogu Data i przechowuj ja poza repozytorium.
+- Nigdy nie wgrywaj bazy lub dokumentow klientow do repozytorium GitHub.
+- Pakiet modyfikuje kod zrodlowy na CI, nie zawiera bazy klientow.
+- Aktualizacja dotyczy aktualnego kodu 0.4.0-dev4 na main, a nie dowolnych wersji.
+- Wynik zielonego CI nie jest gwarancja braku wszystkich mozliwych bledow.
+
+ZAWARTOSC PACZKI:
+- 8 plikow Python do katalogu glownego repo
+- .github/workflows/aktualizacja-dev5.yml (workflow automatycznej naprawy)
+- INSTRUKCJA_WGRANIA.txt (ten plik; nie trzeba go wgrywac)
+- SUMY_SHA256.txt (kontrola paczki; nie trzeba go wgrywac)
