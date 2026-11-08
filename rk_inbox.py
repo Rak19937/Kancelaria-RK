@@ -248,7 +248,7 @@ class InboxMixin:
         except ValueError as exc:
             return self._inbox_error(str(exc), target=f'/inbox/{item_id}')
         dtype = (fields.get('doc_type') or 'Inne').strip()[:100]
-        if dtype not in {'Inne', 'Pismo procesowe', 'Postanowienie', 'Wyrok', 'Wezwanie', 'Korespondencja'}:
+        if dtype not in {'Inne', 'Pismo procesowe', 'Postanowienie', 'Wyrok', 'Wezwanie', 'Korespondencja'} and not a.ux6_choice_exists(a.db,'doc_type',dtype):
             return self._inbox_error('Nieprawidłowy rodzaj dokumentu.', target=f'/inbox/{item_id}')
         with a.db() as con:
             row = con.execute('SELECT * FROM inbox_items WHERE id=?', (item_id,)).fetchone()

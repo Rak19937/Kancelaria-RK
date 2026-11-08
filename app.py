@@ -87,10 +87,13 @@ from rk_smart import (
     update_law_from_eli, upcoming_alerts,
 )
 
+from rk_ux6 import Ux6Mixin, ensure_ux6_schema, delete_case_dependencies, choice_exists as ux6_choice_exists
+
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
 VERSION = "0.4.0-dev5"
+RK_UX6_20261108 = True
 RK_040_DEV5_STABILIZATION_20261108 = True
 RK_040_DEV5_FULL_REPAIR_20261108 = True
 RK_040_DEV4_REPAIR_20261108 = True
@@ -881,6 +884,7 @@ def init_db() -> None:
         ensure_dev4_schema(con)
         ensure_dev5_acl_schema(con)
         ensure_dev5_vault_schema(con)
+        ensure_ux6_schema(con)
     recover_vault_journal(db,FILES_DIR)
     start_worker(sys.modules[__name__])
 
@@ -2268,7 +2272,7 @@ def open_containing_folder(path: Path) -> tuple[bool,str]:
     except Exception as exc: return False,str(exc)
 
 
-class Handler(Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
+class Handler(Ux6Mixin, Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategoryMixin, WorkspacePlusMixin, CorrespondenceMixin, ActionCenterMixin, DocumentHubMixin, InboxMixin, BaseHTTPRequestHandler):
     server_version = f"{APP_NAME}/{VERSION}"
 
     def handle_one_request(self):
@@ -2321,6 +2325,10 @@ class Handler(Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategory
 
     def send_html(self, content: str, status=200):
         token=csrf_for_session(self.cookie_value(SESSION_COOKIE))
+        if '</head>' in content and '/assets/rk_ux6.js' not in content:
+            ux6_assets=('<link rel="stylesheet" href="/assets/rk_ux6.css">'
+                        '<script defer src="/assets/rk_ux6.js"></script>')
+            content=content.replace('</head>',ux6_assets+'</head>',1)
         content=csrf_html(content,token)
         data=content.encode('utf-8')
         self.send_response(status)
@@ -2547,6 +2555,7 @@ class Handler(Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategory
             return
         try:
             if self.dev5_access_get(path, qs): return
+            if self.ux6_get(path, qs): return
             if self.dev4_get(path, qs): return
             if self.dev3_get(path, qs): return
             if dispatch_static_get(self, path, qs): return
@@ -2690,6 +2699,7 @@ class Handler(Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategory
 
 
             if self.dev5_access_post(path, fields, files): return
+            if self.ux6_post(path, fields, files): return
             if self.dev4_post(path, fields, files): return
             if self.dev3_post(path, fields, files): return
             if dispatch_static_post(self, path, fields, files): return
@@ -4341,7 +4351,7 @@ class Handler(Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategory
         def add_item(d, kind, title, cid=0, priority='normal', url=''):
             if not d: return
             norm=re.sub(r'\W+','',str(title or '').lower())
-            key=(str(d),int(cid or 0),url or norm)
+            key=(str(d),int(cid or 0),norm)
             if key in seen_calendar: return
             seen_calendar.add(key)
             bydate.setdefault(d, []).append((kind, title, cid, priority, url))
@@ -4375,10 +4385,11 @@ class Handler(Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategory
                 content = f"<b>{esc(kind)}</b><span>{esc(title)}</span>"
                 target=url or (f'/case/{cid}' if cid else '')
                 event_parts.append(f"<a class='calendar-event p-{esc(pr)}' href='{esc(target)}'>{content}</a>" if target else f"<div class='calendar-event p-{esc(pr)}'>{content}</div>")
-            more = f"<div class='small muted'>+{len(items)-5} więcej</div>" if len(items) > 5 else ''
+            more = f"<a class='ux6-day-open' href='/calendar/day?date={cur.isoformat()}'>+{len(items)-5} więcej — otwórz dzień</a>" if len(items) > 5 else ''
             cls = ' outside' if cur.month != first.month else ''
             cls += ' today' if cur == date.today() else ''
-            cells.append(f"<div class='calendar-day{cls}'><div class='calendar-day-num'>{cur.day}</div>{''.join(event_parts)}{more}</div>")
+            day_url=f"/calendar/day?date={cur.isoformat()}"
+            cells.append(f"<div class='calendar-day{cls}'><div class='calendar-day-num'>{cur.day}</div>{''.join(event_parts)}{more}<a class='ux6-day-open' href='{day_url}'>✎ Zobacz / edytuj dzień</a></div>")
             cur += timedelta(days=1)
         case_opts = '<option value="">Wszystkie sprawy</option>' + ''.join(
             f"<option value='{r['id']}' {'selected' if case_filter == r['id'] else ''}>{esc((r['signature'] or r['internal_signature'] or 'Bez sygnatury') + ' — ' + r['title'])}</option>" for r in cases
@@ -4442,7 +4453,7 @@ class Handler(Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategory
         a = self.current_author(f)
         typ = (f.get('alert_type') or 'Inne').strip()
         pr = (f.get('priority') or 'normal').strip()
-        if typ not in ALERT_TYPES: typ = 'Inne'
+        if typ not in ALERT_TYPES and not ux6_choice_exists(db,'alert_type',typ): typ = 'Inne'
         if pr not in ALERT_PRIORITIES: pr = 'normal'
         with db() as con:
             cur = con.execute("""INSERT INTO alerts(case_id,alert_date,alert_type,title,description,priority,status,
@@ -4880,6 +4891,7 @@ class Handler(Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategory
         <div><label>Sąd</label><input name='court' value='{esc(c['court'])}'></div><div><label>Wydział</label><input name='department' value='{esc(c['department'])}'></div>{category_field}<input type='hidden' name='category' value='{esc(c['category'])}'><div><label>Najbliższa data</label><input type='date' name='next_date' value='{esc(c['next_date'])}'></div>
         <div class='full'><label>Tagi</label><input name='tags' value='{esc(tags)}'></div><div class='full important-field'><label>Czego dotyczy sprawa? / Przedmiot <span class='help-dot' title='Opis widoczny na pulpicie i karcie sprawy'>?</span></label><input name='subject' value='{esc(c['subject'])}' placeholder='np. alimenty, zapłata, rozwód, odszkodowanie'></div><div class='full'><label>Następny krok</label><input name='next_step' value='{esc(c['next_step'])}'></div><div class='full'><label>Notatki</label><textarea name='notes'>{esc(c['notes'])}</textarea></div><div class='full'><button class='btn primary'>Zapisz</button> <a class='btn' href='/case/{cid}'>Wróć</a></div></form></div>
         <br><div class='card danger-zone'><h2>Usuwanie sprawy</h2><p class='muted'>Przed operacją program automatycznie tworzy pełny snapshot danych. Usunięcie wymaga dodatkowego potwierdzenia.</p><a class='btn danger' href='/case/{cid}/delete'>Przejdź do bezpiecznego usuwania</a></div>"""
+        body += f'<div class="card"><a class="btn primary" href="/case/{cid}/phases">＋ Etapy równoległe (np. proces + mediacja)</a></div>'
         self.send_html(layout('Edycja',body,'cases'))
 
     def case_update(self,cid,f):
@@ -4933,6 +4945,10 @@ class Handler(Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategory
         count_rows=''.join(f"<tr><th>{esc(label)}</th><td>{int(value)}</td></tr>" for label,value in counts.items())
         closed_note='' if c['status']=='closed' else "<div class='error'><b>Najpierw oznacz sprawę jako zakończoną.</b> Aktywnej sprawy nie można trwale usunąć.</div>"
         disabled=' disabled' if c['status']!='closed' else ''
+        who=current_request_user()
+        if not who or who['role']!='admin':
+            disabled=' disabled'
+            closed_note += '<div class="error">Trwałe usuwanie spraw jest dostępne tylko dla administratora.</div>'
         body=f"""<div class='topbar'><div><h1>Usuń sprawę</h1><div class='sub'>{esc(c['signature'] or c['internal_signature'] or c['title'])}</div></div><a class='btn' href='/case/{cid}'>← Wróć</a></div>{msg}{closed_note}
         <div class='grid'><div class='card span7 danger-zone'><h2>Operacja nieodwracalna</h2><p>Usunięta zostanie sprawa <b>{esc(c['title'])}</b> wraz z danymi przypisanymi wyłącznie do niej. Status: <b>{esc(status)}</b>.</p><p><b>Przed usunięciem program automatycznie zapisze pełny snapshot</b> bazy, dokumentów i projektów pism w katalogu danych programu.</p><form method='post' action='/case/{cid}/delete'><label>Wpisz dokładnie <b>USUŃ</b></label><input name='confirmation' autocomplete='off' required><label style='font-weight:500'><input style='width:auto' type='checkbox' name='acknowledge' value='1' required> Potwierdzam, że chcę trwale usunąć tę sprawę.</label><button class='btn danger'{disabled}>Utwórz snapshot i usuń sprawę</button></form></div><div class='card span5'><h2>Zawartość sprawy</h2><table>{count_rows}</table><p class='small muted'>Powiązania z innymi sprawami zostaną usunięte. Wspólne rekordy osób w Kartotece pozostaną bez zmian.</p></div></div>"""
         self.send_html(layout('Bezpieczne usuwanie sprawy',body,'cases'))
@@ -4956,19 +4972,34 @@ class Handler(Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategory
 
         # Usunięcie całej sprawy omija zwykły Kosz, dlatego najpierw powstaje
         # kompletny, przenośny snapshot możliwy do odtworzenia z ekranu Recovery.
-        raw,snapshot_name=create_data_snapshot_zip()
+        try:
+            raw,snapshot_name=create_data_snapshot_zip()
+        except (OSError,RuntimeError,sqlite3.Error) as exc:
+            log_app_exception(f'/case/{cid}/snapshot',exc)
+            return self.case_delete_confirm(cid,f'Nie udało się utworzyć pełnej kopii. Usuwanie przerwano: {exc}')
         backup_dir=DATA_DIR/'backup_przed_usunieciem_sprawy'
         backup_dir.mkdir(parents=True,exist_ok=True)
         backup_path=backup_dir/f"sprawa_{cid}_{snapshot_name}"
-        atomic_write_bytes(backup_path,raw)
+        try:
+            atomic_write_bytes(backup_path,raw)
+            if not backup_path.is_file() or backup_path.stat().st_size!=len(raw):
+                raise RuntimeError('Zapis kopii nie jest kompletny.')
+        except (OSError,RuntimeError) as exc:
+            log_app_exception(f'/case/{cid}/save-snapshot',exc)
+            return self.case_delete_confirm(cid,f'Nie zapisano kompletnego snapshotu. Sprawa nie została usunięta: {exc}')
 
         author=self.current_author(f); folder=FILES_DIR/f"sprawa_{cid}"
-        with db() as con:
-            vault_names=[r[0] for r in con.execute(
-                'SELECT stored_name FROM dev3_vault_files WHERE case_id=?',(cid,))]
-            immutable_audit(con,None,'case',cid,'Trwale usunięto sprawę po wykonaniu snapshotu',
-                            f"{c['title']} · kopia: {backup_path.name}",author)
-            con.execute("DELETE FROM cases WHERE id=?",(cid,))
+        try:
+            with db() as con:
+                vault_names=[r[0] for r in con.execute(
+                    'SELECT stored_name FROM dev3_vault_files WHERE case_id=?',(cid,))]
+                immutable_audit(con,None,'case',cid,'Trwale usunięto sprawę po wykonaniu snapshotu',
+                                f"{c['title']} · kopia: {backup_path.name}",author)
+                delete_case_dependencies(con,cid)
+        except (sqlite3.Error,ValueError) as exc:
+            log_app_exception(f'/case/{cid}/delete-db',exc)
+            return self.case_delete_confirm(cid,
+                f'Baza zablokowała usunięcie powiązanych danych. Cofnięto zmiany. Snapshot: {backup_path.name}. Szczegóły: {exc}')
         for stored in vault_names:
             try:vault_file_path(FILES_DIR,stored).unlink(missing_ok=True)
             except (OSError,ValueError) as exc:log_app_exception(f'/case/{cid}/delete-vault',exc)
@@ -5216,7 +5247,7 @@ class Handler(Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategory
         try: assigned=int(f.get('assigned_user_id','') or 0) or None
         except ValueError: assigned=None
         task_type=(f.get('task_type') or 'Zadanie').strip()
-        if task_type not in ACTIONABLE_ALERT_TYPES:
+        if task_type not in ACTIONABLE_ALERT_TYPES and not ux6_choice_exists(db,'task_type',task_type):
             task_type='Zadanie'
         new={
             'title':f.get('title','').strip(),'due_date':f.get('due_date',''),'status':f.get('status','open'),
@@ -5428,7 +5459,7 @@ class Handler(Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, CaseCategory
         try: assigned=int(f.get('assigned_user_id','') or 0) or None
         except ValueError: assigned=None
         task_type=(f.get('task_type') or 'Zadanie').strip()
-        if task_type not in ACTIONABLE_ALERT_TYPES:
+        if task_type not in ACTIONABLE_ALERT_TYPES and not ux6_choice_exists(db,'task_type',task_type):
             task_type='Zadanie'
         with db() as con:
             if not con.execute("SELECT 1 FROM cases WHERE id=?",(cid,)).fetchone(): return self.send_error(404)

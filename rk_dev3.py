@@ -106,6 +106,7 @@ class Dev3Mixin:
         options=''.join('<option value="%s" %s>%s</option>'%(k,'selected' if k==val else '',esc(v)) for k,v in STAGES.items())
         body='<div class="topbar"><h1>Etap sprawy: %s</h1></div><div class="card"><form method="post" action="/case/%s/stage"><label>Etap postępowania</label><select name="stage">%s</select><label>Uzasadnienie zmiany</label><textarea name="note" maxlength="2000"></textarea><button class="btn primary">Zapisz etap</button></form></div><div class="card"><h2>Historia etapów</h2>'%(esc(c['title']),case_id,options)
         body+=''.join('<p>%s · %s → %s · %s</p>'%(esc(r['created_at']),esc(STAGES.get(r['old_stage'],r['old_stage'])),esc(STAGES.get(r['new_stage'],r['new_stage'])),esc(r['note'])) for r in logs)
+        body += '<p><a class="btn primary" href="/case/%d/phases">＋ Etapy równoległe / dodaj własny etap</a></p>' % case_id
         self._dev3_html('Etap postępowania',body+'</div>','stages')
 
     def dev3_case_stage_save(self,case_id,f):
