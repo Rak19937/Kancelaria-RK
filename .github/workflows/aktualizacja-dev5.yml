@@ -1,0 +1,92 @@
+name: RK KANCELARIA - pelna naprawa dev5 (bezpieczny test)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rk-kancelaria-manual-dev5
+  cancel-in-progress: false
+
+jobs:
+  aktualizuj:
+    runs-on: windows-latest
+    timeout-minutes: 65
+    steps:
+      - name: Pobierz repozytorium
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+      - name: Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: x64
+      - name: Instaluj zaleznosci testowe
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt -r requirements_desktop.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Zweryfikuj obecnosc pakietu dev5
+        shell: pwsh
+        run: |
+          foreach ($name in @('ZASTOSUJ_040_DEV5.py', 'ZASTOSUJ_040_DEV5_PELNA.py', 'rk_dev5_snapshot.py', 'TEST_RK_DEV5.py', 'rk_dev5_acl.py', 'rk_dev5_vault.py', 'rk_dev5_calendar_reconcile.py', 'TEST_RK_DEV5_SECURITY.py')) {
+            if (-not (Test-Path $name)) { throw "Brak $name w glownym katalogu repo" }
+          }
+      - name: Zastosuj poprawki tylko do kodu zrodlowego
+        shell: pwsh
+        run: |
+          $app = Get-Content app.py -Raw -Encoding UTF8
+          if ($app.Contains('VERSION = "0.4.0-dev4"')) {
+            python ZASTOSUJ_040_DEV5_PELNA.py . --dry-run
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            python ZASTOSUJ_040_DEV5_PELNA.py .
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          python ZASTOSUJ_040_DEV5_PELNA.py . --verify
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Testy regresyjne dev5
+        shell: pwsh
+        run: |
+          python TEST_RK_DEV5.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python TEST_RK_DEV5_SECURITY.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Pelny audyt i testy dostepne w repo
+        shell: pwsh
+        run: |
+          python AUDYT_I_TESTY_RK_040_DEV2.py --root . --out RAPORT_AUDYT_040_DEV2.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python RK_KANCELARIA_DESKTOP.pyw --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Sprawdz kompilacje Windows Portable i self-test EXE przed commitem
+        shell: pwsh
+        run: |
+          python -m pip install "pyinstaller>=6.10,<7"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m PyInstaller --noconfirm --clean RK_KANCELARIA_PORTABLE.spec
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $exe = (Resolve-Path "dist\RK KANCELARIA PORTABLE\RK KANCELARIA.exe").Path
+          $p = Start-Process -FilePath $exe -ArgumentList "--self-test" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "EXE self-test: $($p.ExitCode)" }
+      - name: Zapisz testowane zmiany dopiero po poprawnych testach
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- app.py rk_dev3_core.py rk_dev3_calendar.py rk_dev3.py rk_dev4.py rk_routes.py .github/workflows/main.yml TEST_ARCHITEKTURA_040.py RAPORT_JAKOSCI_040.py AUDYT_I_TESTY_RK_040_DEV2.py rk_windows_version.txt rk_dev5_acl.py rk_dev5_vault.py rk_dev5_calendar_reconcile.py rk_dev5_snapshot.py TEST_RK_DEV5.py TEST_RK_DEV5_SECURITY.py ZASTOSUJ_040_DEV5.py ZASTOSUJ_040_DEV5_PELNA.py
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 1) {
+            git commit -m "RK KANCELARIA 0.4.0-dev5 FULL: case ACL, vault recovery and calendar review"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            git push origin HEAD:main
+            if ($LASTEXITCODE -ne 0) { throw 'Nie udalo sie zapisac poprawki do main. Sprawdz uprawnienia Actions.' }
+          } elseif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Pokaz wynik
+        shell: pwsh
+        run: |
+          Write-Host 'Dev5 FULL: testy zakonczone. Po push do main uruchomi sie workflow budowania Portable.'
