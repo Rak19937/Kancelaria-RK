@@ -1,0 +1,40 @@
+/* UX6 accessibility and navigation. Additive; no legacy CSS overwritten. */
+@media (min-width:821px) {
+ .app > .sidebar:not(.dev3-open):not(.dev3-pinned) .nav-link {
+    display:flex !important;align-items:center !important;justify-content:center !important;
+    width:100%;min-height:37px;padding:8px 0 !important;gap:0 !important;
+    text-align:center !important;
+ }
+ .app > .sidebar:not(.dev3-open):not(.dev3-pinned) .nav-link .nav-icon {
+    display:flex !important;align-items:center !important;justify-content:center !important;
+    flex:0 0 28px !important;width:28px !important;min-width:28px !important;
+    margin:0 auto !important;padding:0 !important;line-height:1.25 !important;
+ }
+ .app > .sidebar:not(.dev3-open):not(.dev3-pinned) .nav-system-links,
+ .app > .sidebar:not(.dev3-open):not(.dev3-pinned) .nav-section {width:100%;}
+}
+/* Suggestions are legible expandable proposals rather than tiny cards. */
+.ux6-suggestion-card{border:1px solid #cbd9d1 !important;border-radius:13px !important;
+    margin:12px 0 !important;padding:0 !important;overflow:hidden;background:#fff !important;
+    box-shadow:0 2px 9px rgba(0,24,19,.045)}
+.ux6-suggestion-card>summary{display:flex;gap:10px;align-items:center;cursor:pointer;
+    padding:15px 17px !important;background:#edf5f0;color:#123a30;font-size:15px;font-weight:750;
+    list-style:none;line-height:1.5;}
+.ux6-suggestion-card>summary::-webkit-details-marker{display:none}
+.ux6-suggestion-card>summary:before{content:'▸';font-size:20px;line-height:1;color:#0e644a;flex-shrink:0}
+.ux6-suggestion-card[open]>summary:before{content:'▾'}
+.ux6-suggestion-body{padding:16px 18px;display:block;font-size:15px;line-height:1.55}
+.ux6-suggestion-body label{font-size:14px !important;line-height:1.5 !important}
+.ux6-suggestion-body .small,.ux6-suggestion-body .muted{font-size:13px !important;line-height:1.65 !important}
+.ux6-suggestion-body input,.ux6-suggestion-body select,.ux6-suggestion-body textarea{font-size:15px !important}
+.ux6-phase-row,.ux6-day-item{display:flex;gap:14px;align-items:flex-start;justify-content:space-between;
+    padding:15px 0;border-bottom:1px solid #dee8e2;font-size:15px;line-height:1.55}
+.ux6-phase-row p,.ux6-day-item p{margin:5px 0;color:#58726a}
+.ux6-phase-actions{display:flex;gap:8px;flex-shrink:0}
+.ux6-phase-actions form{margin:0}
+.ux6-phase-status{display:inline-block;margin-left:8px;padding:3px 8px;border:1px solid #bed5c9;
+    border-radius:999px;background:#f1f8f2;font-size:12px;font-weight:750}
+.ux6-day-open{display:block;margin-top:7px;font-size:11px;font-weight:750;color:#12624d;text-decoration:underline;text-underline-offset:2px}
+.ux6-day-open:focus-visible,.ux6-suggestion-card>summary:focus-visible{outline:3px solid #d09c36;outline-offset:2px}
+.ux6-free-select{font-size:13px;color:#456a60;min-height:20px}
+@media(max-width:660px){.ux6-day-item,.ux6-phase-row{display:block}.ux6-phase-actions{margin-top:10px;flex-wrap:wrap}}
