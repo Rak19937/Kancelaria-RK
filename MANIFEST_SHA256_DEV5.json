@@ -1,0 +1,16 @@
+{
+  "version": "0.4.0-dev5",
+  "base_commit": "661612a318bffa0f61b3e8db6b6ab63992fbe21a",
+  "files": {
+    ".github/workflows/aktualizacja-dev5.yml": "b548efef4df6269ff216ce0d71fd1f512bfd48e59873eaa9fd713412d4dd4fb5",
+    "INSTRUKCJA_DEV5.md": "870d041cb6c6c210a49d8a6350e408f968e15aa931f61250e20d2dede9af0980",
+    "TEST_RK_DEV5.py": "3011f5856e089b76e80a81a4e4c9b63d243a56770a5ab238c9db2bf176c3b923",
+    "TEST_RK_DEV5_SECURITY.py": "f9b65198d74dd66a29c247b7b103d34357aaa9ac794cca3b6e928441a7585383",
+    "ZASTOSUJ_040_DEV5.py": "c3bf1bcb4ce6574beb7e9266c9a387d2e2c20ef15baf98992a07fec308b52cf3",
+    "ZASTOSUJ_040_DEV5_PELNA.py": "83766684b97ededf6b49e8327f2efda6715bb802686a3f93a8c8e8cfc3ffc5f2",
+    "rk_dev5_acl.py": "ec47b9d2af86cf6f85511815c24b9659468b349c9c49eca0add6b02036552069",
+    "rk_dev5_calendar_reconcile.py": "527d969ed491214876310999b24e68d0e166cfd83b1d4ec43ab6b7255f1f7aa2",
+    "rk_dev5_snapshot.py": "06ce28cb16cc4912f208db967b1c8abd06fed5e53a0659e3b81e5d25e0b562aa",
+    "rk_dev5_vault.py": "c7f6f3db45ff7e80a271ff3b71c9e20e207a2130d780a4a78b188db1fc83466e"
+  }
+}
