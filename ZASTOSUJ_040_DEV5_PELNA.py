@@ -34,8 +34,10 @@ def patch_app(s):
       '        ensure_dev4_schema(con)\n        ensure_dev5_acl_schema(con)\n        ensure_dev5_vault_schema(con)\n    recover_vault_journal(db,FILES_DIR)\n    start_worker(sys.modules[__name__])',p)
     s=once(s,'            if self.dev4_get(path, qs): return',
       '            if self.dev5_access_get(path, qs): return\n            if self.dev4_get(path, qs): return',p)
-    s=once(s,'        self._autosave_mode = fields.get("_autosave", "") == "1" or self.headers.get("X-Sprawnik-Autosave") == "1"',
-      '        if self.dev5_access_post(path, fields, files): return\n        self._autosave_mode = fields.get("_autosave", "") == "1" or self.headers.get("X-Sprawnik-Autosave") == "1"',p)
+    # Run the new access-control gate *inside* the existing request exception
+    # handler, not before it; malformed input must produce an HTTP error response.
+    s=once(s,'            if self.dev4_post(path, fields, files): return',
+      '            if self.dev5_access_post(path, fields, files): return\n            if self.dev4_post(path, fields, files): return',p)
     s=once(s,"<a class='btn primary-soft' href='/case/{cid}/history'>Historia sprawy</a>",
       "<a class='btn primary-soft' href='/case/{cid}/history'>Historia sprawy</a><a class='btn' href='/case/{cid}/access'>Uprawnienia</a>",p)
     # Session cookies are bearer tokens. Never expose a multi-user installation
@@ -180,7 +182,7 @@ def run(root:Path,verify=False,dry_run=False):
                            'recover_vault_journal'],
                 'rk_dev3.py':['def dev3_calendar_review','def dev3_worktime_page(self,qs=None)'],
                 'rk_dev4.py':['vault_change_safe','def dev4_time_history'],
-                '.github/workflows/main.yml':['TEST_RK_DEV5_SECURITY.py'],
+                '.github/workflows/aktualizacja-dev5.yml':['TEST_RK_DEV5_SECURITY.py','RAPORT_AUDYT_040_DEV2.json'],
                 'rk_dev3_calendar.py':['linked_event(con,provider,eid,obj)'],
                 'TEST_RK_DEV4.py':['ensure_dev5_vault_schema(self.con)'],
                 'TEST_UI_HTTP_040_DEV2.py':["base+'/my-cases'", "assert code==403,'Globalna skrzynka wplywu powinna byc niedostepna'"]}
@@ -196,6 +198,10 @@ def run(root:Path,verify=False,dry_run=False):
         if file.endswith('.py'):ast.parse((root/file).read_text('utf8'),filename=file)
     changes={}
     for rel,transform in BASE_PATCHES.items():
+        # GitHub Actions' default token cannot update workflow files. The YAML
+        # is user-reviewed and uploaded separately, then left untouched here.
+        if rel == '.github/workflows/main.yml':
+            continue
         original=(root/rel).read_text('utf-8')
         patched=transform(original)
         if rel in STAGE2:patched=STAGE2[rel](patched)
