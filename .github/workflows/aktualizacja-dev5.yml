@@ -1,4 +1,4 @@
-name: "RK KANCELARIA - DEV5 UX6: poprawki funkcji i Windows Portable"
+name: "RK KANCELARIA - DEV7: stabilizacja podstaw i Windows Portable"
 
 on:
   workflow_dispatch:
@@ -76,6 +76,29 @@ jobs:
           python -X utf8 -m py_compile app.py rk_dev3.py rk_inbox.py rk_ux6.py
           if ($LASTEXITCODE -ne 0) { throw 'Błąd składni po integracji UX6.' }
 
+      - name: DEV7 - sprawdz dopasowanie poprawki przed zapisem
+        shell: pwsh
+        run: |
+          foreach ($f in @('ZASTOSUJ_DEV7.py','rk_dev7_stability.py','TEST_RK_DEV7.py')) {
+            if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw "Brakuje pliku DEV7: $f" }
+          }
+          python -X utf8 -m py_compile ZASTOSUJ_DEV7.py rk_dev7_stability.py TEST_RK_DEV7.py
+          if ($LASTEXITCODE -ne 0) { throw 'Blad skladni w DEV7.' }
+          python -X utf8 ZASTOSUJ_DEV7.py . --dry-run
+          if ($LASTEXITCODE -ne 0) { throw 'DEV7: niezgodnosc kodu, nic nie zapisano.' }
+
+      - name: DEV7 - zastosuj poprawki i uruchom testy bez danych klientow
+        shell: pwsh
+        run: |
+          python -X utf8 ZASTOSUJ_DEV7.py .
+          if ($LASTEXITCODE -ne 0) { throw 'DEV7: instalator przerwal wdrozenie.' }
+          python -X utf8 ZASTOSUJ_DEV7.py . --verify
+          if ($LASTEXITCODE -ne 0) { throw 'DEV7: kontrola zainstalowanych plikow nie przeszla.' }
+          python -X utf8 TEST_RK_DEV7.py
+          if ($LASTEXITCODE -ne 0) { throw 'DEV7: nowe testy regresji nie przeszly.' }
+          python -X utf8 -m py_compile app.py rk_ux6.py
+          if ($LASTEXITCODE -ne 0) { throw 'DEV7: bledy skladni po aktualizacji.' }
+
       - name: Testy UX6, DEV5 i bezpieczeństwa
         shell: pwsh
         run: |
@@ -142,14 +165,14 @@ jobs:
       - name: Utwórz gotowy ZIP
         shell: pwsh
         run: |
-          Compress-Archive -Path 'dist/RK KANCELARIA PORTABLE/*' -DestinationPath 'RK_KANCELARIA_DEV5_UX6_WINDOWS_PORTABLE.zip' -Force -CompressionLevel Optimal
-          if (-not (Test-Path 'RK_KANCELARIA_DEV5_UX6_WINDOWS_PORTABLE.zip')) { throw 'Nie utworzono ZIP.' }
+          Compress-Archive -Path 'dist/RK KANCELARIA PORTABLE/*' -DestinationPath 'RK_KANCELARIA_DEV7_STABILITY_WINDOWS_PORTABLE.zip' -Force -CompressionLevel Optimal
+          if (-not (Test-Path 'RK_KANCELARIA_DEV7_STABILITY_WINDOWS_PORTABLE.zip')) { throw 'Nie utworzono ZIP.' }
 
       - name: Publikacja wersji przetestowanej
         uses: actions/upload-artifact@v4
         with:
-          name: RK-KANCELARIA-DEV5-UX6-PORTABLE
-          path: RK_KANCELARIA_DEV5_UX6_WINDOWS_PORTABLE.zip
+          name: RK-KANCELARIA-DEV7-STABILITY-PORTABLE
+          path: RK_KANCELARIA_DEV7_STABILITY_WINDOWS_PORTABLE.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -159,10 +182,10 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- app.py rk_dev3.py rk_inbox.py
+          git add -- app.py rk_dev3.py rk_inbox.py rk_ux6.py
           git diff --cached --quiet
           if ($LASTEXITCODE -eq 1) {
-            git commit -m 'RK KANCELARIA UX6: bezpieczne usuwanie i wygodniejszy kalendarz oraz formularze'
+            git commit -m 'RK KANCELARIA DEV7: stabilizacja kasowania spraw, walidacja, kalendarz'
             if ($LASTEXITCODE -ne 0) { throw 'Nie udało się zatwierdzić kodu.' }
             git push origin HEAD:main
             if ($LASTEXITCODE -ne 0) { throw 'Nie udało się wysłać przetestowanych zmian; Portable jest już w artefaktach.' }
@@ -174,7 +197,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: RK-KANCELARIA-UX6-TESTY
+          name: RK-KANCELARIA-DEV7-TESTY
           path: |
             RAPORT_AUDYT_040_DEV2.json
             RAPORT_DEV5_AUDYT_REPO.json
