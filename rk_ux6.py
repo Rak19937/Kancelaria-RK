@@ -224,7 +224,7 @@ class Ux6Mixin:
             tasks=con.execute('''SELECT t.*,c.title case_title FROM tasks t JOIN cases c ON c.id=t.case_id
                    WHERE t.due_date=? AND t.status<>'done' ORDER BY t.id''',(d,)).fetchall()
             appts=con.execute('''SELECT p.*,c.title case_title FROM case_appointments p JOIN cases c ON c.id=p.case_id
-                   WHERE p.appointment_date=? ORDER BY p.appointment_time,p.id''',(d,)).fetchall()
+                   WHERE p.appointment_date=? AND p.status='planned' ORDER BY p.appointment_time,p.id''',(d,)).fetchall()
             events=con.execute('''SELECT e.*,c.title case_title FROM events e JOIN cases c ON c.id=e.case_id
                    WHERE e.event_date=? ORDER BY e.id''',(d,)).fetchall()
             processes=con.execute('''SELECT p.*,c.title case_title FROM process_events p JOIN cases c ON c.id=p.case_id

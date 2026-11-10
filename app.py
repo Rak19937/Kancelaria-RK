@@ -88,12 +88,15 @@ from rk_smart import (
 )
 
 from rk_ux6 import Ux6Mixin, ensure_ux6_schema, delete_case_dependencies, choice_exists as ux6_choice_exists
+from rk_dev7_stability import (check_case_form, preflight_case_delete, verify_backup_snapshot,
+                               assert_deleted_case_integrity)
 
 APP_NAME = "RK KANCELARIA"
 DESKTOP_MODE = os.getenv("RK_KANCELARIA_DESKTOP", "0").strip().lower() in {"1", "true", "yes", "tak"}
 APP_AUTHOR = "ROBERT KŁOSOWSKI"
 VERSION = "0.4.0-dev5"
 RK_UX6_20261108 = True
+RK_DEV7_STABILITY_20261110 = True
 RK_040_DEV5_STABILIZATION_20261108 = True
 RK_040_DEV5_FULL_REPAIR_20261108 = True
 RK_040_DEV4_REPAIR_20261108 = True
@@ -2843,7 +2846,7 @@ class Handler(Ux6Mixin, Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, Ca
             self.send_error(404)
         except Exception as e:
             log_app_exception(path, e)
-            self.send_html(layout("Nie udało się wykonać operacji", f'<div class="card friendly-error"><div class="friendly-error-icon">!</div><h1>Coś poszło nie tak</h1><p>Nie udało się otworzyć tej części programu. Twoje zapisane dane nie zostały usunięte.</p><p><a class="btn primary" href="/">Wróć do pulpitu</a></p><details><summary>Pokaż szczegóły techniczne</summary><pre>{esc(str(e))}</pre><div class="small muted">Log: {esc(str(ERROR_LOG))}</div></details></div>'), 500)
+            self.send_html(layout("Nie udało się wykonać operacji", f'<div class="card friendly-error"><div class="friendly-error-icon">!</div><h1>Coś poszło nie tak</h1><p>Nie udało się dokończyć czynności. Sprawdź, czy zmiana jest widoczna, zanim spróbujesz ponownie. Szczegóły są w logu.</p><p><a class="btn primary" href="/">Wróć do pulpitu</a></p><details><summary>Pokaż szczegóły techniczne</summary><pre>{esc(str(e))}</pre><div class="small muted">Log: {esc(str(ERROR_LOG))}</div></details></div>'), 500)
 
     def setup_page(self, error=''):
         if user_count() > 0:
@@ -3577,6 +3580,13 @@ class Handler(Ux6Mixin, Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, Ca
         self.send_html(layout('Nowa sprawa',body,'cases'))
 
     def case_create(self, f):
+        try:
+            check_case_form(f, STATUS_LABELS, new=True)
+        except ValueError as exc:
+            return self.send_html(layout('Sprawdź dane sprawy',
+                f'<div class="card friendly-error"><h1>Nie zapisano sprawy</h1><p>{esc(str(exc))}</p>'
+                '<p>Wróć do formularza i popraw dane.</p><a class="btn" href="/case/new">Wróć</a></div>',
+                'cases'),400)
         if not f.get('title','').strip() or not f.get('subject','').strip(): return self.redirect('/case/new')
         try: client_eid=int(f.get('client_entity_id','') or 0) or None
         except ValueError: client_eid=None
@@ -4895,6 +4905,13 @@ class Handler(Ux6Mixin, Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, Ca
         self.send_html(layout('Edycja',body,'cases'))
 
     def case_update(self,cid,f):
+        try:
+            check_case_form(f, STATUS_LABELS, new=False)
+        except ValueError as exc:
+            return self.send_html(layout('Sprawdź dane sprawy',
+                f'<div class="card friendly-error"><h1>Nie zapisano zmian</h1><p>{esc(str(exc))}</p>'
+                f'<a class="btn" href="/case/{cid}/edit">Wróć do edycji</a></div>',
+                'cases'),400)
         keys=['signature','internal_signature','client','title','court','department','category','subject','status','waiting_for','next_step','next_date','notes']
         vals=[f.get(k,'').strip() for k in keys]; author=self.current_author(f)
         try: lead=int(f.get('lead_user_id','') or 0) or None
@@ -4969,6 +4986,14 @@ class Handler(Ux6Mixin, Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, Ca
             return self.case_delete_confirm(cid,'Aktywnej sprawy nie można trwale usunąć. Najpierw ustaw status „Zakończona”.')
         if (f.get('confirmation','') or '').strip()!='USUŃ' or f.get('acknowledge')!='1':
             return self.case_delete_confirm(cid,'Nie potwierdzono usunięcia. Wpisz dokładnie „USUŃ” i zaznacz pole potwierdzenia.')
+        # Zweryfikuj powiązania w SAVEPOINT — bez trwałych zmian.
+        try:
+            with db() as con:
+                preflight_case_delete(con,cid,delete_case_dependencies)
+        except (sqlite3.Error,ValueError) as exc:
+            log_app_exception(f'/case/{cid}/preflight',exc)
+            return self.case_delete_confirm(cid,
+                f'Nie można bezpiecznie usunąć tej sprawy. Dane pozostały bez zmian. {exc}')
 
         # Usunięcie całej sprawy omija zwykły Kosz, dlatego najpierw powstaje
         # kompletny, przenośny snapshot możliwy do odtworzenia z ekranu Recovery.
@@ -4984,6 +5009,7 @@ class Handler(Ux6Mixin, Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, Ca
             atomic_write_bytes(backup_path,raw)
             if not backup_path.is_file() or backup_path.stat().st_size!=len(raw):
                 raise RuntimeError('Zapis kopii nie jest kompletny.')
+            verify_backup_snapshot(backup_path,raw)
         except (OSError,RuntimeError) as exc:
             log_app_exception(f'/case/{cid}/save-snapshot',exc)
             return self.case_delete_confirm(cid,f'Nie zapisano kompletnego snapshotu. Sprawa nie została usunięta: {exc}')
@@ -4996,6 +5022,7 @@ class Handler(Ux6Mixin, Dev5AccessMixin, Dev4Mixin, Dev3Mixin, CaseflowMixin, Ca
                 immutable_audit(con,None,'case',cid,'Trwale usunięto sprawę po wykonaniu snapshotu',
                                 f"{c['title']} · kopia: {backup_path.name}",author)
                 delete_case_dependencies(con,cid)
+                assert_deleted_case_integrity(con,cid)
         except (sqlite3.Error,ValueError) as exc:
             log_app_exception(f'/case/{cid}/delete-db',exc)
             return self.case_delete_confirm(cid,
